@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -20,15 +20,54 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _raw_upload_filename(request: Request, body: bytes) -> str | None:
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/pdf" not in content_type and "application/octet-stream" not in content_type:
+        return None
+    if not body:
+        return None
+    return request.headers.get("x-filename", "upload.pdf")
+
+
 @router.post("/documents", response_model=DocumentOut)
-def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)) -> DocumentOut:
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
+async def upload_document(
+    request: Request,
+    file: UploadFile | None = File(default=None),
+    db: Session = Depends(get_db),
+) -> DocumentOut:
+    if file is None:
+        form = await request.form()
+        maybe = form.get("file")
+        if isinstance(maybe, UploadFile):
+            file = maybe
+
+    raw_body: bytes | None = None
+    raw_filename: str | None = None
+    if file is None:
+        raw_body = await request.body()
+        raw_filename = _raw_upload_filename(request, raw_body)
+
+    if file is None and raw_filename is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Missing file upload. Send multipart/form-data with key 'file' "
+                "or raw PDF body with Content-Type application/pdf and optional X-Filename."
+            ),
+        )
+
+    resolved_filename = file.filename if file is not None else raw_filename
+    if not resolved_filename or not resolved_filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    safe_name = Path(file.filename).name
+    safe_name = Path(resolved_filename).name
     stored_path = settings.uploads_dir / safe_name
     with stored_path.open("wb") as f:
-        f.write(file.file.read())
+        if raw_body is not None and file is None:
+            f.write(raw_body)
+        else:
+            assert file is not None
+            f.write(await file.read())
 
     try:
         sections = parse_pdf_into_sections(str(stored_path))
