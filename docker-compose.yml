@@ -1,4 +1,16 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: complitrace-postgres
+    environment:
+      POSTGRES_DB: complitrace
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   qdrant:
     image: qdrant/qdrant:v1.12.1
     container_name: complitrace-qdrant
@@ -23,5 +35,22 @@ services:
     ports:
       - "8002:8002"
 
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: apps/ingestion-service/Dockerfile
+    container_name: complitrace-ingestion-service
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/complitrace
+      UPLOADS_DIR: /app/storage/uploads
+    ports:
+      - "8001:8001"
+    volumes:
+      - ingestion_storage:/app/storage
+
 volumes:
   qdrant_storage:
+  postgres_data:
+  ingestion_storage:
