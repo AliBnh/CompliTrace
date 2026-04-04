@@ -15,19 +15,44 @@ class ParsedSection:
 
 
 HEADING_RE = re.compile(r"^[A-Z][A-Za-z0-9\s,/:&()\-]{2,90}$")
+PAGE_HEADING_RE = re.compile(r"^page\s+\d+$", re.IGNORECASE)
+SECTION_NUM_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z][A-Za-z0-9\s\-/&()]{2,80}$")
+FILE_PATH_RE = re.compile(r"([A-Za-z]:\\|/).*(\\.pdf|\\.docx?)", re.IGNORECASE)
+NOISE_LINE_RE = re.compile(r"^y:\\\\|approved policies|approved templates", re.IGNORECASE)
 
 
 def is_heading(line: str) -> bool:
     s = line.strip()
     if not s:
         return False
+    if PAGE_HEADING_RE.match(s):
+        return False
+    if len(s) < 5:
+        return False
+    if "/" in s and any(len(tok) <= 3 for tok in s.split("/")):
+        return False
     if len(s.split()) > 12:
         return False
-    if s.endswith("."):
+    if s.endswith(".") and not SECTION_NUM_HEADING_RE.match(s):
         return False
     if s.lower().startswith(("article ", "chapter ")):
         return False
+    if SECTION_NUM_HEADING_RE.match(s):
+        return True
     return bool(HEADING_RE.match(s) and (s.istitle() or s.isupper()))
+
+
+def is_noise_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+    if FILE_PATH_RE.search(s):
+        return True
+    if NOISE_LINE_RE.search(s):
+        return True
+    if PAGE_HEADING_RE.match(s):
+        return True
+    return False
 
 
 def _merge_small_sections(sections: list[ParsedSection], min_words: int = 50) -> list[ParsedSection]:
@@ -68,7 +93,7 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
     pages = []
     for i, page in enumerate(doc, start=1):
         text = page.get_text("text")
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not is_noise_line(ln)]
         pages.append((i, lines))
 
     sections: list[ParsedSection] = []
@@ -90,7 +115,10 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
                             page_end=last_page,
                         )
                     )
-                current_title = line
+                normalized_title = line
+                if SECTION_NUM_HEADING_RE.match(line):
+                    normalized_title = re.sub(r"^\d{1,2}\.\s+", "", line).strip()
+                current_title = normalized_title
                 current_lines = []
                 current_start = page_num
                 last_page = page_num
