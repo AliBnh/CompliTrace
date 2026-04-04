@@ -1,4 +1,3 @@
-````markdown
 # CompliTrace
 
 **CompliTrace** is a GDPR Privacy Policy Pre-Audit Copilot that automates the first-pass review of internal privacy and data-handling policy documents.
@@ -489,39 +488,27 @@ The entire system is designed to run locally with Docker Compose.
 - prometheus
 - grafana
 
-### Startup
-
-```bash
-docker-compose up
-```
-
 ### Environment configuration
-
 Expected environment variables include:
 
-- LLM API keys
+LLM API keys
 - database connection settings
 - service URLs
 - model configuration
 
----
 
-## Demo Workflow
-
+### Demo Workflow
 A complete demo should follow this path:
 
-1. Upload a clean internal privacy or data-handling policy PDF
-2. Review extracted sections
-3. Trigger the GDPR gap audit
-4. Inspect findings and evidence
-5. Generate and download the PDF report
+- Upload a clean internal privacy or data-handling policy PDF
+- Review extracted sections
+- Trigger the GDPR gap audit
+- Inspect findings and evidence
+- Generate and download the PDF report
 
 The SRS expects the entire live demo workflow to be completable in under 6 minutes.
 
----
-
-## Acceptance Baseline
-
+### Acceptance Baseline
 The MVP is considered complete when it can:
 
 - upload and parse a valid policy PDF
@@ -534,12 +521,9 @@ The MVP is considered complete when it can:
 - run end-to-end through Docker Compose
 - pass the GitHub Actions pipeline
 
----
 
 ## Limitations
-
 This is an intentionally narrow MVP.
-
 Known limitations include:
 
 - only clean, text-based PDFs are supported
@@ -553,10 +537,8 @@ Known limitations include:
 - findings are not legal advice
 - the system is designed for first-pass analyst-assisted review only
 
----
 
 ## Future Improvements
-
 Potential future directions include:
 
 - support for additional regulatory standards
@@ -567,16 +549,3 @@ Potential future directions include:
 - production deployment hardening
 - richer document parsing
 - formal topic-to-obligation modeling for more consistent classification
-
----
-
-## Project Status
-
-**Status:** Draft MVP design / implementation target
-**Version:** SRS v1.1
-**Date:** April 4, 2026
-
----
-
-
-```
