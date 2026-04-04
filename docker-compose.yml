@@ -1,0 +1,27 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    container_name: complitrace-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  knowledge-service:
+    build:
+      context: .
+      dockerfile: apps/knowledge-service/Dockerfile
+    container_name: complitrace-knowledge-service
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: gdpr_chunks
+      GDPR_CHUNKS_PATH: /app/data/processed/gdpr_chunks.jsonl
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      FORCE_REINDEX: "false"
+    ports:
+      - "8002:8002"
+
+volumes:
+  qdrant_storage:
