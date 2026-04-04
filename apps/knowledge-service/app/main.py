@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 
 class SearchRequest(BaseModel):
@@ -55,12 +55,12 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "gdpr_chunks")
 GDPR_CHUNKS_PATH = os.getenv("GDPR_CHUNKS_PATH", "/app/data/processed/gdpr_chunks.jsonl")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 FORCE_REINDEX = os.getenv("FORCE_REINDEX", "false").lower() == "true"
 
 
 app = FastAPI(title="CompliTrace Knowledge Service", version="0.1.0")
-embedder: SentenceTransformer | None = None
+embedder: TextEmbedding | None = None
 qdrant: QdrantClient | None = None
 
 
@@ -103,10 +103,11 @@ def reindex_if_needed(chunks: list[dict[str, Any]]) -> dict[str, int]:
 
     if FORCE_REINDEX and count > 0:
         qdrant.delete_collection(COLLECTION_NAME)
-        ensure_collection(vector_size=embedder.get_sentence_embedding_dimension())
+        vector_size = len(next(embedder.embed(["vector probe"])))
+        ensure_collection(vector_size=vector_size)
 
     texts = [c["content"] for c in chunks]
-    vectors = embedder.encode(texts, batch_size=32, show_progress_bar=False, normalize_embeddings=True)
+    vectors = list(embedder.embed(texts))
 
     points = []
     for chunk, vector in zip(chunks, vectors):
@@ -129,8 +130,9 @@ def startup() -> None:
     global qdrant, embedder
 
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-    embedder = SentenceTransformer(EMBEDDING_MODEL)
-    ensure_collection(vector_size=embedder.get_sentence_embedding_dimension())
+    embedder = TextEmbedding(model_name=EMBEDDING_MODEL)
+    vector_size = len(next(embedder.embed(["vector probe"])))
+    ensure_collection(vector_size=vector_size)
     chunks = load_chunks(GDPR_CHUNKS_PATH)
     stats = reindex_if_needed(chunks)
     app.state.index_stats = stats
@@ -147,7 +149,7 @@ def search(req: SearchRequest) -> SearchResponse:
     assert qdrant is not None
     assert embedder is not None
 
-    query_vector = embedder.encode(req.query, normalize_embeddings=True).tolist()
+    query_vector = next(embedder.embed([req.query])).tolist()
     response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,

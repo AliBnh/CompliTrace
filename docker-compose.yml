@@ -18,7 +18,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: gdpr_chunks
       GDPR_CHUNKS_PATH: /app/data/processed/gdpr_chunks.jsonl
-      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
       FORCE_REINDEX: "false"
     ports:
       - "8002:8002"

@@ -18,6 +18,8 @@ FastAPI service that indexes GDPR chunks into Qdrant and exposes retrieval APIs.
 docker compose up -d --build
 ```
 
+This service uses `fastembed` (`BAAI/bge-small-en-v1.5` by default) for vector generation.
+
 ## Example calls
 
 ```bash
