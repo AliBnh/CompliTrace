@@ -35,17 +35,21 @@ async def upload_document(
     file: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
 ) -> DocumentOut:
-    if file is None:
+    content_type = request.headers.get("content-type", "").lower()
+    is_raw_upload = ("application/pdf" in content_type) or ("application/octet-stream" in content_type)
+
+    raw_body: bytes | None = None
+    raw_filename: str | None = None
+
+    if file is None and is_raw_upload:
+        raw_body = await request.body()
+        raw_filename = _raw_upload_filename(request, raw_body)
+
+    if file is None and not is_raw_upload:
         form = await request.form()
         maybe = form.get("file")
         if isinstance(maybe, UploadFile):
             file = maybe
-
-    raw_body: bytes | None = None
-    raw_filename: str | None = None
-    if file is None:
-        raw_body = await request.body()
-        raw_filename = _raw_upload_filename(request, raw_body)
 
     if file is None and raw_filename is None:
         raise HTTPException(
