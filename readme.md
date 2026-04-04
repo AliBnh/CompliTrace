@@ -496,8 +496,8 @@ LLM API keys
 - service URLs
 - model configuration
 
-
-### Demo Workflow
+---
+## Demo Workflow
 A complete demo should follow this path:
 
 - Upload a clean internal privacy or data-handling policy PDF
@@ -508,7 +508,7 @@ A complete demo should follow this path:
 
 The SRS expects the entire live demo workflow to be completable in under 6 minutes.
 
-### Acceptance Baseline
+## Acceptance Baseline
 The MVP is considered complete when it can:
 
 - upload and parse a valid policy PDF
