@@ -155,6 +155,18 @@ def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
     return f
 
 
+def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmCitation]) -> LlmFinding:
+    if f.status in {"gap", "partial"} and not valid_citations:
+        return LlmFinding(
+            status="needs review",
+            severity=None,
+            gap_note="Substantive finding rejected: no validated GDPR citation evidence.",
+            remediation_note=None,
+            citations=[],
+        )
+    return f
+
+
 def run_audit(db: Session, audit: Audit) -> Audit:
     ingestion = IngestionClient(settings.ingestion_service_url)
     knowledge = KnowledgeClient(settings.knowledge_service_url)
@@ -246,6 +258,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         f = _coerce_finding(llm_finding)
         valid_citations = _validate_citations(f.citations, chunks)
+        f = _enforce_substantive_citation_gate(f, valid_citations)
 
         finding_row = Finding(
             audit_id=audit.id,

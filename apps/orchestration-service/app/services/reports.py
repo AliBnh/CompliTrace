@@ -26,6 +26,21 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         .order_by(Finding.section_id.asc())
     ).all()
 
+    total = len(findings)
+    by_status = {
+        "compliant": sum(1 for f in findings if f.status == "compliant"),
+        "partial": sum(1 for f in findings if f.status == "partial"),
+        "gap": sum(1 for f in findings if f.status == "gap"),
+        "needs review": sum(1 for f in findings if f.status == "needs review"),
+        "not applicable": sum(1 for f in findings if f.status == "not applicable"),
+    }
+    substantive = [f for f in findings if f.status in {"partial", "gap"}]
+    substantive_with_citations = sum(1 for f in substantive if len(f.citations) > 0)
+    citation_coverage = (substantive_with_citations / len(substantive)) if substantive else 1.0
+    parse_failures = sum(1 for f in findings if f.gap_note == "LLM parse failure")
+    parse_failure_rate = (parse_failures / total) if total else 0.0
+    quality_score = max(0.0, 10.0 - (parse_failure_rate * 6.0) - ((1.0 - citation_coverage) * 4.0))
+
     lines = [
         "CompliTrace GDPR Gap Report",
         f"Audit ID: {audit.id}",
@@ -33,6 +48,17 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         f"Model: {audit.model_provider}:{audit.model_name}",
         f"Embedding model: {audit.embedding_model}",
         f"Corpus version: {audit.corpus_version}",
+        "",
+        "Executive summary",
+        f"- Total findings: {total}",
+        f"- Compliant: {by_status['compliant']}",
+        f"- Partial: {by_status['partial']}",
+        f"- Gap: {by_status['gap']}",
+        f"- Needs review: {by_status['needs review']}",
+        f"- Not applicable: {by_status['not applicable']}",
+        f"- Substantive citation coverage: {citation_coverage:.0%}",
+        f"- LLM parse failure rate: {parse_failure_rate:.0%}",
+        f"- Report quality score (heuristic): {quality_score:.1f}/10",
         "",
     ]
 

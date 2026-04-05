@@ -14,7 +14,9 @@ SYSTEM_PROMPT = (
     "You are a GDPR compliance analyst. Return strict JSON with keys: "
     "status, severity, gap_note, remediation_note, citations. "
     "Allowed status: compliant, partial, gap, needs review. "
-    "Citations must only reference provided chunks and include chunk_id + article_number."
+    "Citations must only reference provided chunks and include chunk_id + article_number. "
+    "If status is partial or gap, include at least one concrete citation. "
+    "If evidence is weak, return needs review instead of speculating."
 )
 
 STATUS_MAP = {
@@ -53,7 +55,8 @@ def _build_user_prompt(section_title: str, section_content: str, chunks: list[Re
         f"Section content:\n{section_content[:5000]}\n\n"
         f"Retrieved GDPR chunks:\n{joined}\n\n"
         "Apply frozen rubric. If uncertain, return needs review. "
-        "For gap/partial provide non-empty gap_note and remediation_note."
+        "For gap/partial provide non-empty gap_note and remediation_note with at least one citation tied to a retrieved chunk. "
+        "Do not cite GDPR articles not present in retrieved chunks."
     )
 
 

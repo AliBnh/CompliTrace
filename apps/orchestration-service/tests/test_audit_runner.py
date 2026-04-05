@@ -3,8 +3,8 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.services.audit_runner import _evidence_sufficient, _is_not_applicable, _retry_needed
-from app.services.clients import RetrievalChunk, SectionData
+from app.services.audit_runner import _enforce_substantive_citation_gate, _evidence_sufficient, _is_not_applicable, _retry_needed
+from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
 
 def test_not_applicable_admin_section():
@@ -40,3 +40,29 @@ def test_evidence_sufficient_true_case():
         RetrievalChunk(chunk_id="c3", article_number="17", article_title="", paragraph_ref=None, content="aux", score=0.30),
     ]
     assert _evidence_sufficient(chunks) is True
+
+
+def test_substantive_finding_without_citations_is_downgraded():
+    finding = LlmFinding(
+        status="partial",
+        severity="high",
+        gap_note="Missing legal basis",
+        remediation_note="Add legal basis",
+        citations=[],
+    )
+    gated = _enforce_substantive_citation_gate(finding, valid_citations=[])
+    assert gated.status == "needs review"
+    assert gated.severity is None
+
+
+def test_substantive_finding_with_citations_is_kept():
+    finding = LlmFinding(
+        status="gap",
+        severity="high",
+        gap_note="Missing retention period",
+        remediation_note="Add retention period",
+        citations=[],
+    )
+    citation = LlmCitation(chunk_id="c1", article_number="13")
+    gated = _enforce_substantive_citation_gate(finding, valid_citations=[citation])
+    assert gated.status == "gap"
