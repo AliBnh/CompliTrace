@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import httpx
 from pydantic import BaseModel, Field
 
@@ -25,9 +27,24 @@ class RetrievalChunk(BaseModel):
 class IngestionClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        self.max_attempts = 4
+        self.retry_delay_seconds = 0.4
+
+    def _request_with_retry(self, method: str, path: str, **kwargs) -> httpx.Response:
+        last_exc: httpx.RequestError | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return httpx.request(method, f"{self.base_url}{path}", **kwargs)
+            except httpx.RequestError as exc:
+                last_exc = exc
+                if attempt == self.max_attempts:
+                    raise
+                time.sleep(self.retry_delay_seconds * attempt)
+        assert last_exc is not None
+        raise last_exc
 
     def get_sections(self, document_id: str) -> list[SectionData]:
-        resp = httpx.get(f"{self.base_url}/documents/{document_id}/sections", timeout=30)
+        resp = self._request_with_retry("GET", f"/documents/{document_id}/sections", timeout=30)
         resp.raise_for_status()
         return [SectionData.model_validate(x) for x in resp.json()]
 
@@ -35,16 +52,31 @@ class IngestionClient:
 class KnowledgeClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        self.max_attempts = 4
+        self.retry_delay_seconds = 0.4
+
+    def _request_with_retry(self, method: str, path: str, **kwargs) -> httpx.Response:
+        last_exc: httpx.RequestError | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return httpx.request(method, f"{self.base_url}{path}", **kwargs)
+            except httpx.RequestError as exc:
+                last_exc = exc
+                if attempt == self.max_attempts:
+                    raise
+                time.sleep(self.retry_delay_seconds * attempt)
+        assert last_exc is not None
+        raise last_exc
 
     def search(self, query: str, k: int = 5) -> list[RetrievalChunk]:
-        resp = httpx.post(f"{self.base_url}/search", json={"query": query, "k": k}, timeout=45)
+        resp = self._request_with_retry("POST", "/search", json={"query": query, "k": k}, timeout=45)
         resp.raise_for_status()
         payload = resp.json()
         results = payload["results"] if isinstance(payload, dict) and "results" in payload else payload
         return [RetrievalChunk.model_validate(x) for x in results]
 
     def get_chunk(self, chunk_id: str) -> dict:
-        resp = httpx.get(f"{self.base_url}/chunks/{chunk_id}", timeout=30)
+        resp = self._request_with_retry("GET", f"/chunks/{chunk_id}", timeout=30)
         resp.raise_for_status()
         return resp.json()
 

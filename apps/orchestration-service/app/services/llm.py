@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable
 
 import httpx
@@ -44,23 +45,38 @@ def _build_user_prompt(section_title: str, section_content: str, chunks: list[Re
 
 
 def _groq_chat(api_key: str, model: str, temperature: float, user_prompt: str) -> str:
-    resp = httpx.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model,
-            "temperature": temperature,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "response_format": {"type": "json_object"},
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    last_error: httpx.HTTPStatusError | None = None
+    for attempt in range(3):
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "temperature": temperature,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "response_format": {"type": "json_object"},
+            },
+            timeout=60,
+        )
+        try:
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if exc.response.status_code != 429 or attempt == 2:
+                raise
+            retry_after_raw = exc.response.headers.get("retry-after")
+            try:
+                retry_after = float(retry_after_raw) if retry_after_raw is not None else 2.0
+            except ValueError:
+                retry_after = 2.0
+            time.sleep(retry_after)
+    assert last_error is not None
+    raise last_error
 
 
 def _gemini_chat(api_key: str, model: str, temperature: float, user_prompt: str) -> str:
@@ -69,10 +85,20 @@ def _gemini_chat(api_key: str, model: str, temperature: float, user_prompt: str)
         "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
         "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{user_prompt}"}]}],
     }
-    resp = httpx.post(url, json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+    last_error: httpx.HTTPStatusError | None = None
+    for attempt in range(3):
+        resp = httpx.post(url, json=payload, timeout=60)
+        try:
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if exc.response.status_code != 429 or attempt == 2:
+                raise
+            time.sleep(2.0)
+    assert last_error is not None
+    raise last_error
 
 
 def run_llm_classification(

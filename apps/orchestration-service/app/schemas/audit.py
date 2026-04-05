@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class CitationOut(BaseModel):
@@ -26,6 +26,8 @@ class AuditCreate(BaseModel):
 
 
 class AuditOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     document_id: str
     status: str

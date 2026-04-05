@@ -80,3 +80,54 @@ def test_returns_none_when_all_providers_fail(monkeypatch):
 
     assert finding is None
     assert raw == ""
+
+
+def test_groq_retries_429_and_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    class StubResponse:
+        def __init__(self, status_code: int, payload: dict | None = None, headers: dict | None = None):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.headers = headers or {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"{self.status_code}",
+                    request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+                    response=httpx.Response(self.status_code, headers=self.headers),
+                )
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, headers, json, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return StubResponse(429, headers={"retry-after": "0"})
+        return StubResponse(
+            200,
+            payload={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"status":"compliant","severity":null,"gap_note":null,"remediation_note":null,"citations":[]}'
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    monkeypatch.setattr("app.services.llm.time.sleep", lambda _seconds: None)
+
+    raw = llm._groq_chat(
+        api_key="gk",
+        model="primary-model",
+        temperature=0.1,
+        user_prompt="prompt",
+    )
+
+    assert calls["n"] == 2
+    assert "compliant" in raw
