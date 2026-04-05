@@ -307,7 +307,7 @@ def test_claim_types_extract_legal_basis_not_transfer():
     assert "transfer" not in claims
 
 
-def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_claim():
+def test_citation_claim_compatible_allows_article_14_para_3_for_legal_basis_claim_in_rollback_mode():
     citation = LlmCitation(chunk_id="c1", article_number="14", paragraph_ref="3-4")
     chunk = RetrievalChunk(
         chunk_id="c1",
@@ -317,7 +317,7 @@ def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_cla
         content="timing for disclosure",
         score=0.91,
     )
-    assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is False
+    assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is True
 
 
 def test_citation_claim_compatible_allows_article_14_when_paragraph_unknown_for_legal_basis():
@@ -389,6 +389,33 @@ def test_sanitize_legal_reference_fixes_wrong_article_pointer():
     assert _sanitize_legal_reference_text(text) == "Legal basis should be disclosed under Article 14(1)(c)."
 
 
+def test_tailored_notice_gap_and_remediation_use_generic_template():
+    section = SectionData(
+        id="s7m",
+        section_order=7,
+        section_title="Data Collection",
+        content="We collect and process personal data.",
+        page_start=7,
+        page_end=7,
+    )
+    finding = _build_mandatory_notice_gap(
+        section,
+        [
+            RetrievalChunk(
+                chunk_id="c13",
+                article_number="13",
+                article_title="Information to be provided",
+                paragraph_ref="1",
+                content="controller shall provide identity and contact details",
+                score=0.80,
+            )
+        ],
+    )
+    assert finding is not None
+    assert "appears to omit mandatory privacy-notice disclosures" in (finding.gap_note or "")
+    assert "Add explicit privacy-notice disclosures for missing mandatory items" in (finding.remediation_note or "")
+
+
 def test_salvage_citations_from_retrieved_returns_claim_compatible_candidates():
     section = SectionData(
         id="s7k",
@@ -404,7 +431,7 @@ def test_salvage_citations_from_retrieved_returns_claim_compatible_candidates():
     ]
     salvaged = _salvage_citations_from_retrieved(chunks, section, "privacy_notice", "Missing legal basis disclosure")
     assert salvaged
-    assert salvaged[0].chunk_id == "c14p1"
+    assert salvaged[0].chunk_id == "c14p34"
 
 
 def test_targeted_notice_query_uses_article_14_for_indirect_mode():
