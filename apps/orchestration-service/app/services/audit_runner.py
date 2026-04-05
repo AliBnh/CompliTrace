@@ -76,7 +76,7 @@ MODE_ARTICLE_HINTS: dict[str, str] = {
     "internal_policy": "prioritize GDPR Articles 5, 24, 25, 30, 32 and accountability obligations",
 }
 
-PRIVACY_NOTICE_PREFERRED_ARTICLES = {5, 6, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 44, 45, 46, 47, 49}
+PRIVACY_NOTICE_PREFERRED_ARTICLES = {5, 6, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
 PRIVACY_NOTICE_DISCOURAGED_ARTICLES = {30, 88}
 INTERNAL_POLICY_PREFERRED_ARTICLES = {5, 24, 25, 30, 32, 35}
 
@@ -163,6 +163,31 @@ NOTICE_REQUIREMENT_LABELS: dict[str, str] = {
     "rights": "data subject rights information",
     "retention": "retention period or criteria",
     "complaint": "complaint-right and supervisory authority details",
+}
+
+NOTICE_SECTION_TITLE_SIGNALS = {
+    "privacy notice",
+    "privacy policy",
+    "data we collect",
+    "information we collect",
+    "how we use your data",
+    "personal data",
+    "your rights",
+    "retention",
+    "contact us",
+    "international transfer",
+}
+
+NOTICE_SECTION_CONTENT_SIGNALS = {
+    "we collect",
+    "we process",
+    "personal data",
+    "data subject",
+    "your rights",
+    "legal basis",
+    "retention period",
+    "supervisory authority",
+    "complaint",
 }
 
 
@@ -341,7 +366,7 @@ def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, d
             return False
         if article == 30 and not _contains_any(section_ctx, ROPA_SIGNALS):
             return False
-        if article == 46 and not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        if article in {44, 45, 46, 47, 49} and not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
             return False
     preferred = _preferred_articles_for_section(section, document_mode)
     if article in preferred:
@@ -450,11 +475,25 @@ def _fallback_notice_citations(section: SectionData, chunks: list[RetrievalChunk
 
 def _missing_notice_requirements(section: SectionData) -> list[str]:
     text = _section_context_signals(section)
+    if not _is_notice_disclosure_section(section):
+        return []
     missing: list[str] = []
     for req, signals in NOTICE_REQUIREMENT_SIGNALS.items():
         if not _contains_any(text, signals):
             missing.append(req)
     return missing
+
+
+def _is_notice_disclosure_section(section: SectionData) -> bool:
+    title = _norm(section.section_title)
+    text = _section_context_signals(section)
+    title_hits = sum(1 for signal in NOTICE_SECTION_TITLE_SIGNALS if signal in title)
+    content_hits = sum(1 for signal in NOTICE_SECTION_CONTENT_SIGNALS if signal in text)
+    if title_hits >= 1:
+        return True
+    if content_hits >= 2:
+        return True
+    return "we collect" in text and ("you" in text or "personal data" in text)
 
 
 def _collection_mode(section: SectionData) -> str:
@@ -471,6 +510,8 @@ def _collection_mode(section: SectionData) -> str:
     if has_indirect:
         return "indirect"
     if has_direct:
+        return "direct"
+    if "we collect" in ctx and "personal data" in ctx:
         return "direct"
     if "we collect" in ctx and "you" in ctx:
         return "direct"

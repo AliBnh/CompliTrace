@@ -11,6 +11,7 @@ from app.services.audit_runner import (
     _evidence_sufficient,
     _fallback_notice_citations,
     _is_legally_relevant_citation,
+    _is_notice_disclosure_section,
     _is_not_applicable,
     _paragraph_ref_compatible,
     _rerank_chunks_for_mode,
@@ -141,6 +142,19 @@ def test_legal_relevance_rejects_article_46_without_transfer_signals():
     assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
 
 
+def test_legal_relevance_rejects_article_44_without_transfer_signals():
+    section = SectionData(
+        id="s4b",
+        section_order=4,
+        section_title="Data Categories",
+        content="We process account and billing data to provide services.",
+        page_start=4,
+        page_end=4,
+    )
+    citation = LlmCitation(chunk_id="c44", article_number="44")
+    assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
+
+
 def test_build_mandatory_notice_gap_when_multiple_required_disclosures_missing():
     section = SectionData(
         id="s5",
@@ -256,6 +270,30 @@ def test_collection_mode_mixed_when_both_signals_present():
         page_end=7,
     )
     assert _collection_mode(section) == "mixed"
+
+
+def test_collection_mode_direct_when_collect_personal_data_without_other_hints():
+    section = SectionData(
+        id="s7g",
+        section_order=7,
+        section_title="Data Handling",
+        content="We collect personal data for account support and fraud prevention.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _collection_mode(section) == "direct"
+
+
+def test_notice_disclosure_section_false_for_non_notice_content():
+    section = SectionData(
+        id="s7h",
+        section_order=7,
+        section_title="Information Security",
+        content="We apply technical and organizational controls for system hardening.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _is_notice_disclosure_section(section) is False
 
 
 def test_targeted_notice_query_uses_article_14_for_indirect_mode():
