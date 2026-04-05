@@ -1,45 +1,159 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.models.audit import Audit, Finding, Report
+from app.services.clients import IngestionClient
 
 
-def _write_pdf(lines: list[str], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    max_chars = 100
-    wrapped_lines: list[str] = []
-    for line in lines:
-        if not line:
-            wrapped_lines.append("")
+class _TextBlock(NamedTuple):
+    text: str
+    font_size: int = 10
+    top_gap: int = 0
+    bullet: bool = False
+
+
+def _wrap_text(text: str, max_chars: int, initial_indent: str = "", continuation_indent: str = "") -> list[str]:
+    if not text:
+        return [""]
+
+    words = text.split()
+    if not words:
+        return [""]
+
+    wrapped: list[str] = []
+    current = initial_indent
+    current_len = len(initial_indent)
+    line_limit = max_chars
+
+    for word in words:
+        prefix = " " if current_len > len(initial_indent if not wrapped else continuation_indent) else ""
+        candidate = f"{current}{prefix}{word}" if current else f"{word}"
+        if len(candidate) <= line_limit:
+            current = candidate
+            current_len = len(current)
             continue
-        wrapped_lines.extend(line[i : i + max_chars] for i in range(0, len(line), max_chars))
 
-    y = 790
-    commands = ["BT", "/F1 11 Tf", "50 790 Td"]
-    for line in wrapped_lines:
-        safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        commands.append(f"({safe}) Tj")
-        y -= 14
-        if y < 60:
-            break
-        commands.append("0 -14 Td")
-    commands.append("ET")
-    content_stream = "\n".join(commands).encode("latin-1", errors="replace")
+        if current:
+            wrapped.append(current)
+        current = f"{continuation_indent}{word}"
+        current_len = len(current)
 
-    objects: list[bytes] = [
-        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
-        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-        f"5 0 obj\n<< /Length {len(content_stream)} >>\nstream\n".encode("ascii")
-        + content_stream
-        + b"\nendstream\nendobj\n",
-    ]
+        if len(current) > line_limit:
+            chunk_len = max(8, line_limit - len(continuation_indent))
+            for idx in range(0, len(word), chunk_len):
+                chunk = word[idx : idx + chunk_len]
+                wrapped.append(f"{continuation_indent}{chunk}")
+            current = ""
+            current_len = 0
+
+    if current:
+        wrapped.append(current)
+    return wrapped
+
+
+def _estimate_max_chars(font_size: int, page_width: int, margin_left: int, margin_right: int) -> int:
+    usable_width = page_width - margin_left - margin_right
+    # Approximate average Helvetica glyph width in points.
+    avg_char_width = max(4.5, font_size * 0.55)
+    return max(24, int(usable_width / avg_char_width))
+
+
+def _write_pdf(blocks: list[_TextBlock], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    page_width = 595
+    page_height = 842
+    margin_left = 50
+    margin_right = 50
+    margin_top = 60
+    margin_bottom = 60
+    default_line_gap = 4
+
+    pages: list[list[_TextBlock]] = [[]]
+    cursor_y = page_height - margin_top
+
+    for block in blocks:
+        font_size = block.font_size
+        line_height = font_size + default_line_gap
+        max_chars = _estimate_max_chars(font_size, page_width, margin_left, margin_right)
+        wrapped = _wrap_text(
+            block.text,
+            max_chars=max_chars,
+            initial_indent="• " if block.bullet else "",
+            continuation_indent="  " if block.bullet else "",
+        )
+
+        needed_height = block.top_gap + (line_height * max(1, len(wrapped)))
+        if cursor_y - needed_height < margin_bottom and pages[-1]:
+            pages.append([])
+            cursor_y = page_height - margin_top
+
+        pages[-1].append(block)
+        cursor_y -= needed_height
+
+    if not pages or (len(pages) == 1 and not pages[0]):
+        pages = [[_TextBlock("CompliTrace Report: no content available.")]]
+
+    page_object_ids: list[int] = []
+    objects: list[bytes] = []
+
+    # 1 catalog, 2 pages root, 3 font
+    objects.append(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+    objects.append(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n")
+    objects.append(b"3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+    next_obj_id = 4
+    for page_blocks in pages:
+        page_id = next_obj_id
+        content_id = next_obj_id + 1
+        next_obj_id += 2
+        page_object_ids.append(page_id)
+
+        cursor_y = page_height - margin_top
+        commands = ["BT", f"{margin_left} {cursor_y} Td"]
+        for block in page_blocks:
+            font_size = block.font_size
+            line_height = font_size + default_line_gap
+            max_chars = _estimate_max_chars(font_size, page_width, margin_left, margin_right)
+            wrapped = _wrap_text(
+                block.text,
+                max_chars=max_chars,
+                initial_indent="• " if block.bullet else "",
+                continuation_indent="  " if block.bullet else "",
+            )
+
+            if block.top_gap:
+                commands.append(f"0 -{block.top_gap} Td")
+                cursor_y -= block.top_gap
+
+            commands.append(f"/F1 {font_size} Tf")
+            for idx, line in enumerate(wrapped):
+                safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+                commands.append(f"({safe}) Tj")
+                if idx != len(wrapped) - 1:
+                    commands.append(f"0 -{line_height} Td")
+            commands.append(f"0 -{line_height} Td")
+            cursor_y -= line_height * max(1, len(wrapped))
+        commands.append("ET")
+        content_stream = "\n".join(commands).encode("latin-1", errors="replace")
+
+        objects.append(
+            f"{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>\nendobj\n".encode("ascii")
+        )
+        objects.append(
+            f"{content_id} 0 obj\n<< /Length {len(content_stream)} >>\nstream\n".encode("ascii")
+            + content_stream
+            + b"\nendstream\nendobj\n"
+        )
+
+    kids = " ".join(f"{pid} 0 R" for pid in page_object_ids)
+    objects[1] = f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {len(page_object_ids)} >>\nendobj\n".encode("ascii")
 
     pdf = bytearray(b"%PDF-1.4\n")
     offsets = [0]
@@ -55,6 +169,28 @@ def _write_pdf(lines: list[str], out_path: Path) -> None:
         f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n".encode("ascii")
     )
     out_path.write_bytes(bytes(pdf))
+
+
+def _section_labels(audit: Audit) -> dict[str, str]:
+    try:
+        sections = IngestionClient(settings.ingestion_service_url).get_sections(audit.document_id)
+    except Exception:
+        return {}
+
+    labels: dict[str, str] = {}
+    for section in sections:
+        if section.section_title.strip():
+            labels[section.id] = f"Section {section.section_order}: {section.section_title}"
+        else:
+            labels[section.id] = f"Section {section.section_order}"
+    return labels
+
+
+def _format_citation_label(article_number: str, article_title: str, paragraph_ref: str | None) -> str:
+    title = article_title.strip() or "Untitled article"
+    if paragraph_ref:
+        return f"GDPR Article {article_number} — {title} (Paragraph {paragraph_ref})"
+    return f"GDPR Article {article_number} — {title}"
 
 
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
@@ -95,43 +231,48 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         - ((1.0 - citation_coverage) * 3.0)
         - (needs_review_rate * 3.0),
     )
+    section_labels = _section_labels(audit)
 
-    lines = [
-        "CompliTrace GDPR Gap Report",
-        f"Audit ID: {audit.id}",
-        f"Document ID: {audit.document_id}",
-        f"Model: {audit.model_provider}:{audit.model_name}",
-        f"Embedding model: {audit.embedding_model}",
-        f"Corpus version: {audit.corpus_version}",
-        "",
-        "Executive summary",
-        f"- Total findings: {total}",
-        f"- Compliant: {by_status['compliant']}",
-        f"- Partial: {by_status['partial']}",
-        f"- Gap: {by_status['gap']}",
-        f"- Needs review: {by_status['needs review']}",
-        f"- Not applicable: {by_status['not applicable']}",
-        f"- Substantive citation coverage: {citation_coverage:.0%}",
-        f"- LLM parse failure rate: {parse_failure_rate:.0%}",
-        f"- Needs review rate: {needs_review_rate:.0%}",
-        f"- Report quality score (heuristic): {quality_score:.1f}/10",
-        "",
+    blocks: list[_TextBlock] = [
+        _TextBlock("CompliTrace GDPR Gap Report", font_size=16, top_gap=0),
+        _TextBlock(f"Model: {audit.model_provider}:{audit.model_name}", font_size=10),
+        _TextBlock(f"Embedding model: {audit.embedding_model}", font_size=10),
+        _TextBlock(f"Corpus version: {audit.corpus_version}", font_size=10),
+        _TextBlock("Executive Summary", font_size=13, top_gap=14),
+        _TextBlock(f"Total findings: {total}", bullet=True),
+        _TextBlock(f"Compliant: {by_status['compliant']}", bullet=True),
+        _TextBlock(f"Partial: {by_status['partial']}", bullet=True),
+        _TextBlock(f"Gap: {by_status['gap']}", bullet=True),
+        _TextBlock(f"Needs review: {by_status['needs review']}", bullet=True),
+        _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
+        _TextBlock(f"Substantive citation coverage: {citation_coverage:.0%}", bullet=True),
+        _TextBlock(f"LLM parse failure rate: {parse_failure_rate:.0%}", bullet=True),
+        _TextBlock(f"Needs review rate: {needs_review_rate:.0%}", bullet=True),
+        _TextBlock(f"Report quality score (heuristic): {quality_score:.1f}/10", bullet=True),
+        _TextBlock("Detailed Findings", font_size=13, top_gap=14),
     ]
 
-    for f in findings:
-        lines.append(f"Section {f.section_id}")
-        lines.append(f"Status: {f.status}")
-        lines.append(f"Severity: {f.severity}")
-        if f.gap_note:
-            lines.append(f"Gap note: {f.gap_note}")
-        if f.remediation_note:
-            lines.append(f"Remediation: {f.remediation_note}")
-        for c in f.citations:
-            lines.append(f"- Citation {c.article_number} ({c.paragraph_ref}) [{c.chunk_id}]")
-        lines.append("")
+    for finding in findings:
+        section_label = section_labels.get(finding.section_id, "Document section")
+        blocks.append(_TextBlock(section_label, font_size=11, top_gap=10))
+        blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
+        blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
+        if finding.gap_note:
+            blocks.append(_TextBlock(f"Gap note: {finding.gap_note}", bullet=True))
+        if finding.remediation_note:
+            blocks.append(_TextBlock(f"Remediation: {finding.remediation_note}", bullet=True))
+        for citation in finding.citations:
+            blocks.append(
+                _TextBlock(
+                    _format_citation_label(citation.article_number, citation.article_title, citation.paragraph_ref),
+                    bullet=True,
+                )
+            )
+            if citation.excerpt:
+                blocks.append(_TextBlock(f'Evidence: "{citation.excerpt}"', bullet=True))
 
     out_path = settings.reports_dir / f"audit_{audit_id}_{report.id}.pdf"
-    _write_pdf(lines, out_path)
+    _write_pdf(blocks, out_path)
 
     report.status = "ready"
     report.pdf_path = str(out_path)

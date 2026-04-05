@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import settings
 from app.db.base import Base
 from app.models.audit import Audit, Finding
-from app.services.reports import generate_report_text
+from app.services.clients import SectionData
+from app.services.reports import _format_citation_label, _section_labels, generate_report_text
 
 
 def test_generate_report_writes_valid_pdf(tmp_path: Path):
@@ -58,3 +59,34 @@ def test_generate_report_writes_valid_pdf(tmp_path: Path):
             assert header == b"%PDF-"
     finally:
         settings.reports_dir = old_reports_dir
+
+
+def test_section_labels_use_human_readable_titles(monkeypatch):
+    audit = Audit(id=str(uuid.uuid4()), document_id=str(uuid.uuid4()), status="complete")
+
+    class FakeIngestionClient:
+        def __init__(self, _base_url: str):
+            pass
+
+        def get_sections(self, _document_id: str):
+            return [
+                SectionData(
+                    id="sec-1",
+                    section_order=1,
+                    section_title="Purpose and Scope",
+                    content="...",
+                    page_start=1,
+                    page_end=1,
+                )
+            ]
+
+    monkeypatch.setattr("app.services.reports.IngestionClient", FakeIngestionClient)
+    labels = _section_labels(audit)
+
+    assert labels["sec-1"] == "Section 1: Purpose and Scope"
+
+
+def test_format_citation_label_is_user_friendly():
+    assert _format_citation_label("13", "Information to be provided", "1") == (
+        "GDPR Article 13 — Information to be provided (Paragraph 1)"
+    )
