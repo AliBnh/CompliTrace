@@ -13,256 +13,272 @@ class ParsedSection:
     page_end: int | None
 
 
-HEADING_RE = re.compile(r"^[A-Z][A-Za-z0-9\s,/:&()\-]{2,90}$")
-PAGE_HEADING_RE = re.compile(r"^page\s+\d+$", re.IGNORECASE)
-SECTION_NUM_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z][A-Za-z0-9\s\-/&()]{2,80}$")
-SUBSECTION_NUM_HEADING_RE = re.compile(r"^\d{1,2}\.\d{1,2}\s+[A-Z][A-Za-z0-9\s\-/&()]{2,100}$")
-FILE_PATH_RE = re.compile(r"([A-Za-z]:\\|/).*(\\.pdf|\\.docx?)", re.IGNORECASE)
-NOISE_LINE_RE = re.compile(r"^y:\\\\|approved policies|approved templates", re.IGNORECASE)
-POLICY_HEADER_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9&\s]{1,40}\s*-\s*)?privacy policy", re.IGNORECASE)
-INLINE_HEADING_SPLIT_RE = re.compile(r"\s(?=(?:\d{1,2}\.\d{1,2}|\d{1,2}\.)\s+[A-Z])")
-NUMBERED_LEAD_RE = re.compile(r"^(?P<num>\d{1,2}(?:\.\d{1,2})?\.?)\s+(?P<rest>.+)$")
-STOP_TITLE_WORDS = {
+HEADING_RE = re.compile(r"^[A-Z][A-Za-z0-9\s,/:&()\-]{2,100}$")
+PAGE_RE = re.compile(r"^(?:page\s+)?\d{1,4}$", re.IGNORECASE)
+SECTION_NUM_RE = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+(.+)$")
+SUBSECTION_HEADING_RE = re.compile(r"^\d{1,2}(?:\.\d{1,2}){1,2}\s+[A-Z].{1,120}$")
+SECTION_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z].{1,120}$")
+FILE_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/).*(?:\.pdf|\.docx?|\.txt)", re.IGNORECASE)
+MULTISPACE_RE = re.compile(r"\s+")
+INLINE_HEADING_RE = re.compile(r"(?=(?:^|\s)(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+[A-Z])")
+
+SENTENCE_START_WORDS = {
     "we",
     "our",
     "this",
     "these",
-    "by",
-    "when",
-    "in",
-    "to",
-    "individuals",
-    "users",
+    "they",
+    "it",
     "you",
     "your",
-    "it",
-    "they",
+    "the",
+    "a",
+    "an",
+    "in",
+    "to",
+    "for",
+    "by",
+    "of",
+    "with",
+    "is",
+    "are",
+    "was",
+    "were",
+    "has",
+    "have",
+    "may",
+    "can",
+    "will",
+    "should",
 }
 
 
 def _normalize_space(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    return MULTISPACE_RE.sub(" ", text).strip()
 
 
-def _looks_like_sentence_start(word: str) -> bool:
-    w = word.lower().strip(",.;:()")
-    return w in STOP_TITLE_WORDS or w in {"is", "are", "was", "were", "has", "have", "may", "can"}
+def _canonical_line(text: str) -> str:
+    return _normalize_space(text).lower()
 
 
-def is_heading(line: str) -> bool:
-    s = _normalize_space(line)
-    if not s:
-        return False
-    if PAGE_HEADING_RE.match(s):
-        return False
-    if len(s) < 5:
-        return False
-    if "/" in s and any(len(tok) <= 3 for tok in s.split("/")):
-        return False
-    if len(s.split()) > 12:
-        return False
-    if s.endswith(".") and not SECTION_NUM_HEADING_RE.match(s):
-        return False
-    if s.lower().startswith(("article ", "chapter ")):
-        return False
-    if SECTION_NUM_HEADING_RE.match(s) or SUBSECTION_NUM_HEADING_RE.match(s):
-        return True
-    # Avoid sentence-like lines with commas and verbs in the middle.
-    words = s.split()
-    if len(words) >= 6 and any(_looks_like_sentence_start(w) for w in words[3:]):
-        return False
-    return bool(HEADING_RE.match(s) and (s.istitle() or s.isupper()))
+def _clean_line(text: str) -> str:
+    text = text.replace("\u00ad", "")
+    text = _normalize_space(text)
+    text = re.sub(r"\s*[-–—]\s*$", "", text)
+    return text
 
 
 def is_noise_line(line: str) -> bool:
-    s = _normalize_space(line)
+    s = _clean_line(line)
     if not s:
         return True
     if FILE_PATH_RE.search(s):
         return True
-    if NOISE_LINE_RE.search(s):
+    if PAGE_RE.match(s):
         return True
-    if POLICY_HEADER_RE.search(s) and len(s.split()) <= 10:
+    if re.fullmatch(r"[\W_]+", s):
         return True
-    if PAGE_HEADING_RE.match(s):
-        return True
-    if re.fullmatch(r"\d+", s):
+    if len(s) <= 2:
         return True
     return False
 
 
-def split_inline_headings(line: str) -> list[str]:
-    line = _normalize_space(line)
-    if not line:
+def _looks_sentence_like(words: list[str]) -> bool:
+    if len(words) < 6:
+        return False
+    return any(w.lower().strip(",.;:()") in SENTENCE_START_WORDS for w in words[3:])
+
+
+def is_heading(line: str) -> bool:
+    s = _clean_line(line)
+    if not s or is_noise_line(s):
+        return False
+
+    if SECTION_HEADING_RE.match(s) or SUBSECTION_HEADING_RE.match(s):
+        return True
+
+    if len(s.split()) > 12:
+        return False
+    if "/" in s and any(len(tok.strip()) <= 3 for tok in s.split("/")):
+        return False
+    if s.endswith("."):
+        return False
+    if s.lower().startswith(("article ", "chapter ")):
+        return False
+
+    words = s.split()
+    if _looks_sentence_like(words):
+        return False
+
+    return bool(HEADING_RE.match(s) and (s.istitle() or s.isupper()))
+
+
+def split_inline_numbered_chunks(line: str) -> list[str]:
+    """Split a line containing multiple inline numbered headings into chunks."""
+    s = _clean_line(line)
+    if not s:
         return []
-    parts = INLINE_HEADING_SPLIT_RE.split(line)
-    return [p.strip() for p in parts if p.strip()]
 
+    matches = list(INLINE_HEADING_RE.finditer(s))
+    if len(matches) <= 1:
+        return [s]
 
-def scrub_inline_noise(text: str) -> str:
-    text = POLICY_HEADER_RE.sub("", text)
-    text = re.sub(r"\b\d{4}\.docx\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b(?:draft|final)\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*[-–—]\s*$", "", text)
-    return _normalize_space(text)
+    starts = [m.start() for m in matches]
+    parts: list[str] = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(s)
+        chunk = _clean_line(s[start:end])
+        if chunk:
+            parts.append(chunk)
+    return parts or [s]
 
 
 def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
-    """Split lines like `6. Cookies ... We use ...` into heading and body."""
-    m = NUMBERED_LEAD_RE.match(line)
+    """Split `N(.M) Heading ... body` into heading/body when body is detectable."""
+    s = _clean_line(line)
+    m = SECTION_NUM_RE.match(s)
     if not m:
         return None
 
-    num = m.group("num")
-    rest = m.group("rest").strip()
+    number = m.group(1)
+    rest = m.group(2)
     words = rest.split()
-    if len(words) < 3:
+    if len(words) < 4:
         return None
 
-    cut = None
-    for i, w in enumerate(words):
-        if i >= 3 and _looks_like_sentence_start(w):
+    cut: int | None = None
+    for i, word in enumerate(words):
+        norm = word.lower().strip(",.;:()")
+        if i >= 3 and norm in SENTENCE_START_WORDS:
             cut = i
             break
-    if cut is None and len(words) > 8:
-        # If heading is too long, assume sentence starts around natural break.
-        cut = 8
+
+    if cut is None and len(words) > 9:
+        cut = 9
+
     if cut is None:
         return None
 
-    heading = _normalize_space(f"{num} {' '.join(words[:cut])}")
-    body = _normalize_space(" ".join(words[cut:]))
+    heading = _clean_line(f"{number}. {' '.join(words[:cut])}")
+    body = _clean_line(" ".join(words[cut:]))
     if len(heading.split()) < 2 or len(body.split()) < 3:
         return None
     return heading, body
 
 
-def _merge_small_sections(sections: list[ParsedSection], min_words: int = 40) -> list[ParsedSection]:
-    if not sections:
-        return sections
-
-    merged: list[ParsedSection] = []
-    for section in sections:
-        wc = len(section.content.split())
-        if merged and wc < min_words and not section.section_title.lower().startswith(("appendix", "annex")):
-            prev = merged[-1]
-            merged[-1] = ParsedSection(
-                section_order=prev.section_order,
-                section_title=prev.section_title,
-                content=f"{prev.content}\n\n{section.content}".strip(),
-                page_start=prev.page_start,
-                page_end=section.page_end or prev.page_end,
-            )
-        else:
-            merged.append(section)
-
-    for idx, sec in enumerate(merged, start=1):
-        merged[idx - 1] = ParsedSection(
-            section_order=idx,
-            section_title=sec.section_title,
-            content=sec.content,
-            page_start=sec.page_start,
-            page_end=sec.page_end,
-        )
-
-    return merged
-
-
 def _detect_boilerplate_lines(pages: list[tuple[int, list[str]]]) -> set[str]:
-    """Find repeated short lines that appear across many pages (headers/footers)."""
+    """Detect repeated short lines likely to be page headers/footers."""
     if len(pages) < 3:
         return set()
 
     counts: dict[str, int] = {}
-    total = len(pages)
     for _, lines in pages:
-        seen = {l.lower() for l in lines if 1 <= len(l.split()) <= 8}
-        for line in seen:
-            counts[line] = counts.get(line, 0) + 1
+        seen: set[str] = set()
+        for line in lines:
+            c = _canonical_line(line)
+            if 1 <= len(c.split()) <= 10:
+                seen.add(c)
+        for c in seen:
+            counts[c] = counts.get(c, 0) + 1
 
-    threshold = max(2, int(total * 0.5))
-    return {line for line, c in counts.items() if c >= threshold}
+    threshold = max(2, int(len(pages) * 0.5))
+    return {k for k, v in counts.items() if v >= threshold}
+
+
+def _normalize_section_title(title: str) -> str:
+    s = _clean_line(title)
+    m = SECTION_NUM_RE.match(s)
+    if m:
+        num = m.group(1)
+        rest = _clean_line(m.group(2))
+        return f"{num} {rest}".strip()
+    return s
+
+
+def _commit_section(
+    sections: list[ParsedSection],
+    title: str,
+    content_lines: list[str],
+    page_start: int | None,
+    page_end: int | None,
+) -> None:
+    content = _clean_line(" ".join(content_lines))
+    if not content:
+        return
+    sections.append(
+        ParsedSection(
+            section_order=len(sections) + 1,
+            section_title=_normalize_section_title(title) or "Untitled Section",
+            content=content,
+            page_start=page_start,
+            page_end=page_end,
+        )
+    )
 
 
 def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
     import fitz
 
     doc = fitz.open(pdf_path)
-    pages = []
-    for i, page in enumerate(doc, start=1):
-        text = page.get_text("text")
-        lines: list[str] = []
-        for raw_line in text.splitlines():
-            for part in split_inline_headings(raw_line):
-                cleaned = scrub_inline_noise(part)
-                if not cleaned:
-                    continue
-                split_pair = split_numbered_heading_and_body(cleaned)
+    pages: list[tuple[int, list[str]]] = []
+
+    for page_num, page in enumerate(doc, start=1):
+        page_lines: list[str] = []
+        for raw_line in page.get_text("text").splitlines():
+            cleaned = _clean_line(raw_line)
+            if not cleaned or is_noise_line(cleaned):
+                continue
+
+            chunks = split_inline_numbered_chunks(cleaned)
+            for chunk in chunks:
+                split_pair = split_numbered_heading_and_body(chunk)
                 if split_pair:
-                    heading_part, body_part = split_pair
-                    if not is_noise_line(heading_part):
-                        lines.append(heading_part)
-                    if body_part and not is_noise_line(body_part):
-                        lines.append(body_part)
-                elif not is_noise_line(cleaned):
-                    lines.append(cleaned)
-        pages.append((i, lines))
+                    heading, body = split_pair
+                    if not is_noise_line(heading):
+                        page_lines.append(heading)
+                    if body and not is_noise_line(body):
+                        page_lines.append(body)
+                elif not is_noise_line(chunk):
+                    page_lines.append(chunk)
+
+        pages.append((page_num, page_lines))
 
     boilerplate = _detect_boilerplate_lines(pages)
 
     sections: list[ParsedSection] = []
     current_title = "Introduction"
-    current_lines: list[str] = []
+    current_content: list[str] = []
     current_start: int | None = 1
     last_page: int | None = 1
 
     for page_num, lines in pages:
         for line in lines:
-            if line.lower() in boilerplate and not is_heading(line):
+            if _canonical_line(line) in boilerplate and not is_heading(line):
                 continue
+
             if is_heading(line):
-                if current_lines:
-                    sections.append(
-                        ParsedSection(
-                            section_order=len(sections) + 1,
-                            section_title=current_title,
-                            content=" ".join(current_lines).strip(),
-                            page_start=current_start,
-                            page_end=last_page,
-                        )
-                    )
-                normalized_title = line
-                if SECTION_NUM_HEADING_RE.match(line):
-                    normalized_title = re.sub(r"^\d{1,2}\.\s+", "", line).strip()
-                current_title = normalized_title
-                current_lines = []
+                _commit_section(sections, current_title, current_content, current_start, last_page)
+                current_title = line
+                current_content = []
                 current_start = page_num
                 last_page = page_num
-            else:
-                current_lines.append(line)
-                last_page = page_num
+                continue
 
-    if current_lines:
-        sections.append(
-            ParsedSection(
-                section_order=len(sections) + 1,
-                section_title=current_title,
-                content=" ".join(current_lines).strip(),
-                page_start=current_start,
-                page_end=last_page,
-            )
+            current_content.append(line)
+            last_page = page_num
+
+    _commit_section(sections, current_title, current_content, current_start, last_page)
+
+    if sections:
+        return sections
+
+    full_text = _clean_line(" ".join(" ".join(lines) for _, lines in pages))
+    return [
+        ParsedSection(
+            section_order=1,
+            section_title="Document Body",
+            content=full_text,
+            page_start=1,
+            page_end=len(pages) if pages else 1,
         )
-
-    if not sections:
-        full_text = "\n".join("\n".join(lines) for _, lines in pages).strip()
-        return [
-            ParsedSection(
-                section_order=1,
-                section_title="Document Body",
-                content=full_text,
-                page_start=1,
-                page_end=len(pages) if pages else 1,
-            )
-        ]
-
-    return _merge_small_sections(sections)
+    ]

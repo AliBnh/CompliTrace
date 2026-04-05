@@ -8,8 +8,7 @@ from app.services.parser import (
     _detect_boilerplate_lines,
     is_heading,
     is_noise_line,
-    scrub_inline_noise,
-    split_inline_headings,
+    split_inline_numbered_chunks,
     split_numbered_heading_and_body,
 )
 
@@ -28,15 +27,14 @@ def test_parsed_section_dataclass():
 
 
 def test_noise_line_detection():
-    assert is_noise_line(r"Y:\\HM Policies & Procedures NEW\\GDPR\\Approved Policies\\GROUP Data Protection Policy_GDPR 2019.docx")
+    assert is_noise_line(r"Y:\\Policies\\archive\\doc.pdf")
     assert is_noise_line("Page 3")
-    assert is_noise_line("NovaStrata Technologies - Privacy Policy")
     assert not is_noise_line("Data Storage")
 
 
-def test_split_inline_headings():
+def test_split_inline_numbered_chunks():
     line = "5.5 Compliance and Protective Grounds 6. Cookies, Similar Technologies, and Digital Tracking"
-    parts = split_inline_headings(line)
+    parts = split_inline_numbered_chunks(line)
     assert len(parts) == 2
     assert parts[0].startswith("5.5 Compliance")
     assert parts[1].startswith("6. Cookies")
@@ -54,16 +52,11 @@ def test_split_numbered_heading_and_body_returns_none_when_no_body():
     assert split_numbered_heading_and_body(line) is None
 
 
-def test_scrub_inline_noise():
-    line = "NovaStrata Technologies - Privacy Policy 2019.docx"
-    assert scrub_inline_noise(line) == ""
-
-
-def test_detect_boilerplate_lines():
+def test_detect_boilerplate_lines_generic():
     pages = [
-        (1, ["NovaStrata Technologies", "Data Retention"]),
-        (2, ["NovaStrata Technologies", "Access Rights"]),
-        (3, ["NovaStrata Technologies", "Data Minimization"]),
+        (1, ["Confidential", "Data Retention"]),
+        (2, ["Confidential", "Access Rights"]),
+        (3, ["Confidential", "Data Minimization"]),
     ]
     found = _detect_boilerplate_lines(pages)
-    assert "novastrata technologies" in found
+    assert "confidential" in found
