@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime
 
 from prometheus_client import Counter, Histogram
@@ -167,6 +168,10 @@ def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmC
     return f
 
 
+def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
+    return (now_monotonic - started_monotonic) > budget_seconds
+
+
 def run_audit(db: Session, audit: Audit) -> Audit:
     ingestion = IngestionClient(settings.ingestion_service_url)
     knowledge = KnowledgeClient(settings.knowledge_service_url)
@@ -183,8 +188,27 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     sections = ingestion.get_sections(audit.document_id)
     llm_rate_limited = False
     llm_calls_made = 0
+    audit_started = time.monotonic()
+    timeout_reached = False
 
     for section in sorted(sections, key=lambda s: s.section_order):
+        if not timeout_reached and _runtime_budget_exceeded(audit_started, time.monotonic(), settings.max_audit_runtime_seconds):
+            timeout_reached = True
+
+        if timeout_reached:
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="needs review",
+                    severity=None,
+                    gap_note=f"Audit runtime budget exceeded ({settings.max_audit_runtime_seconds}s). Manual review required.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
         if _is_not_applicable(section):
             db.add(
                 Finding(

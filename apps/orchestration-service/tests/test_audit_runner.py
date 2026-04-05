@@ -3,7 +3,13 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.services.audit_runner import _enforce_substantive_citation_gate, _evidence_sufficient, _is_not_applicable, _retry_needed
+from app.services.audit_runner import (
+    _enforce_substantive_citation_gate,
+    _evidence_sufficient,
+    _is_not_applicable,
+    _retry_needed,
+    _runtime_budget_exceeded,
+)
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
 
@@ -66,3 +72,8 @@ def test_substantive_finding_with_citations_is_kept():
     citation = LlmCitation(chunk_id="c1", article_number="13")
     gated = _enforce_substantive_citation_gate(finding, valid_citations=[citation])
     assert gated.status == "gap"
+
+
+def test_runtime_budget_exceeded():
+    assert _runtime_budget_exceeded(0.0, 181.0, 180) is True
+    assert _runtime_budget_exceeded(0.0, 180.0, 180) is False

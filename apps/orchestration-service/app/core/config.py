@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     fallback_model_provider: str = Field(default="gemini", alias="FALLBACK_MODEL_PROVIDER")
     fallback_model_name: str = Field(default="gemini-2.5-flash", alias="FALLBACK_MODEL_NAME")
     max_llm_calls_per_audit: int = Field(default=20, alias="MAX_LLM_CALLS_PER_AUDIT")
+    max_audit_runtime_seconds: int = Field(default=180, alias="MAX_AUDIT_RUNTIME_SECONDS")
 
     embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2", alias="EMBEDDING_MODEL")
     corpus_version: str = Field(default="gdpr-2016-679-v1", alias="CORPUS_VERSION")

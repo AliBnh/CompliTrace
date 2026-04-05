@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import httpx
 
-from app.services.clients import LlmFinding, RetrievalChunk
+from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk
 
 
 SYSTEM_PROMPT = (
@@ -31,6 +31,7 @@ STATUS_MAP = {
     "needs_review": "needs review",
     "need review": "needs review",
 }
+MAX_RETRY_AFTER_SECONDS = 5.0
 
 
 def _extract_json_block(text: str) -> str:
@@ -137,7 +138,7 @@ def _groq_chat(api_key: str, model: str, temperature: float, user_prompt: str) -
                 retry_after = float(retry_after_raw) if retry_after_raw is not None else 2.0
             except ValueError:
                 retry_after = 2.0
-            time.sleep(retry_after)
+            time.sleep(min(retry_after, MAX_RETRY_AFTER_SECONDS))
     assert last_error is not None
     raise last_error
 
