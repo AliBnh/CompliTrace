@@ -170,6 +170,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
     sections = ingestion.get_sections(audit.document_id)
     llm_rate_limited = False
+    llm_calls_made = 0
 
     for section in sorted(sections, key=lambda s: s.section_order):
         if _is_not_applicable(section):
@@ -212,16 +213,22 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             db.commit()
             continue
 
-        if llm_rate_limited:
+        if llm_rate_limited or llm_calls_made >= settings.max_llm_calls_per_audit:
+            gate_reason = (
+                "LLM rate limit reached earlier in this audit. Manual review required."
+                if llm_rate_limited
+                else f"LLM call budget reached ({settings.max_llm_calls_per_audit}). Manual review required."
+            )
             llm_finding = LlmFinding(
                 status="needs review",
                 severity=None,
-                gap_note="LLM rate limit reached earlier in this audit. Manual review required.",
+                gap_note=gate_reason,
                 remediation_note=None,
                 citations=[],
             )
         else:
             with llm_inference_latency_seconds.time():
+                llm_calls_made += 1
                 llm_finding, raw = run_llm_classification(
                     section_title=section.section_title,
                     section_content=section.content,

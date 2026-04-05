@@ -17,6 +17,19 @@ SYSTEM_PROMPT = (
     "Citations must only reference provided chunks and include chunk_id + article_number."
 )
 
+STATUS_MAP = {
+    "compliant": "compliant",
+    "partial": "partial",
+    "partially compliant": "partial",
+    "partially": "partial",
+    "gap": "gap",
+    "non-compliant": "gap",
+    "non compliant": "gap",
+    "needs review": "needs review",
+    "needs_review": "needs review",
+    "need review": "needs review",
+}
+
 
 def _extract_json_block(text: str) -> str:
     text = text.strip()
@@ -42,6 +55,13 @@ def _build_user_prompt(section_title: str, section_content: str, chunks: list[Re
         "Apply frozen rubric. If uncertain, return needs review. "
         "For gap/partial provide non-empty gap_note and remediation_note."
     )
+
+
+def _normalize_status(value: Any) -> str:
+    if value is None:
+        return "needs review"
+    key = str(value).strip().lower()
+    return STATUS_MAP.get(key, "needs review")
 
 
 def _groq_chat(api_key: str, model: str, temperature: float, user_prompt: str) -> str:
@@ -148,6 +168,9 @@ def run_llm_classification(
     block = _extract_json_block(raw)
     try:
         parsed: dict[str, Any] = json.loads(block)
+        parsed["status"] = _normalize_status(parsed.get("status"))
+        if "citations" not in parsed or not isinstance(parsed.get("citations"), list):
+            parsed["citations"] = []
         finding = LlmFinding.model_validate(parsed)
         return finding, raw
     except Exception:

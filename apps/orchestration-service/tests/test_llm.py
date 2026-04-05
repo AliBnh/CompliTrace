@@ -158,3 +158,9 @@ def test_returns_rate_limited_sentinel_when_all_attempts_429(monkeypatch):
 
     assert finding is None
     assert raw == "__rate_limited__"
+
+
+def test_status_normalization_maps_partial_variants():
+    assert llm._normalize_status("partially compliant") == "partial"
+    assert llm._normalize_status("needs_review") == "needs review"
+    assert llm._normalize_status("unknown-value") == "needs review"
