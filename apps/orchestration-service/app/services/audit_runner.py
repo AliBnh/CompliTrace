@@ -91,6 +91,14 @@ THIRD_COUNTRY_TRANSFER_SIGNALS = {
     "transfer",
 }
 
+NOTICE_REQUIREMENT_SIGNALS: dict[str, set[str]] = {
+    "controller_contact": {"controller", "contact", "email", "address"},
+    "legal_basis": {"legal basis", "lawful basis", "consent", "contract", "legitimate interest", "legal obligation"},
+    "rights": {"right to access", "rectification", "erasure", "restriction", "portability", "object", "data subject rights"},
+    "retention": {"retention", "retain", "kept for", "storage period"},
+    "complaint": {"complaint", "supervisory authority", "data protection authority"},
+}
+
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
@@ -313,6 +321,58 @@ def _validate_citations(citations: list[LlmCitation], retrieved: list[RetrievalC
     return valid
 
 
+def _fallback_notice_citations(chunks: list[RetrievalChunk]) -> list[LlmCitation]:
+    fallback: list[LlmCitation] = []
+    for ch in chunks:
+        article = _article_int(ch.article_number)
+        if article not in {5, 12, 13, 14, 44, 45, 46, 49}:
+            continue
+        fallback.append(
+            LlmCitation(
+                chunk_id=ch.chunk_id,
+                article_number=ch.article_number,
+                paragraph_ref=ch.paragraph_ref,
+                article_title=ch.article_title,
+                excerpt=ch.content[:180],
+            )
+        )
+        if len(fallback) >= 3:
+            break
+    return fallback
+
+
+def _missing_notice_requirements(section: SectionData) -> list[str]:
+    text = _section_context_signals(section)
+    missing: list[str] = []
+    for req, signals in NOTICE_REQUIREMENT_SIGNALS.items():
+        if not _contains_any(text, signals):
+            missing.append(req)
+    return missing
+
+
+def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
+    missing = _missing_notice_requirements(section)
+    if len(missing) < 2:
+        return None
+    citations = _fallback_notice_citations(chunks)
+    if not citations:
+        return None
+    readable = ", ".join(missing)
+    return LlmFinding(
+        status="gap",
+        severity="high" if len(missing) >= 3 else "medium",
+        gap_note=(
+            f"The section appears to omit mandatory privacy-notice disclosures: {readable}. "
+            "This indicates incomplete transparency duties under GDPR Articles 12-14."
+        ),
+        remediation_note=(
+            "Add explicit privacy-notice disclosures for missing mandatory items (controller contact, legal basis, "
+            "rights, retention criteria, and complaint-right information where applicable)."
+        ),
+        citations=citations,
+    )
+
+
 def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
     if f is None:
         return LlmFinding(status="needs review", severity=None, gap_note="LLM parse failure", remediation_note=None, citations=[])
@@ -471,6 +531,11 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         f = _coerce_finding(llm_finding)
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode)
+        if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
+            fallback = _build_mandatory_notice_gap(section, chunks)
+            if fallback is not None:
+                f = fallback
+                valid_citations = _validate_citations(f.citations, chunks, section, document_mode)
         f = _enforce_substantive_citation_gate(f, valid_citations)
 
         finding_row = Finding(

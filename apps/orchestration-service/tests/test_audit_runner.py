@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.audit_runner import (
     _article_int,
+    _build_mandatory_notice_gap,
     _enforce_substantive_citation_gate,
     _evidence_sufficient,
     _is_legally_relevant_citation,
@@ -135,3 +136,28 @@ def test_legal_relevance_rejects_article_46_without_transfer_signals():
     )
     citation = LlmCitation(chunk_id="c46", article_number="46")
     assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
+
+
+def test_build_mandatory_notice_gap_when_multiple_required_disclosures_missing():
+    section = SectionData(
+        id="s5",
+        section_order=5,
+        section_title="Data We Collect",
+        content="We collect technical and usage data from users.",
+        page_start=5,
+        page_end=5,
+    )
+    chunks = [
+        RetrievalChunk(
+            chunk_id="c13",
+            article_number="13",
+            article_title="Information to be provided",
+            paragraph_ref=None,
+            content="Controller shall provide identity, contact, legal basis and purposes",
+            score=0.81,
+        )
+    ]
+    finding = _build_mandatory_notice_gap(section, chunks)
+    assert finding is not None
+    assert finding.status == "gap"
+    assert len(finding.citations) == 1
