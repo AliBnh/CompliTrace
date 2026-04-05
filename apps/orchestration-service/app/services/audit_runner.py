@@ -378,20 +378,21 @@ def _citation_claim_compatible(citation: LlmCitation, chunk: RetrievalChunk, cla
         return True
     article = _article_int(citation.article_number)
     para = _norm(chunk.paragraph_ref or citation.paragraph_ref or "")
+    para_known = bool(para)
     if article is None:
         return False
 
     allowed = False
     if "legal_basis" in claim_types:
-        allowed = allowed or (article in {6} or (article in {13, 14} and para.startswith("1")))
+        allowed = allowed or (article in {6} or (article in {13, 14} and (not para_known or para.startswith("1"))))
     if "retention" in claim_types:
-        allowed = allowed or (article == 5) or (article in {13, 14} and para.startswith("2"))
+        allowed = allowed or (article == 5) or (article in {13, 14} and (not para_known or para.startswith("2")))
     if "rights" in claim_types:
-        allowed = allowed or (article == 12) or (article in {13, 14} and para.startswith("2")) or (15 <= article <= 22)
+        allowed = allowed or (article == 12) or (article in {13, 14} and (not para_known or para.startswith("2"))) or (15 <= article <= 22)
     if "controller_contact" in claim_types:
-        allowed = allowed or (article in {13, 14} and para.startswith("1"))
+        allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("1")))
     if "complaint" in claim_types:
-        allowed = allowed or (article in {13, 14} and para.startswith("2")) or article == 77
+        allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("2"))) or article == 77
     if "transfer" in claim_types:
         allowed = allowed or article in {13, 14, 44, 45, 46, 47, 49}
     return allowed
@@ -649,9 +650,13 @@ def _build_transfer_gap(section: SectionData, chunks: list[RetrievalChunk]) -> L
     if not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
         return None
 
-    transfer_chunks = [ch for ch in chunks if _article_int(ch.article_number) in {13, 14, 44, 45, 46, 47, 49}]
+    transfer_chunks = [ch for ch in chunks if _article_int(ch.article_number) in {44, 45, 46, 47, 49, 13, 14}]
     if not transfer_chunks:
         return None
+
+    transfer_chunks.sort(
+        key=lambda ch: (0 if _article_int(ch.article_number) in {44, 45, 46, 47, 49} else 1, -ch.score)
+    )
 
     citations: list[LlmCitation] = []
     for ch in transfer_chunks[:3]:
@@ -678,6 +683,42 @@ def _build_transfer_gap(section: SectionData, chunks: list[RetrievalChunk]) -> L
         ),
         citations=citations,
     )
+
+
+def _salvage_citations_from_retrieved(
+    chunks: list[RetrievalChunk],
+    section: SectionData,
+    document_mode: str,
+    claim_text: str,
+) -> list[LlmCitation]:
+    claim_types = _claim_types_from_text(claim_text)
+    candidates: list[LlmCitation] = []
+    for ch in chunks:
+        cit = LlmCitation(
+            chunk_id=ch.chunk_id,
+            article_number=ch.article_number,
+            paragraph_ref=ch.paragraph_ref,
+            article_title=ch.article_title,
+            excerpt=ch.content[:180],
+        )
+        if not _is_legally_relevant_citation(cit, section, document_mode):
+            continue
+        if document_mode == "privacy_notice" and not _citation_claim_compatible(cit, ch, claim_types):
+            continue
+        candidates.append(cit)
+        if len(candidates) >= 3:
+            break
+    return candidates
+
+
+def _sanitize_legal_reference_text(text: str | None) -> str | None:
+    if not text:
+        return text
+    fixed = text
+    fixed = re.sub(r"Article\s*14\(1\)\(f\)", "Article 14(1)(c)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*14\(a\)", "Article 14(1)(a)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*14\(c\)", "Article 14(1)(c)", fixed, flags=re.IGNORECASE)
+    return fixed
 
 
 def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
@@ -837,11 +878,16 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 llm_rate_limited = True
 
         f = _coerce_finding(llm_finding)
+        f.gap_note = _sanitize_legal_reference_text(f.gap_note)
+        f.remediation_note = _sanitize_legal_reference_text(f.remediation_note)
         claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
+            salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
+            if salvaged:
+                valid_citations = salvaged
             fallback = _build_mandatory_notice_gap(section, chunks)
-            if fallback is None:
+            if fallback is None and not valid_citations:
                 targeted_query = _targeted_notice_query(section)
                 targeted_chunks = _rerank_chunks_for_mode(section, knowledge.search(query=targeted_query, k=8), document_mode)
                 merged: list[RetrievalChunk] = []
@@ -852,8 +898,11 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     seen_chunk_ids.add(ch.chunk_id)
                     merged.append(ch)
                 chunks = merged[:8]
+                salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
+                if salvaged:
+                    valid_citations = salvaged
                 fallback = _build_mandatory_notice_gap(section, chunks)
-            if fallback is None:
+            if fallback is None and not valid_citations:
                 transfer_query = (
                     f"GDPR international transfer disclosure obligations for privacy notices: Articles 13(1)(f), "
                     f"14(1)(f), 44, 45, 46. Section context: {section.section_title}. {section.content[:600]}"

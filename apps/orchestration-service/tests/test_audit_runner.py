@@ -19,6 +19,8 @@ from app.services.audit_runner import (
     _paragraph_ref_compatible,
     _rerank_chunks_for_mode,
     _retry_needed,
+    _salvage_citations_from_retrieved,
+    _sanitize_legal_reference_text,
     _runtime_budget_exceeded,
     _targeted_notice_query,
 )
@@ -318,6 +320,19 @@ def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_cla
     assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is False
 
 
+def test_citation_claim_compatible_allows_article_14_when_paragraph_unknown_for_legal_basis():
+    citation = LlmCitation(chunk_id="c1", article_number="14", paragraph_ref=None)
+    chunk = RetrievalChunk(
+        chunk_id="c1",
+        article_number="14",
+        article_title="Information to be provided",
+        paragraph_ref=None,
+        content="controller shall provide legal basis",
+        score=0.91,
+    )
+    assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is True
+
+
 def test_build_transfer_gap_for_transfer_section():
     section = SectionData(
         id="s7i",
@@ -349,6 +364,47 @@ def test_build_transfer_gap_for_transfer_section():
     assert finding is not None
     assert finding.status == "gap"
     assert len(finding.citations) >= 1
+
+
+def test_transfer_gap_prioritizes_transfer_articles():
+    section = SectionData(
+        id="s7j",
+        section_order=7,
+        section_title="International Transfers",
+        content="We transfer data outside the EEA.",
+        page_start=7,
+        page_end=7,
+    )
+    chunks = [
+        RetrievalChunk(chunk_id="c13", article_number="13", article_title="", paragraph_ref="1", content="notice text", score=0.95),
+        RetrievalChunk(chunk_id="c45", article_number="45", article_title="", paragraph_ref="1", content="adequacy text", score=0.70),
+    ]
+    finding = _build_transfer_gap(section, chunks)
+    assert finding is not None
+    assert finding.citations[0].article_number == "45"
+
+
+def test_sanitize_legal_reference_fixes_wrong_article_pointer():
+    text = "Legal basis should be disclosed under Article 14(1)(f)."
+    assert _sanitize_legal_reference_text(text) == "Legal basis should be disclosed under Article 14(1)(c)."
+
+
+def test_salvage_citations_from_retrieved_returns_claim_compatible_candidates():
+    section = SectionData(
+        id="s7k",
+        section_order=7,
+        section_title="Data Processing",
+        content="We process personal data for service delivery.",
+        page_start=7,
+        page_end=7,
+    )
+    chunks = [
+        RetrievalChunk(chunk_id="c14p34", article_number="14", article_title="", paragraph_ref="3-4", content="timing", score=0.90),
+        RetrievalChunk(chunk_id="c14p1", article_number="14", article_title="", paragraph_ref="1", content="legal basis", score=0.81),
+    ]
+    salvaged = _salvage_citations_from_retrieved(chunks, section, "privacy_notice", "Missing legal basis disclosure")
+    assert salvaged
+    assert salvaged[0].chunk_id == "c14p1"
 
 
 def test_targeted_notice_query_uses_article_14_for_indirect_mode():
