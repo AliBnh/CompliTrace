@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -89,16 +89,25 @@ def run_llm_classification(
 ) -> tuple[LlmFinding | None, str]:
     prompt = _build_user_prompt(section_title, section_content, chunks)
     raw = ""
+    attempts: list[tuple[str, str, Callable[[], str]]] = []
 
     if model_provider == "groq" and groq_api_key:
-        raw = _groq_chat(groq_api_key, model_name, temperature, prompt)
+        attempts.append(("primary", "groq", lambda: _groq_chat(groq_api_key, model_name, temperature, prompt)))
     elif model_provider == "gemini" and gemini_api_key:
-        raw = _gemini_chat(gemini_api_key, model_name, temperature, prompt)
+        attempts.append(("primary", "gemini", lambda: _gemini_chat(gemini_api_key, model_name, temperature, prompt)))
 
-    if not raw and fallback_provider == "gemini" and gemini_api_key:
-        raw = _gemini_chat(gemini_api_key, fallback_model, temperature, prompt)
-    elif not raw and fallback_provider == "groq" and groq_api_key:
-        raw = _groq_chat(groq_api_key, fallback_model, temperature, prompt)
+    if fallback_provider == "gemini" and gemini_api_key:
+        attempts.append(("fallback", "gemini", lambda: _gemini_chat(gemini_api_key, fallback_model, temperature, prompt)))
+    elif fallback_provider == "groq" and groq_api_key:
+        attempts.append(("fallback", "groq", lambda: _groq_chat(groq_api_key, fallback_model, temperature, prompt)))
+
+    for _role, _provider, call in attempts:
+        try:
+            raw = call()
+        except httpx.HTTPError:
+            continue
+        if raw:
+            break
 
     if not raw:
         return None, ""
