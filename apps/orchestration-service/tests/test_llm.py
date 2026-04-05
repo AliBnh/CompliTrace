@@ -164,3 +164,21 @@ def test_status_normalization_maps_partial_variants():
     assert llm._normalize_status("partially compliant") == "partial"
     assert llm._normalize_status("needs_review") == "needs review"
     assert llm._normalize_status("unknown-value") == "needs review"
+
+
+def test_coerce_finding_tolerates_partial_citation_payload():
+    parsed = {
+        "status": "partial",
+        "severity": "high",
+        "gap_note": "Missing lawful basis mapping",
+        "remediation_note": "Add lawful basis map",
+        "citations": [
+            {"chunk_id": "c1", "article_number": "13"},
+            {"chunk_id": "c2"},  # invalid, missing article_number
+            "bad-item",
+        ],
+    }
+    finding = llm._coerce_finding_from_parsed(parsed)
+    assert finding.status == "partial"
+    assert len(finding.citations) == 1
+    assert finding.citations[0].chunk_id == "c1"

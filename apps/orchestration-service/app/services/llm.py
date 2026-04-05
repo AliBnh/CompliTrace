@@ -67,6 +67,46 @@ def _normalize_status(value: Any) -> str:
     return STATUS_MAP.get(key, "needs review")
 
 
+def _safe_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _coerce_citations(raw_citations: Any) -> list[LlmCitation]:
+    if not isinstance(raw_citations, list):
+        return []
+    out: list[LlmCitation] = []
+    for item in raw_citations:
+        if not isinstance(item, dict):
+            continue
+        chunk_id = _safe_text(item.get("chunk_id"))
+        article_number = _safe_text(item.get("article_number"))
+        if not chunk_id or not article_number:
+            continue
+        out.append(
+            LlmCitation(
+                chunk_id=chunk_id,
+                article_number=article_number,
+                paragraph_ref=_safe_text(item.get("paragraph_ref")),
+                article_title=_safe_text(item.get("article_title")) or "",
+                excerpt=_safe_text(item.get("excerpt")) or "",
+            )
+        )
+    return out
+
+
+def _coerce_finding_from_parsed(parsed: dict[str, Any]) -> LlmFinding:
+    return LlmFinding(
+        status=_normalize_status(parsed.get("status")),
+        severity=_safe_text(parsed.get("severity")),
+        gap_note=_safe_text(parsed.get("gap_note")),
+        remediation_note=_safe_text(parsed.get("remediation_note")),
+        citations=_coerce_citations(parsed.get("citations")),
+    )
+
+
 def _groq_chat(api_key: str, model: str, temperature: float, user_prompt: str) -> str:
     last_error: httpx.HTTPStatusError | None = None
     for attempt in range(3):
@@ -171,10 +211,13 @@ def run_llm_classification(
     block = _extract_json_block(raw)
     try:
         parsed: dict[str, Any] = json.loads(block)
-        parsed["status"] = _normalize_status(parsed.get("status"))
-        if "citations" not in parsed or not isinstance(parsed.get("citations"), list):
-            parsed["citations"] = []
-        finding = LlmFinding.model_validate(parsed)
+        finding = _coerce_finding_from_parsed(parsed)
         return finding, raw
     except Exception:
-        return None, raw
+        repaired = block.replace("“", '"').replace("”", '"').replace("’", "'")
+        try:
+            parsed = json.loads(repaired)
+            finding = _coerce_finding_from_parsed(parsed)
+            return finding, raw
+        except Exception:
+            return None, raw
