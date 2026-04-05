@@ -370,13 +370,54 @@ def _claim_types_from_text(text: str) -> set[str]:
         claims.add("complaint")
     if any(token in norm for token in {"transfer", "third country", "adequacy", "safeguards"}):
         claims.add("transfer")
+    if any(token in norm for token in {"special category", "sensitive data", "article 9", "explicit consent"}):
+        claims.add("sensitive_data")
+    if any(token in norm for token in {"profiling", "automated decision", "article 22", "meaningful information about logic"}):
+        claims.add("profiling")
     return claims
 
 
 def _citation_claim_compatible(citation: LlmCitation, chunk: RetrievalChunk, claim_types: set[str]) -> bool:
-    # Rollback mode: keep claim-compatibility permissive to avoid over-rejecting
-    # candidate citations when paragraph metadata is partial or retrieval is noisy.
-    return True
+    if not claim_types:
+        return True
+    article = _article_int(citation.article_number)
+    para = _norm(chunk.paragraph_ref or citation.paragraph_ref or "")
+    para_known = bool(para)
+    if article is None:
+        return False
+
+    allowed = False
+    if "legal_basis" in claim_types:
+        allowed = allowed or (article in {6}) or (article in {13, 14} and (not para_known or para.startswith("1")))
+    if "retention" in claim_types:
+        allowed = allowed or (article == 5) or (article in {13, 14} and (not para_known or para.startswith("2")))
+    if "rights" in claim_types:
+        allowed = allowed or (article == 12) or (article in {13, 14} and (not para_known or para.startswith("2"))) or (15 <= article <= 22)
+    if "controller_contact" in claim_types:
+        allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("1")))
+    if "complaint" in claim_types:
+        allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("2"))) or article == 77
+    if "transfer" in claim_types:
+        allowed = allowed or article in {13, 14, 44, 45, 46, 47, 49}
+    if "sensitive_data" in claim_types:
+        allowed = allowed or article in {9, 13, 14}
+    if "profiling" in claim_types:
+        allowed = allowed or article in {13, 14, 22}
+    return allowed
+
+
+def _finding_mentions_internal_control_only(text: str) -> bool:
+    norm = _norm(text)
+    internal_signals = {
+        "personal data breach",
+        "breach notification authority",
+        "incident response",
+        "undue delay",
+        "article 33",
+        "article 34",
+        "article 70",
+    }
+    return any(s in norm for s in internal_signals)
 
 
 def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, document_mode: str) -> bool:
@@ -565,18 +606,35 @@ def _targeted_notice_query(section: SectionData) -> str:
 
 
 def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
-    missing_text = ", ".join(missing)
+    labels = [NOTICE_REQUIREMENT_LABELS.get(item, item) for item in missing]
+    missing_text = ", ".join(labels)
+    mode = _collection_mode(section)
+    if mode == "indirect":
+        basis = "Articles 14(1)-(2)"
+    elif mode == "direct":
+        basis = "Articles 13(1)-(2)"
+    else:
+        basis = "Articles 13(1)-(2) and 14(1)-(2)"
     return (
         f"The section appears to omit mandatory privacy-notice disclosures: {missing_text}. "
-        "Based on the provided excerpt, this indicates incomplete transparency duties under GDPR Articles 12-14."
+        f"Based on the excerpt, this indicates incomplete transparency duties under {basis}."
     )
 
 
 def _tailored_notice_remediation(section: SectionData, missing: list[str]) -> str:
-    return (
-        "Add explicit privacy-notice disclosures for missing mandatory items "
-        "(controller contact, legal basis, rights, retention criteria, and complaint-right information where applicable)."
-    )
+    items: list[str] = []
+    if "controller_contact" in missing:
+        items.append("identify the specific controller entity and add contact details")
+    if "legal_basis" in missing:
+        items.append("state legal basis per purpose")
+    if "rights" in missing:
+        items.append("add a full data-subject-rights section")
+    if "retention" in missing:
+        items.append("provide retention period or criteria")
+    if "complaint" in missing:
+        items.append("include supervisory-authority complaint-right information")
+    text = "; ".join(items) if items else "add missing transparency disclosures"
+    return f"Update the notice to {text}, with article-level mapping in Articles 13/14."
 
 
 def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
@@ -830,6 +888,17 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         f = _coerce_finding(llm_finding)
         f.gap_note = _sanitize_legal_reference_text(f.gap_note)
         f.remediation_note = _sanitize_legal_reference_text(f.remediation_note)
+        if document_mode == "privacy_notice" and _finding_mentions_internal_control_only(f"{f.gap_note or ''} {f.remediation_note or ''}"):
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note=(
+                    "The identified issue appears to concern internal controller operations (e.g., breach workflow) "
+                    "rather than mandatory external privacy-notice disclosures. Manual legal review required."
+                ),
+                remediation_note=None,
+                citations=[],
+            )
         claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":

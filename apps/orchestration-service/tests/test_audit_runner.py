@@ -21,6 +21,7 @@ from app.services.audit_runner import (
     _retry_needed,
     _salvage_citations_from_retrieved,
     _sanitize_legal_reference_text,
+    _finding_mentions_internal_control_only,
     _runtime_budget_exceeded,
     _targeted_notice_query,
 )
@@ -307,7 +308,13 @@ def test_claim_types_extract_legal_basis_not_transfer():
     assert "transfer" not in claims
 
 
-def test_citation_claim_compatible_allows_article_14_para_3_for_legal_basis_claim_in_rollback_mode():
+def test_claim_types_extract_sensitive_and_profiling():
+    claims = _claim_types_from_text("Profiling outputs and explicit consent for special category data under Article 9.")
+    assert "profiling" in claims
+    assert "sensitive_data" in claims
+
+
+def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_claim():
     citation = LlmCitation(chunk_id="c1", article_number="14", paragraph_ref="3-4")
     chunk = RetrievalChunk(
         chunk_id="c1",
@@ -317,7 +324,7 @@ def test_citation_claim_compatible_allows_article_14_para_3_for_legal_basis_clai
         content="timing for disclosure",
         score=0.91,
     )
-    assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is True
+    assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is False
 
 
 def test_citation_claim_compatible_allows_article_14_when_paragraph_unknown_for_legal_basis():
@@ -389,6 +396,10 @@ def test_sanitize_legal_reference_fixes_wrong_article_pointer():
     assert _sanitize_legal_reference_text(text) == "Legal basis should be disclosed under Article 14(1)(c)."
 
 
+def test_internal_control_only_detection_for_breach_workflow_language():
+    assert _finding_mentions_internal_control_only("Missing undue delay breach notification workflow under Article 33.") is True
+
+
 def test_tailored_notice_gap_and_remediation_use_generic_template():
     section = SectionData(
         id="s7m",
@@ -413,7 +424,7 @@ def test_tailored_notice_gap_and_remediation_use_generic_template():
     )
     assert finding is not None
     assert "appears to omit mandatory privacy-notice disclosures" in (finding.gap_note or "")
-    assert "Add explicit privacy-notice disclosures for missing mandatory items" in (finding.remediation_note or "")
+    assert "identify the specific controller entity and add contact details" in (finding.remediation_note or "")
 
 
 def test_salvage_citations_from_retrieved_returns_claim_compatible_candidates():
@@ -431,7 +442,7 @@ def test_salvage_citations_from_retrieved_returns_claim_compatible_candidates():
     ]
     salvaged = _salvage_citations_from_retrieved(chunks, section, "privacy_notice", "Missing legal basis disclosure")
     assert salvaged
-    assert salvaged[0].chunk_id == "c14p34"
+    assert salvaged[0].chunk_id == "c14p1"
 
 
 def test_targeted_notice_query_uses_article_14_for_indirect_mode():
