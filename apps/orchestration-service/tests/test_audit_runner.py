@@ -6,8 +6,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.services.audit_runner import (
     _article_int,
     _build_transfer_gap,
+    _build_retention_gap,
     _citation_claim_compatible,
     _claim_types_from_text,
+    _fallback_claim_types_from_section,
     _build_mandatory_notice_gap,
     _collection_mode,
     _enforce_substantive_citation_gate,
@@ -314,6 +316,19 @@ def test_claim_types_extract_sensitive_and_profiling():
     assert "sensitive_data" in claims
 
 
+def test_fallback_claim_types_from_section_for_transfer_topic():
+    section = SectionData(
+        id="sx1",
+        section_order=1,
+        section_title="International Transfers",
+        content="We transfer data outside the EEA.",
+        page_start=1,
+        page_end=1,
+    )
+    inferred = _fallback_claim_types_from_section(section)
+    assert "transfer" in inferred
+
+
 def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_claim():
     citation = LlmCitation(chunk_id="c1", article_number="14", paragraph_ref="3-4")
     chunk = RetrievalChunk(
@@ -325,6 +340,19 @@ def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_cla
         score=0.91,
     )
     assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is False
+
+
+def test_citation_claim_compatible_rejects_article_13_para_3_for_transfer_claim():
+    citation = LlmCitation(chunk_id="c2", article_number="13", paragraph_ref="3-4")
+    chunk = RetrievalChunk(
+        chunk_id="c2",
+        article_number="13",
+        article_title="Information to be provided",
+        paragraph_ref="3-4",
+        content="further processing information",
+        score=0.86,
+    )
+    assert _citation_claim_compatible(citation, chunk, {"transfer"}) is False
 
 
 def test_citation_claim_compatible_allows_article_14_when_paragraph_unknown_for_legal_basis():
@@ -389,6 +417,25 @@ def test_transfer_gap_prioritizes_transfer_articles():
     finding = _build_transfer_gap(section, chunks)
     assert finding is not None
     assert finding.citations[0].article_number == "45"
+
+
+def test_build_retention_gap_returns_gap_with_articles_13_14_5():
+    section = SectionData(
+        id="sx2",
+        section_order=2,
+        section_title="Retention",
+        content="We keep data while needed.",
+        page_start=2,
+        page_end=2,
+    )
+    chunks = [
+        RetrievalChunk(chunk_id="c5", article_number="5", article_title="", paragraph_ref="1(e)", content="storage limitation", score=0.75),
+        RetrievalChunk(chunk_id="c13", article_number="13", article_title="", paragraph_ref="2", content="retention period", score=0.71),
+    ]
+    finding = _build_retention_gap(section, chunks)
+    assert finding is not None
+    assert finding.status == "gap"
+    assert len(finding.citations) >= 1
 
 
 def test_sanitize_legal_reference_fixes_wrong_article_pointer():

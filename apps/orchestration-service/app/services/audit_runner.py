@@ -398,12 +398,32 @@ def _citation_claim_compatible(citation: LlmCitation, chunk: RetrievalChunk, cla
     if "complaint" in claim_types:
         allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("2"))) or article == 77
     if "transfer" in claim_types:
-        allowed = allowed or article in {13, 14, 44, 45, 46, 47, 49}
+        if article in {44, 45, 46, 47, 49}:
+            allowed = True
+        elif article in {13, 14}:
+            allowed = allowed or (not para_known or para.startswith("1"))
     if "sensitive_data" in claim_types:
         allowed = allowed or article in {9, 13, 14}
     if "profiling" in claim_types:
         allowed = allowed or article in {13, 14, 22}
     return allowed
+
+
+def _fallback_claim_types_from_section(section: SectionData) -> set[str]:
+    topic = _norm(_infer_topic(section))
+    inferred: set[str] = set()
+    if "retention" in topic:
+        inferred.add("retention")
+    if "rights" in topic or "data subject" in topic:
+        inferred.add("rights")
+    if "transfer" in topic or "international" in topic:
+        inferred.add("transfer")
+    if "consent" in topic or "lawful basis" in topic:
+        inferred.add("legal_basis")
+    section_ctx = _section_context_signals(section)
+    if _contains_any(section_ctx, {"controller", "contact", "dpo"}):
+        inferred.add("controller_contact")
+    return inferred
 
 
 def _finding_mentions_internal_control_only(text: str) -> bool:
@@ -449,6 +469,8 @@ def _validate_citations(
 ) -> list[LlmCitation]:
     by_chunk = {c.chunk_id: c for c in retrieved}
     claim_types = _claim_types_from_text(claim_text)
+    if not claim_types:
+        claim_types = _fallback_claim_types_from_section(section)
     valid: list[LlmCitation] = []
     for cit in citations:
         chunk = by_chunk.get(cit.chunk_id)
@@ -688,6 +710,36 @@ def _build_transfer_gap(section: SectionData, chunks: list[RetrievalChunk]) -> L
         remediation_note=(
             "Disclose whether transfers rely on adequacy decisions (Article 45) or safeguards such as SCCs (Article 46), "
             "and specify relevant third-country transfer information in the notice."
+        ),
+        citations=citations,
+    )
+
+
+def _build_retention_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
+    candidates = [ch for ch in chunks if _article_int(ch.article_number) in {5, 13, 14}]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda ch: (0 if _article_int(ch.article_number) in {13, 14} else 1, -ch.score))
+    citations = [
+        LlmCitation(
+            chunk_id=ch.chunk_id,
+            article_number=ch.article_number,
+            paragraph_ref=ch.paragraph_ref,
+            article_title=ch.article_title,
+            excerpt=ch.content[:180],
+        )
+        for ch in candidates[:2]
+    ]
+    return LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note=(
+            "The section does not clearly disclose the retention period or the criteria used to determine retention duration, "
+            "which is required for privacy-notice transparency."
+        ),
+        remediation_note=(
+            "Add retention period or objective retention criteria for each relevant data category, mapped to Articles 13(2)(a) and 14(2)(a), "
+            "and align storage-limitation language with Article 5(1)(e)."
         ),
         citations=citations,
     )
@@ -940,6 +992,27 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 f = fallback
                 claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
                 valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
+        if f.status == "needs review" and document_mode == "privacy_notice":
+            review_text = _norm(f"{f.gap_note or ''} {section.section_title} {section.content[:500]}")
+            if "retention" in review_text or "storage period" in review_text:
+                retention_query = (
+                    f"GDPR retention transparency disclosures Articles 13(2)(a), 14(2)(a), and Article 5(1)(e). "
+                    f"Section context: {section.section_title}. {section.content[:600]}"
+                )
+                retention_chunks = _rerank_chunks_for_mode(section, knowledge.search(query=retention_query, k=8), document_mode)
+                merged: list[RetrievalChunk] = []
+                seen_chunk_ids: set[str] = set()
+                for ch in [*chunks, *retention_chunks]:
+                    if ch.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(ch.chunk_id)
+                    merged.append(ch)
+                chunks = merged[:8]
+                retention_gap = _build_retention_gap(section, chunks)
+                if retention_gap is not None:
+                    f = retention_gap
+                    claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
+                    valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         f = _enforce_substantive_citation_gate(f, valid_citations)
 
         finding_row = Finding(
