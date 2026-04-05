@@ -8,6 +8,7 @@ from app.services.audit_runner import (
     _build_mandatory_notice_gap,
     _enforce_substantive_citation_gate,
     _evidence_sufficient,
+    _fallback_notice_citations,
     _is_legally_relevant_citation,
     _is_not_applicable,
     _paragraph_ref_compatible,
@@ -161,3 +162,35 @@ def test_build_mandatory_notice_gap_when_multiple_required_disclosures_missing()
     assert finding is not None
     assert finding.status == "gap"
     assert len(finding.citations) == 1
+
+
+def test_fallback_notice_citations_deprioritizes_article_14_paragraph_5():
+    section = SectionData(
+        id="s6",
+        section_order=6,
+        section_title="Data We Collect",
+        content="We collect profile and usage data from users.",
+        page_start=6,
+        page_end=6,
+    )
+    chunks = [
+        RetrievalChunk(
+            chunk_id="c14p5",
+            article_number="14",
+            article_title="Information to be provided",
+            paragraph_ref="5",
+            content="Paragraphs 1 to 4 shall not apply...",
+            score=0.95,
+        ),
+        RetrievalChunk(
+            chunk_id="c13p1",
+            article_number="13",
+            article_title="Information to be provided",
+            paragraph_ref="1",
+            content="Controller identity and legal basis must be provided",
+            score=0.80,
+        ),
+    ]
+    fallback = _fallback_notice_citations(section, chunks)
+    assert fallback
+    assert fallback[0].chunk_id == "c13p1"

@@ -59,6 +59,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
+        .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
         audit = db.get(Audit, audit_id)
@@ -66,7 +67,11 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
             raise HTTPException(status_code=404, detail="Audit not found")
 
     out: list[FindingOut] = []
+    seen: set[str] = set()
     for row in rows:
+        if row.id in seen:
+            continue
+        seen.add(row.id)
         out.append(
             FindingOut(
                 id=row.id,

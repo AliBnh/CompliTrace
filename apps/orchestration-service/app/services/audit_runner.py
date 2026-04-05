@@ -321,12 +321,44 @@ def _validate_citations(citations: list[LlmCitation], retrieved: list[RetrievalC
     return valid
 
 
-def _fallback_notice_citations(chunks: list[RetrievalChunk]) -> list[LlmCitation]:
-    fallback: list[LlmCitation] = []
+def _citation_priority_for_notice(section: SectionData, chunk: RetrievalChunk) -> float:
+    article = _article_int(chunk.article_number)
+    if article is None:
+        return -1.0
+    section_ctx = _section_context_signals(section)
+    paragraph = _norm(chunk.paragraph_ref or "")
+    score = 0.0
+    if article in {13, 14}:
+        score += 3.0
+        if paragraph in {"1", "2", "1-2", "2-3", "1(a)-(c)"}:
+            score += 1.5
+        if paragraph.startswith("5"):  # Article 14(5) exceptions are weak for core disclosure propositions
+            score -= 2.0
+    if article == 12:
+        score += 2.0
+    if article == 5:
+        score += 1.4
+    if article in {44, 45, 46, 49} and _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        score += 1.2
+    if article == 44 and not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        score -= 1.2
+    return score
+
+
+def _fallback_notice_citations(section: SectionData, chunks: list[RetrievalChunk]) -> list[LlmCitation]:
+    candidates: list[tuple[float, RetrievalChunk]] = []
     for ch in chunks:
         article = _article_int(ch.article_number)
         if article not in {5, 12, 13, 14, 44, 45, 46, 49}:
             continue
+        priority = _citation_priority_for_notice(section, ch)
+        if priority <= 0:
+            continue
+        candidates.append((priority, ch))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    fallback: list[LlmCitation] = []
+    for _priority, ch in candidates:
         fallback.append(
             LlmCitation(
                 chunk_id=ch.chunk_id,
@@ -354,7 +386,7 @@ def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChun
     missing = _missing_notice_requirements(section)
     if len(missing) < 2:
         return None
-    citations = _fallback_notice_citations(chunks)
+    citations = _fallback_notice_citations(section, chunks)
     if not citations:
         return None
     readable = ", ".join(missing)
@@ -363,7 +395,7 @@ def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChun
         severity="high" if len(missing) >= 3 else "medium",
         gap_note=(
             f"The section appears to omit mandatory privacy-notice disclosures: {readable}. "
-            "This indicates incomplete transparency duties under GDPR Articles 12-14."
+            "Based on the provided excerpt, this indicates incomplete transparency duties under GDPR Articles 12-14."
         ),
         remediation_note=(
             "Add explicit privacy-notice disclosures for missing mandatory items (controller contact, legal basis, "
