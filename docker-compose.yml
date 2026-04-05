@@ -50,7 +50,37 @@ services:
     volumes:
       - ingestion_storage:/app/storage
 
+  orchestration-service:
+    build:
+      context: .
+      dockerfile: apps/orchestration-service/Dockerfile
+    container_name: complitrace-orchestration-service
+    depends_on:
+      - postgres
+      - ingestion-service
+      - knowledge-service
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/complitrace
+      INGESTION_SERVICE_URL: http://ingestion-service:8001
+      KNOWLEDGE_SERVICE_URL: http://knowledge-service:8002
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-groq}
+      MODEL_NAME: ${MODEL_NAME:-openai/gpt-oss-120b}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.1}
+      FALLBACK_MODEL_PROVIDER: ${FALLBACK_MODEL_PROVIDER:-gemini}
+      FALLBACK_MODEL_NAME: ${FALLBACK_MODEL_NAME:-gemini-2.5-flash}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      CORPUS_VERSION: ${CORPUS_VERSION:-gdpr-2016-679-v1}
+      PROMPT_TEMPLATE_VERSION: ${PROMPT_TEMPLATE_VERSION:-v1.0}
+      REPORTS_DIR: /app/storage/reports
+    ports:
+      - "8003:8003"
+    volumes:
+      - orchestration_storage:/app/storage
+
 volumes:
   qdrant_storage:
   postgres_data:
   ingestion_storage:
+  orchestration_storage:
