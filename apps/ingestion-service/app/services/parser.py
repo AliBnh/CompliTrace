@@ -22,6 +22,8 @@ FILE_PATH_RE = re.compile(r"([A-Za-z]:\\|/).*(\\.pdf|\\.docx?)", re.IGNORECASE)
 NOISE_LINE_RE = re.compile(r"^y:\\\\|approved policies|approved templates", re.IGNORECASE)
 POLICY_HEADER_RE = re.compile(r"privacy policy", re.IGNORECASE)
 INLINE_HEADING_SPLIT_RE = re.compile(r"\s(?=(?:\d{1,2}\.\d{1,2}|\d{1,2}\.)\s+[A-Z])")
+NUMBERED_LEAD_RE = re.compile(r"^(?P<num>\d{1,2}(?:\.\d{1,2})?\.?)\s+(?P<rest>.+)$")
+STOP_TITLE_WORDS = {"we", "our", "this", "these", "by", "when", "in", "to", "individuals", "users"}
 
 
 def is_heading(line: str) -> bool:
@@ -68,6 +70,38 @@ def split_inline_headings(line: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def scrub_inline_noise(text: str) -> str:
+    text = POLICY_HEADER_RE.sub("", text)
+    text = re.sub(r"\b\d{4}\.docx\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
+def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
+    """Split lines like `6. Cookies ... We use ...` into heading and body."""
+    m = NUMBERED_LEAD_RE.match(line)
+    if not m:
+        return None
+
+    num = m.group("num")
+    rest = m.group("rest").strip()
+    words = rest.split()
+    if len(words) < 3:
+        return None
+
+    cut = None
+    for i, w in enumerate(words):
+        if i >= 3 and w.lower().strip(",.;:()") in STOP_TITLE_WORDS:
+            cut = i
+            break
+    if cut is None:
+        cut = min(len(words), 12)
+
+    heading = f"{num} {' '.join(words[:cut])}".strip()
+    body = " ".join(words[cut:]).strip()
+    return heading, body
+
+
 def _merge_small_sections(sections: list[ParsedSection], min_words: int = 50) -> list[ParsedSection]:
     if not sections:
         return sections
@@ -109,8 +143,18 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
         lines: list[str] = []
         for raw_line in text.splitlines():
             for part in split_inline_headings(raw_line):
-                if not is_noise_line(part):
-                    lines.append(part)
+                cleaned = scrub_inline_noise(part)
+                if not cleaned:
+                    continue
+                split_pair = split_numbered_heading_and_body(cleaned)
+                if split_pair:
+                    heading_part, body_part = split_pair
+                    if not is_noise_line(heading_part):
+                        lines.append(heading_part)
+                    if body_part and not is_noise_line(body_part):
+                        lines.append(body_part)
+                elif not is_noise_line(cleaned):
+                    lines.append(cleaned)
         pages.append((i, lines))
 
     sections: list[ParsedSection] = []

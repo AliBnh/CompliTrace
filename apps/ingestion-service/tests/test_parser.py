@@ -3,7 +3,14 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.services.parser import ParsedSection, is_heading, is_noise_line, split_inline_headings
+from app.services.parser import (
+    ParsedSection,
+    is_heading,
+    is_noise_line,
+    scrub_inline_noise,
+    split_inline_headings,
+    split_numbered_heading_and_body,
+)
 
 
 def test_heading_detection():
@@ -32,3 +39,15 @@ def test_split_inline_headings():
     assert len(parts) == 2
     assert parts[0].startswith("5.5 Compliance")
     assert parts[1].startswith("6. Cookies")
+
+
+def test_split_numbered_heading_and_body():
+    line = "6. Cookies, Similar Technologies, and Digital Tracking We use cookies and related tools."
+    heading, body = split_numbered_heading_and_body(line) or ("", "")
+    assert heading.startswith("6. Cookies")
+    assert body.startswith("We use cookies")
+
+
+def test_scrub_inline_noise():
+    line = "NovaStrata Technologies - Privacy Policy 2019.docx"
+    assert scrub_inline_noise(line) == "NovaStrata Technologies -"
