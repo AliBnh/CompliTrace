@@ -272,6 +272,7 @@ def _preferred_articles_for_section(section: SectionData, document_mode: str) ->
 
 def _section_guidance(section: SectionData, document_mode: str) -> str:
     topic = _norm(_infer_topic(section))
+    section_ctx = _section_context_signals(section)
     if document_mode != "privacy_notice":
         return (
             "Use accountability-focused analysis. Prefer Articles 5, 24, 25, 30, and 32 for internal controls. "
@@ -280,10 +281,24 @@ def _section_guidance(section: SectionData, document_mode: str) -> str:
     if "transfer" in topic or "international" in topic:
         return (
             "For privacy notices: first test disclosure obligations under Articles 13(1)(f) and 14(1)(f). "
-            "Use Article 46 only when the section clearly indicates third-country transfer safeguards."
+            "Use Chapter V transfer mechanism support (Articles 44-49, especially 46) only when transfer context is explicit. "
+            "Do not use Articles 13(3)-(4), 15, or 18 as primary transfer-safeguard basis."
         )
     if "rights" in topic or "data subject" in topic:
-        return "For privacy notices: prioritize Articles 12-22 rights transparency and response obligations."
+        return (
+            "For privacy notices: assess rights notice coverage under Articles 13(2)(b)-(d) and 14(2)(c)-(e), "
+            "then use Articles 15-21 only as supporting rights context."
+        )
+    if "lawful basis" in topic or "consent" in topic:
+        return (
+            "For privacy notices: legal basis and purpose disclosures should map to Articles 13(1)(c) and 14(1)(c). "
+            "Do not use Articles 24 or 25 as substitute citations for notice disclosure duties."
+        )
+    if "profile" in section_ctx or "scor" in section_ctx or "segment" in section_ctx or "churn" in section_ctx:
+        return (
+            "The section appears to discuss profiling outputs; evaluate transparency under Articles 13(2)(f) and 14(2)(g), "
+            "and reference Article 22 only conditionally if legal or similarly significant effects are explicitly indicated."
+        )
     if "retention" in topic:
         return "For privacy notices: prioritize retention transparency under Articles 13(2)(a), 14(2)(a), and Article 5(1)(e)."
     return (
@@ -446,6 +461,8 @@ def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, d
         return False
     section_ctx = _section_context_signals(section)
     if document_mode == "privacy_notice":
+        if article in {24, 25, 33, 34, 70, 18}:
+            return False
         if article == 88 and not _contains_any(section_ctx, EMPLOYMENT_SIGNALS):
             return False
         if article == 30 and not _contains_any(section_ctx, ROPA_SIGNALS):
@@ -778,6 +795,10 @@ def _sanitize_legal_reference_text(text: str | None) -> str | None:
     fixed = re.sub(r"Article\s*14\(1\)\(f\)", "Article 14(1)(c)", fixed, flags=re.IGNORECASE)
     fixed = re.sub(r"Article\s*14\(a\)", "Article 14(1)(a)", fixed, flags=re.IGNORECASE)
     fixed = re.sub(r"Article\s*14\(c\)", "Article 14(1)(c)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*13\(a\)", "Article 13(1)(a)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*13\(b\)", "Article 13(1)(b)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*13\(c\)", "Article 13(1)(c)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*14\(b\)", "Article 14(1)(b)", fixed, flags=re.IGNORECASE)
     return fixed
 
 

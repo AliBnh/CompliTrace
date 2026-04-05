@@ -17,7 +17,10 @@ SYSTEM_PROMPT = (
     "Citations must only reference provided chunks and include chunk_id + article_number. "
     "If status is partial or gap, include at least one concrete citation. "
     "If evidence is weak, return needs review instead of speculating. "
-    "For privacy notices prioritize disclosure obligations under Articles 12-14 before internal governance articles."
+    "For privacy notices prioritize disclosure obligations under Articles 12-14 before internal governance articles. "
+    "Do not use Articles 24, 25, 33, 34, or 70 as primary citations for missing external privacy-notice disclosures. "
+    "For transfer transparency use Articles 13(1)(f)/14(1)(f) and Chapter V (44-49). "
+    "Do not use Article 18 as transfer-safeguard evidence."
 )
 
 STATUS_MAP = {

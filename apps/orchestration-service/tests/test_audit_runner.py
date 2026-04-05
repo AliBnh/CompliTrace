@@ -163,6 +163,32 @@ def test_legal_relevance_rejects_article_44_without_transfer_signals():
     assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
 
 
+def test_legal_relevance_rejects_article_18_for_privacy_notice():
+    section = SectionData(
+        id="s4c",
+        section_order=4,
+        section_title="International Processing",
+        content="Data may be transferred internationally.",
+        page_start=4,
+        page_end=4,
+    )
+    citation = LlmCitation(chunk_id="c18", article_number="18")
+    assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
+
+
+def test_legal_relevance_rejects_article_24_for_privacy_notice():
+    section = SectionData(
+        id="s4d",
+        section_order=4,
+        section_title="Privacy Notice",
+        content="We process personal data for service delivery.",
+        page_start=4,
+        page_end=4,
+    )
+    citation = LlmCitation(chunk_id="c24", article_number="24")
+    assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
+
+
 def test_build_mandatory_notice_gap_when_multiple_required_disclosures_missing():
     section = SectionData(
         id="s5",
@@ -441,6 +467,11 @@ def test_build_retention_gap_returns_gap_with_articles_13_14_5():
 def test_sanitize_legal_reference_fixes_wrong_article_pointer():
     text = "Legal basis should be disclosed under Article 14(1)(f)."
     assert _sanitize_legal_reference_text(text) == "Legal basis should be disclosed under Article 14(1)(c)."
+
+
+def test_sanitize_legal_reference_fixes_article_letter_notation():
+    text = "Controller identity under Article 13(a), DPO under Article 14(b)."
+    assert _sanitize_legal_reference_text(text) == "Controller identity under Article 13(1)(a), DPO under Article 14(1)(b)."
 
 
 def test_internal_control_only_detection_for_breach_workflow_language():
