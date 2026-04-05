@@ -1,0 +1,795 @@
+{
+  "timestamp_utc": "2026-04-04T22:20:15Z",
+  "base_url": "http://localhost:8002",
+  "k": 5,
+  "repeats": 2,
+  "health": {
+    "status": "ok",
+    "collection": "gdpr_chunks",
+    "indexed": 330,
+    "existing": 0
+  },
+  "summary": {
+    "queries_total": 12,
+    "topk_expected_hit": 12,
+    "topk_expected_hit_rate": 1.0,
+    "top3_expected_hit": 12,
+    "top3_expected_hit_rate": 1.0,
+    "top1_stable_queries": 12,
+    "top1_stable_rate": 1.0,
+    "chunks_200": 24,
+    "chunks_total": 24,
+    "chunks_success_rate": 1.0
+  },
+  "queries": [
+    {
+      "name": "Storage limitation",
+      "query": "data retention period storage limitation personal data",
+      "expected_articles": [
+        "5",
+        "13"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "5",
+            "5",
+            "17",
+            "15",
+            "16"
+          ],
+          "scores": [
+            0.7461231,
+            0.7293149,
+            0.72506756,
+            0.72026646,
+            0.7082418
+          ],
+          "top_chunk_id": "gdpr-art-5-p-1-sp-d-e-seg-2-d1e14132476d",
+          "expected_found_top_k": [
+            "5"
+          ],
+          "expected_found_top_3": [
+            "5"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "5",
+            "5",
+            "17",
+            "15",
+            "16"
+          ],
+          "scores": [
+            0.7461231,
+            0.7293149,
+            0.72506756,
+            0.72026646,
+            0.7082418
+          ],
+          "top_chunk_id": "gdpr-art-5-p-1-sp-d-e-seg-2-d1e14132476d",
+          "expected_found_top_k": [
+            "5"
+          ],
+          "expected_found_top_3": [
+            "5"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.7461,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Lawful basis",
+      "query": "lawful basis for processing personal data contract consent",
+      "expected_articles": [
+        "6"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "6",
+            "20",
+            "7",
+            "13",
+            "7"
+          ],
+          "scores": [
+            0.85213923,
+            0.82075524,
+            0.81869924,
+            0.79975724,
+            0.7980092
+          ],
+          "top_chunk_id": "gdpr-art-6-p-1-sp-a-c-seg-1-6c973b2d3da3",
+          "expected_found_top_k": [
+            "6"
+          ],
+          "expected_found_top_3": [
+            "6"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "6",
+            "20",
+            "7",
+            "13",
+            "7"
+          ],
+          "scores": [
+            0.85213923,
+            0.82075524,
+            0.81869924,
+            0.79975724,
+            0.7980092
+          ],
+          "top_chunk_id": "gdpr-art-6-p-1-sp-a-c-seg-1-6c973b2d3da3",
+          "expected_found_top_k": [
+            "6"
+          ],
+          "expected_found_top_3": [
+            "6"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8521,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Data subject rights",
+      "query": "access rectification erasure objection portability rights",
+      "expected_articles": [
+        "15",
+        "16",
+        "17",
+        "18",
+        "20",
+        "21"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "17",
+            "20",
+            "18",
+            "14",
+            "89"
+          ],
+          "scores": [
+            0.6632836,
+            0.6545096,
+            0.65368843,
+            0.6476202,
+            0.6436813
+          ],
+          "top_chunk_id": "gdpr-art-17-p-1-sp-a-c-seg-1-929fc7365a5d",
+          "expected_found_top_k": [
+            "17",
+            "18",
+            "20"
+          ],
+          "expected_found_top_3": [
+            "17",
+            "18",
+            "20"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "17",
+            "20",
+            "18",
+            "14",
+            "89"
+          ],
+          "scores": [
+            0.6632836,
+            0.6545096,
+            0.65368843,
+            0.6476202,
+            0.6436813
+          ],
+          "top_chunk_id": "gdpr-art-17-p-1-sp-a-c-seg-1-929fc7365a5d",
+          "expected_found_top_k": [
+            "17",
+            "18",
+            "20"
+          ],
+          "expected_found_top_3": [
+            "17",
+            "18",
+            "20"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.6633,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "International transfers",
+      "query": "transfer personal data third country safeguards",
+      "expected_articles": [
+        "44",
+        "45",
+        "46"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "45",
+            "44",
+            "15",
+            "46",
+            "49"
+          ],
+          "scores": [
+            0.8521802,
+            0.83164823,
+            0.82189405,
+            0.81596094,
+            0.8076424
+          ],
+          "top_chunk_id": "gdpr-art-45-p-1-seg-1-d8d13d4c8693",
+          "expected_found_top_k": [
+            "44",
+            "45",
+            "46"
+          ],
+          "expected_found_top_3": [
+            "44",
+            "45"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "45",
+            "44",
+            "15",
+            "46",
+            "49"
+          ],
+          "scores": [
+            0.8521802,
+            0.83164823,
+            0.82189405,
+            0.81596094,
+            0.8076424
+          ],
+          "top_chunk_id": "gdpr-art-45-p-1-seg-1-d8d13d4c8693",
+          "expected_found_top_k": [
+            "44",
+            "45",
+            "46"
+          ],
+          "expected_found_top_3": [
+            "44",
+            "45"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8522,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Processor obligations",
+      "query": "processor contract obligations controller processor",
+      "expected_articles": [
+        "28"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "28",
+            "28",
+            "28",
+            "28",
+            "28"
+          ],
+          "scores": [
+            0.835917,
+            0.8194084,
+            0.80428064,
+            0.7855668,
+            0.7794941
+          ],
+          "top_chunk_id": "gdpr-art-28-p-1-2-seg-1-3b1f40fc2b87",
+          "expected_found_top_k": [
+            "28"
+          ],
+          "expected_found_top_3": [
+            "28"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "28",
+            "28",
+            "28",
+            "28",
+            "28"
+          ],
+          "scores": [
+            0.835917,
+            0.8194084,
+            0.80428064,
+            0.7855668,
+            0.7794941
+          ],
+          "top_chunk_id": "gdpr-art-28-p-1-2-seg-1-3b1f40fc2b87",
+          "expected_found_top_k": [
+            "28"
+          ],
+          "expected_found_top_3": [
+            "28"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8359,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Security measures",
+      "query": "appropriate technical organisational security measures",
+      "expected_articles": [
+        "32"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "32",
+            "24",
+            "46",
+            "34",
+            "5"
+          ],
+          "scores": [
+            0.78382874,
+            0.7564682,
+            0.71065426,
+            0.70879966,
+            0.7069185
+          ],
+          "top_chunk_id": "gdpr-art-32-p-1-seg-1-0a0a77727f29",
+          "expected_found_top_k": [
+            "32"
+          ],
+          "expected_found_top_3": [
+            "32"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "32",
+            "24",
+            "46",
+            "34",
+            "5"
+          ],
+          "scores": [
+            0.78382874,
+            0.7564682,
+            0.71065426,
+            0.70879966,
+            0.7069185
+          ],
+          "top_chunk_id": "gdpr-art-32-p-1-seg-1-0a0a77727f29",
+          "expected_found_top_k": [
+            "32"
+          ],
+          "expected_found_top_3": [
+            "32"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.7838,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Breach notification",
+      "query": "notify supervisory authority personal data breach 72 hours",
+      "expected_articles": [
+        "33"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "33",
+            "33",
+            "36",
+            "17",
+            "34"
+          ],
+          "scores": [
+            0.85226697,
+            0.7496321,
+            0.7038008,
+            0.69666266,
+            0.6958997
+          ],
+          "top_chunk_id": "gdpr-art-33-p-1-2-seg-1-c70c450c8919",
+          "expected_found_top_k": [
+            "33"
+          ],
+          "expected_found_top_3": [
+            "33"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "33",
+            "33",
+            "36",
+            "17",
+            "34"
+          ],
+          "scores": [
+            0.85226697,
+            0.7496321,
+            0.7038008,
+            0.69666266,
+            0.6958997
+          ],
+          "top_chunk_id": "gdpr-art-33-p-1-2-seg-1-c70c450c8919",
+          "expected_found_top_k": [
+            "33"
+          ],
+          "expected_found_top_3": [
+            "33"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8523,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "DPO designation",
+      "query": "data protection officer designation tasks",
+      "expected_articles": [
+        "37",
+        "38",
+        "39"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "37",
+            "39",
+            "38",
+            "37",
+            "38"
+          ],
+          "scores": [
+            0.85194886,
+            0.8468365,
+            0.83527225,
+            0.8235314,
+            0.8127087
+          ],
+          "top_chunk_id": "gdpr-art-37-p-5-6-seg-3-c9154e9937ed",
+          "expected_found_top_k": [
+            "37",
+            "38",
+            "39"
+          ],
+          "expected_found_top_3": [
+            "37",
+            "38",
+            "39"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "37",
+            "39",
+            "38",
+            "37",
+            "38"
+          ],
+          "scores": [
+            0.85194886,
+            0.8468365,
+            0.83527225,
+            0.8235314,
+            0.8127087
+          ],
+          "top_chunk_id": "gdpr-art-37-p-5-6-seg-3-c9154e9937ed",
+          "expected_found_top_k": [
+            "37",
+            "38",
+            "39"
+          ],
+          "expected_found_top_3": [
+            "37",
+            "38",
+            "39"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8519,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Purpose limitation",
+      "query": "purpose limitation collected for specified explicit legitimate purposes",
+      "expected_articles": [
+        "5"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "14",
+            "89",
+            "5",
+            "6",
+            "18"
+          ],
+          "scores": [
+            0.7295506,
+            0.72705436,
+            0.7216134,
+            0.7146669,
+            0.7072898
+          ],
+          "top_chunk_id": "gdpr-art-14-p-5-sp-a-b-seg-7-8b230d918464",
+          "expected_found_top_k": [
+            "5"
+          ],
+          "expected_found_top_3": [
+            "5"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "14",
+            "89",
+            "5",
+            "6",
+            "18"
+          ],
+          "scores": [
+            0.7295506,
+            0.72705436,
+            0.7216134,
+            0.7146669,
+            0.7072898
+          ],
+          "top_chunk_id": "gdpr-art-14-p-5-sp-a-b-seg-7-8b230d918464",
+          "expected_found_top_k": [
+            "5"
+          ],
+          "expected_found_top_3": [
+            "5"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.7296,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Children consent",
+      "query": "child consent information society services age",
+      "expected_articles": [
+        "8"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "8",
+            "12",
+            "7",
+            "40",
+            "7"
+          ],
+          "scores": [
+            0.81937206,
+            0.6938334,
+            0.63372564,
+            0.6278456,
+            0.6249401
+          ],
+          "top_chunk_id": "gdpr-art-8-p-1-2-seg-1-31506f4b6f78",
+          "expected_found_top_k": [
+            "8"
+          ],
+          "expected_found_top_3": [
+            "8"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "8",
+            "12",
+            "7",
+            "40",
+            "7"
+          ],
+          "scores": [
+            0.81937206,
+            0.6938334,
+            0.63372564,
+            0.6278456,
+            0.6249401
+          ],
+          "top_chunk_id": "gdpr-art-8-p-1-2-seg-1-31506f4b6f78",
+          "expected_found_top_k": [
+            "8"
+          ],
+          "expected_found_top_3": [
+            "8"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8194,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Transparency info",
+      "query": "information to be provided to data subject",
+      "expected_articles": [
+        "13",
+        "14"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "12",
+            "14",
+            "13",
+            "13",
+            "14"
+          ],
+          "scores": [
+            0.8315661,
+            0.7951534,
+            0.79256105,
+            0.7793264,
+            0.7739998
+          ],
+          "top_chunk_id": "gdpr-art-12-p-1-seg-1-60f642c59474",
+          "expected_found_top_k": [
+            "13",
+            "14"
+          ],
+          "expected_found_top_3": [
+            "13",
+            "14"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "12",
+            "14",
+            "13",
+            "13",
+            "14"
+          ],
+          "scores": [
+            0.8315661,
+            0.7951534,
+            0.79256105,
+            0.7793264,
+            0.7739998
+          ],
+          "top_chunk_id": "gdpr-art-12-p-1-seg-1-60f642c59474",
+          "expected_found_top_k": [
+            "13",
+            "14"
+          ],
+          "expected_found_top_3": [
+            "13",
+            "14"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.8316,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    },
+    {
+      "name": "Records of processing",
+      "query": "records of processing activities controller processor",
+      "expected_articles": [
+        "30"
+      ],
+      "runs": [
+        {
+          "articles": [
+            "30",
+            "30",
+            "28",
+            "37",
+            "38"
+          ],
+          "scores": [
+            0.7858561,
+            0.76502764,
+            0.7488394,
+            0.7349086,
+            0.73256445
+          ],
+          "top_chunk_id": "gdpr-art-30-p-1-sp-a-c-seg-1-3c94582bf203",
+          "expected_found_top_k": [
+            "30"
+          ],
+          "expected_found_top_3": [
+            "30"
+          ],
+          "chunk_status": 200
+        },
+        {
+          "articles": [
+            "30",
+            "30",
+            "28",
+            "37",
+            "38"
+          ],
+          "scores": [
+            0.7858561,
+            0.76502764,
+            0.7488394,
+            0.7349086,
+            0.73256445
+          ],
+          "top_chunk_id": "gdpr-art-30-p-1-sp-a-c-seg-1-3c94582bf203",
+          "expected_found_top_k": [
+            "30"
+          ],
+          "expected_found_top_3": [
+            "30"
+          ],
+          "chunk_status": 200
+        }
+      ],
+      "top1_stable": true,
+      "avg_top1_score": 0.7859,
+      "expected_in_top_k_any_run": true,
+      "expected_in_top_3_any_run": true
+    }
+  ]
+}
