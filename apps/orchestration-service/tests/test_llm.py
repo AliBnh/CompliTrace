@@ -131,3 +131,30 @@ def test_groq_retries_429_and_succeeds(monkeypatch):
 
     assert calls["n"] == 2
     assert "compliant" in raw
+
+
+def test_returns_rate_limited_sentinel_when_all_attempts_429(monkeypatch):
+    def always_429(*_args, **_kwargs):
+        raise httpx.HTTPStatusError(
+            "429 Too Many Requests",
+            request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+            response=httpx.Response(429),
+        )
+
+    monkeypatch.setattr(llm, "_groq_chat", always_429)
+
+    finding, raw = llm.run_llm_classification(
+        section_title="Retention",
+        section_content="We keep records.",
+        chunks=_chunks(),
+        model_provider="groq",
+        model_name="primary-model",
+        temperature=0.1,
+        groq_api_key="gk",
+        gemini_api_key=None,
+        fallback_provider="gemini",
+        fallback_model="fallback-model",
+    )
+
+    assert finding is None
+    assert raw == "__rate_limited__"

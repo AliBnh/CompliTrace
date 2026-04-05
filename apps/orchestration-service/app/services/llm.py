@@ -116,6 +116,7 @@ def run_llm_classification(
     prompt = _build_user_prompt(section_title, section_content, chunks)
     raw = ""
     attempts: list[tuple[str, str, Callable[[], str]]] = []
+    saw_rate_limit = False
 
     if model_provider == "groq" and groq_api_key:
         attempts.append(("primary", "groq", lambda: _groq_chat(groq_api_key, model_name, temperature, prompt)))
@@ -130,12 +131,18 @@ def run_llm_classification(
     for _role, _provider, call in attempts:
         try:
             raw = call()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                saw_rate_limit = True
+            continue
         except httpx.HTTPError:
             continue
         if raw:
             break
 
     if not raw:
+        if saw_rate_limit:
+            return None, "__rate_limited__"
         return None, ""
 
     block = _extract_json_block(raw)

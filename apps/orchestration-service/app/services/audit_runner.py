@@ -169,6 +169,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     db.commit()
 
     sections = ingestion.get_sections(audit.document_id)
+    llm_rate_limited = False
 
     for section in sorted(sections, key=lambda s: s.section_order):
         if _is_not_applicable(section):
@@ -211,19 +212,30 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             db.commit()
             continue
 
-        with llm_inference_latency_seconds.time():
-            llm_finding, _raw = run_llm_classification(
-                section_title=section.section_title,
-                section_content=section.content,
-                chunks=chunks,
-                model_provider=settings.model_provider,
-                model_name=settings.model_name,
-                temperature=settings.model_temperature,
-                groq_api_key=settings.groq_api_key,
-                gemini_api_key=settings.gemini_api_key,
-                fallback_provider=settings.fallback_model_provider,
-                fallback_model=settings.fallback_model_name,
+        if llm_rate_limited:
+            llm_finding = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note="LLM rate limit reached earlier in this audit. Manual review required.",
+                remediation_note=None,
+                citations=[],
             )
+        else:
+            with llm_inference_latency_seconds.time():
+                llm_finding, raw = run_llm_classification(
+                    section_title=section.section_title,
+                    section_content=section.content,
+                    chunks=chunks,
+                    model_provider=settings.model_provider,
+                    model_name=settings.model_name,
+                    temperature=settings.model_temperature,
+                    groq_api_key=settings.groq_api_key,
+                    gemini_api_key=settings.gemini_api_key,
+                    fallback_provider=settings.fallback_model_provider,
+                    fallback_model=settings.fallback_model_name,
+                )
+            if raw == "__rate_limited__":
+                llm_rate_limited = True
 
         f = _coerce_finding(llm_finding)
         valid_citations = _validate_citations(f.citations, chunks)
