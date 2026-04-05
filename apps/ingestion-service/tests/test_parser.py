@@ -5,10 +5,12 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.parser import (
     ParsedSection,
+    _detect_boilerplate_lines,
+    _refine_sections,
+    _remove_boilerplate_phrases,
     is_heading,
     is_noise_line,
-    scrub_inline_noise,
-    split_inline_headings,
+    split_inline_numbered_chunks,
     split_numbered_heading_and_body,
 )
 
@@ -27,15 +29,14 @@ def test_parsed_section_dataclass():
 
 
 def test_noise_line_detection():
-    assert is_noise_line(r"Y:\\HM Policies & Procedures NEW\\GDPR\\Approved Policies\\GROUP Data Protection Policy_GDPR 2019.docx")
+    assert is_noise_line(r"Y:\\Policies\\archive\\doc.pdf")
     assert is_noise_line("Page 3")
-    assert is_noise_line("NovaStrata Technologies - Privacy Policy")
     assert not is_noise_line("Data Storage")
 
 
-def test_split_inline_headings():
+def test_split_inline_numbered_chunks():
     line = "5.5 Compliance and Protective Grounds 6. Cookies, Similar Technologies, and Digital Tracking"
-    parts = split_inline_headings(line)
+    parts = split_inline_numbered_chunks(line)
     assert len(parts) == 2
     assert parts[0].startswith("5.5 Compliance")
     assert parts[1].startswith("6. Cookies")
@@ -48,6 +49,75 @@ def test_split_numbered_heading_and_body():
     assert body.startswith("We use cookies")
 
 
-def test_scrub_inline_noise():
-    line = "NovaStrata Technologies - Privacy Policy 2019.docx"
-    assert scrub_inline_noise(line) == "NovaStrata Technologies -"
+def test_split_numbered_heading_and_body_returns_none_when_no_body():
+    line = "6. Cookies, Similar Technologies, and Digital Tracking"
+    assert split_numbered_heading_and_body(line) is None
+
+
+def test_detect_boilerplate_lines_generic():
+    pages = [
+        (1, ["Confidential", "Data Retention"]),
+        (2, ["Confidential", "Access Rights"]),
+        (3, ["Confidential", "Data Minimization"]),
+    ]
+    found = _detect_boilerplate_lines(pages)
+    assert "confidential" in found
+
+
+def test_remove_boilerplate_phrases_inside_content():
+    text = "This is valid text. Confidential - More valid text."
+    cleaned = _remove_boilerplate_phrases(text, {"confidential"})
+    assert "Confidential" not in cleaned
+    assert "More valid text" in cleaned
+
+
+def test_refine_sections_splits_embedded_subheading():
+    sections = [
+        ParsedSection(
+            section_order=1,
+            section_title="5.5 Compliance and Protective Grounds",
+            content=(
+                "We may process personal data as required. "
+                "6.1 Tracking Technologies We Use "
+                "We use cookies and related technologies."
+            ),
+            page_start=6,
+            page_end=6,
+        )
+    ]
+    refined = _refine_sections(sections, set())
+    assert len(refined) == 2
+    assert refined[1].section_title.startswith("6.1 Tracking Technologies")
+
+
+def test_refine_sections_splits_embedded_top_level_heading():
+    sections = [
+        ParsedSection(
+            section_order=1,
+            section_title="6.4 Do Not Track and Similar Signals",
+            content=(
+                "Preference signals may be ignored in some environments. "
+                "7. Sharing, Disclosure, and Downstream Use "
+                "We disclose data to service providers."
+            ),
+            page_start=6,
+            page_end=6,
+        )
+    ]
+    refined = _refine_sections(sections, set())
+    assert len(refined) == 2
+    assert refined[1].section_title.startswith("7")
+
+
+def test_refine_sections_fixes_weak_title_when_numbered_body_starts():
+    sections = [
+        ParsedSection(
+            section_order=1,
+            section_title="We Process",
+            content="2.1 Account, Identity, and Registration Data We collect account data for operations.",
+            page_start=2,
+            page_end=3,
+        )
+    ]
+    refined = _refine_sections(sections, set())
+    assert refined[0].section_title.startswith("2.1 Account, Identity")
