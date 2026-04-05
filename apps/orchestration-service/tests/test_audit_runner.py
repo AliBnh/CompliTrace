@@ -6,6 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.services.audit_runner import (
     _article_int,
     _build_mandatory_notice_gap,
+    _collection_mode,
     _enforce_substantive_citation_gate,
     _evidence_sufficient,
     _fallback_notice_citations,
@@ -194,3 +195,47 @@ def test_fallback_notice_citations_deprioritizes_article_14_paragraph_5():
     fallback = _fallback_notice_citations(section, chunks)
     assert fallback
     assert fallback[0].chunk_id == "c13p1"
+
+
+def test_collection_mode_indirect_when_third_party_signals_present():
+    section = SectionData(
+        id="s7",
+        section_order=7,
+        section_title="Data Sources",
+        content="We receive personal data from partners and suppliers.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _collection_mode(section) == "indirect"
+
+
+def test_fallback_notice_citations_excludes_article_14_para_3_4_when_better_fit_exists():
+    section = SectionData(
+        id="s8",
+        section_order=8,
+        section_title="Data Sources",
+        content="We collect personal data from users directly.",
+        page_start=8,
+        page_end=8,
+    )
+    chunks = [
+        RetrievalChunk(
+            chunk_id="c14p34",
+            article_number="14",
+            article_title="Information to be provided",
+            paragraph_ref="3-4",
+            content="timing of information provision",
+            score=0.95,
+        ),
+        RetrievalChunk(
+            chunk_id="c13p1",
+            article_number="13",
+            article_title="Information to be provided",
+            paragraph_ref="1",
+            content="identity, legal basis, purposes",
+            score=0.70,
+        ),
+    ]
+    fallback = _fallback_notice_citations(section, chunks)
+    assert fallback
+    assert all(c.chunk_id != "c14p34" for c in fallback)

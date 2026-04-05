@@ -99,6 +99,30 @@ NOTICE_REQUIREMENT_SIGNALS: dict[str, set[str]] = {
     "complaint": {"complaint", "supervisory authority", "data protection authority"},
 }
 
+DIRECT_COLLECTION_SIGNALS = {
+    "you provide",
+    "provided by you",
+    "from you",
+    "submitted by you",
+    "when you",
+}
+INDIRECT_COLLECTION_SIGNALS = {
+    "from third parties",
+    "from partners",
+    "from customers",
+    "from suppliers",
+    "from resellers",
+    "from integrated providers",
+}
+
+NOTICE_REQUIREMENT_LABELS: dict[str, str] = {
+    "controller_contact": "controller identity and contact details",
+    "legal_basis": "legal basis for processing",
+    "rights": "data subject rights information",
+    "retention": "retention period or criteria",
+    "complaint": "complaint-right and supervisory authority details",
+}
+
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
@@ -328,12 +352,21 @@ def _citation_priority_for_notice(section: SectionData, chunk: RetrievalChunk) -
     section_ctx = _section_context_signals(section)
     paragraph = _norm(chunk.paragraph_ref or "")
     score = 0.0
+    source_mode = _collection_mode(section)
     if article in {13, 14}:
         score += 3.0
-        if paragraph in {"1", "2", "1-2", "2-3", "1(a)-(c)"}:
-            score += 1.5
-        if paragraph.startswith("5"):  # Article 14(5) exceptions are weak for core disclosure propositions
-            score -= 2.0
+        if paragraph in {"1", "2", "1-2", "1(a)-(c)", "2(a)-(e)"}:
+            score += 1.8
+        if paragraph.startswith("3") or paragraph.startswith("4") or paragraph.startswith("5"):
+            score -= 3.0
+        if source_mode == "direct" and article == 13:
+            score += 1.0
+        if source_mode == "indirect" and article == 14:
+            score += 1.0
+        if source_mode == "direct" and article == 14:
+            score -= 0.7
+        if source_mode == "indirect" and article == 13:
+            score -= 0.7
     if article == 12:
         score += 2.0
     if article == 5:
@@ -382,6 +415,56 @@ def _missing_notice_requirements(section: SectionData) -> list[str]:
     return missing
 
 
+def _collection_mode(section: SectionData) -> str:
+    ctx = _section_context_signals(section)
+    has_direct = _contains_any(ctx, DIRECT_COLLECTION_SIGNALS)
+    has_indirect = _contains_any(ctx, INDIRECT_COLLECTION_SIGNALS)
+    if has_direct and has_indirect:
+        return "mixed"
+    if has_indirect:
+        return "indirect"
+    return "direct"
+
+
+def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
+    mode = _collection_mode(section)
+    labels = [NOTICE_REQUIREMENT_LABELS.get(item, item) for item in missing]
+    missing_text = ", ".join(labels)
+    if mode == "indirect":
+        article_basis = "Articles 14(1) and 14(2)"
+        mode_note = "personal data appears to be obtained from third parties in this excerpt"
+    elif mode == "mixed":
+        article_basis = "Articles 13(1)-(2) and 14(1)-(2)"
+        mode_note = "the excerpt suggests both direct and indirect data collection"
+    else:
+        article_basis = "Articles 13(1) and 13(2)"
+        mode_note = "personal data appears to be collected directly from data subjects in this excerpt"
+    return (
+        f"Not disclosed in the provided excerpt: {missing_text}. "
+        f"Because {mode_note}, this indicates an apparent transparency gap under {article_basis}."
+    )
+
+
+def _tailored_notice_remediation(section: SectionData, missing: list[str]) -> str:
+    mode = _collection_mode(section)
+    article_hint = (
+        "Article 14(1)-(2)" if mode == "indirect" else "Article 13(1)-(2)" if mode == "direct" else "Articles 13(1)-(2) and 14(1)-(2)"
+    )
+    lines: list[str] = []
+    if "controller_contact" in missing:
+        lines.append("add controller legal name and contact channel")
+    if "legal_basis" in missing:
+        lines.append("map each processing purpose to a specific legal basis")
+    if "rights" in missing:
+        lines.append("add rights exercise instructions (access, erasure, objection, portability, etc.)")
+    if "retention" in missing:
+        lines.append("state retention periods or objective retention criteria per data category")
+    if "complaint" in missing:
+        lines.append("include supervisory authority complaint-right details")
+    joined = "; ".join(lines) if lines else "add missing mandatory disclosures"
+    return f"Update this section to {joined}, aligned with {article_hint}."
+
+
 def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
     missing = _missing_notice_requirements(section)
     if len(missing) < 2:
@@ -389,18 +472,11 @@ def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChun
     citations = _fallback_notice_citations(section, chunks)
     if not citations:
         return None
-    readable = ", ".join(missing)
     return LlmFinding(
         status="gap",
         severity="high" if len(missing) >= 3 else "medium",
-        gap_note=(
-            f"The section appears to omit mandatory privacy-notice disclosures: {readable}. "
-            "Based on the provided excerpt, this indicates incomplete transparency duties under GDPR Articles 12-14."
-        ),
-        remediation_note=(
-            "Add explicit privacy-notice disclosures for missing mandatory items (controller contact, legal basis, "
-            "rights, retention criteria, and complaint-right information where applicable)."
-        ),
+        gap_note=_tailored_notice_gap_note(section, missing),
+        remediation_note=_tailored_notice_remediation(section, missing),
         citations=citations,
     )
 
