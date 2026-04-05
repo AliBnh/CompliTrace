@@ -122,3 +122,16 @@ def test_legal_relevance_rejects_article_30_for_privacy_notice_without_ropa_cont
     )
     citation = LlmCitation(chunk_id="c30", article_number="30")
     assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False
+
+
+def test_legal_relevance_rejects_article_46_without_transfer_signals():
+    section = SectionData(
+        id="s4",
+        section_order=4,
+        section_title="Payment Processors",
+        content="Payments are handled by third-party processors.",
+        page_start=4,
+        page_end=4,
+    )
+    citation = LlmCitation(chunk_id="c46", article_number="46")
+    assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False

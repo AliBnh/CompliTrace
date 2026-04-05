@@ -82,6 +82,14 @@ INTERNAL_POLICY_PREFERRED_ARTICLES = {5, 24, 25, 30, 32, 35}
 
 EMPLOYMENT_SIGNALS = {"employee", "employment", "worker", "staff", "hr", "human resources"}
 ROPA_SIGNALS = {"record of processing", "ropa", "processing register", "register of processing"}
+THIRD_COUNTRY_TRANSFER_SIGNALS = {
+    "third country",
+    "outside the eea",
+    "outside eea",
+    "international transfer",
+    "cross-border",
+    "transfer",
+}
 
 
 def _norm(text: str) -> str:
@@ -149,16 +157,41 @@ def _section_context_signals(section: SectionData) -> str:
 
 def _preferred_articles_for_section(section: SectionData, document_mode: str) -> set[int]:
     topic = _norm(_infer_topic(section))
+    section_ctx = _section_context_signals(section)
     if document_mode == "privacy_notice":
         preferred = set(PRIVACY_NOTICE_PREFERRED_ARTICLES)
         if "transfer" in topic or "international" in topic:
-            preferred |= {13, 14, 44, 45, 46, 47, 49}
+            preferred |= {13, 14, 44, 45, 49}
+            if _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+                preferred |= {46, 47}
         if "rights" in topic or "data subject" in topic:
             preferred |= {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
         if "retention" in topic:
             preferred |= {5, 13, 14}
         return preferred
     return set(INTERNAL_POLICY_PREFERRED_ARTICLES)
+
+
+def _section_guidance(section: SectionData, document_mode: str) -> str:
+    topic = _norm(_infer_topic(section))
+    if document_mode != "privacy_notice":
+        return (
+            "Use accountability-focused analysis. Prefer Articles 5, 24, 25, 30, and 32 for internal controls. "
+            "Use Article 88 only for explicit employment-processing context."
+        )
+    if "transfer" in topic or "international" in topic:
+        return (
+            "For privacy notices: first test disclosure obligations under Articles 13(1)(f) and 14(1)(f). "
+            "Use Article 46 only when the section clearly indicates third-country transfer safeguards."
+        )
+    if "rights" in topic or "data subject" in topic:
+        return "For privacy notices: prioritize Articles 12-22 rights transparency and response obligations."
+    if "retention" in topic:
+        return "For privacy notices: prioritize retention transparency under Articles 13(2)(a), 14(2)(a), and Article 5(1)(e)."
+    return (
+        "For privacy notices: check mandatory disclosures (controller identity/contact, DPO where applicable, legal basis, "
+        "recipients, transfer disclosures, retention criteria, rights, and complaint rights) with Articles 12-14 priority."
+    )
 
 
 def _rerank_chunks_for_mode(section: SectionData, chunks: list[RetrievalChunk], document_mode: str) -> list[RetrievalChunk]:
@@ -234,6 +267,8 @@ def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, d
             return False
         if article == 30 and not _contains_any(section_ctx, ROPA_SIGNALS):
             return False
+        if article == 46 and not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+            return False
     preferred = _preferred_articles_for_section(section, document_mode)
     if article in preferred:
         return True
@@ -250,7 +285,13 @@ def _validate_citations(citations: list[LlmCitation], retrieved: list[RetrievalC
         if not chunk:
             citation_validation_failure_total.inc()
             continue
-        if str(cit.article_number).strip() != str(chunk.article_number).strip():
+        cit_article = _article_int(cit.article_number)
+        chunk_article = _article_int(chunk.article_number)
+        if cit_article is not None and chunk_article is not None:
+            if cit_article != chunk_article:
+                citation_validation_failure_total.inc()
+                continue
+        elif str(cit.article_number).strip() != str(chunk.article_number).strip():
             citation_validation_failure_total.inc()
             continue
         if not _paragraph_ref_compatible(cit.paragraph_ref, chunk.paragraph_ref):
@@ -416,6 +457,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     section_title=section.section_title,
                     section_content=section.content,
                     chunks=chunks,
+                    guidance=_section_guidance(section, document_mode),
                     model_provider=settings.model_provider,
                     model_name=settings.model_name,
                     temperature=settings.model_temperature,

@@ -16,7 +16,8 @@ SYSTEM_PROMPT = (
     "Allowed status: compliant, partial, gap, needs review. "
     "Citations must only reference provided chunks and include chunk_id + article_number. "
     "If status is partial or gap, include at least one concrete citation. "
-    "If evidence is weak, return needs review instead of speculating."
+    "If evidence is weak, return needs review instead of speculating. "
+    "For privacy notices prioritize disclosure obligations under Articles 12-14 before internal governance articles."
 )
 
 STATUS_MAP = {
@@ -44,7 +45,7 @@ def _extract_json_block(text: str) -> str:
     return "{}"
 
 
-def _build_user_prompt(section_title: str, section_content: str, chunks: list[RetrievalChunk]) -> str:
+def _build_user_prompt(section_title: str, section_content: str, chunks: list[RetrievalChunk], guidance: str | None = None) -> str:
     chunk_lines = []
     for c in chunks:
         chunk_lines.append(
@@ -55,6 +56,7 @@ def _build_user_prompt(section_title: str, section_content: str, chunks: list[Re
         f"Section title: {section_title}\n"
         f"Section content:\n{section_content[:5000]}\n\n"
         f"Retrieved GDPR chunks:\n{joined}\n\n"
+        f"Section-specific legal guidance: {guidance or 'None'}\n\n"
         "Apply frozen rubric. If uncertain, return needs review. "
         "For gap/partial provide non-empty gap_note and remediation_note with at least one citation tied to a retrieved chunk. "
         "Do not cite GDPR articles not present in retrieved chunks."
@@ -169,6 +171,7 @@ def run_llm_classification(
     section_title: str,
     section_content: str,
     chunks: list[RetrievalChunk],
+    guidance: str | None,
     model_provider: str,
     model_name: str,
     temperature: float,
@@ -177,7 +180,7 @@ def run_llm_classification(
     fallback_provider: str,
     fallback_model: str,
 ) -> tuple[LlmFinding | None, str]:
-    prompt = _build_user_prompt(section_title, section_content, chunks)
+    prompt = _build_user_prompt(section_title, section_content, chunks, guidance)
     raw = ""
     attempts: list[tuple[str, str, Callable[[], str]]] = []
     saw_rate_limit = False
