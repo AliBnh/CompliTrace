@@ -5,6 +5,9 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.audit_runner import (
     _article_int,
+    _build_transfer_gap,
+    _citation_claim_compatible,
+    _claim_types_from_text,
     _build_mandatory_notice_gap,
     _collection_mode,
     _enforce_substantive_citation_gate,
@@ -294,6 +297,58 @@ def test_notice_disclosure_section_false_for_non_notice_content():
         page_end=7,
     )
     assert _is_notice_disclosure_section(section) is False
+
+
+def test_claim_types_extract_legal_basis_not_transfer():
+    claims = _claim_types_from_text("Missing legal basis for processing under Article 13(1)(c).")
+    assert "legal_basis" in claims
+    assert "transfer" not in claims
+
+
+def test_citation_claim_compatible_rejects_article_14_para_3_for_legal_basis_claim():
+    citation = LlmCitation(chunk_id="c1", article_number="14", paragraph_ref="3-4")
+    chunk = RetrievalChunk(
+        chunk_id="c1",
+        article_number="14",
+        article_title="Information to be provided",
+        paragraph_ref="3-4",
+        content="timing for disclosure",
+        score=0.91,
+    )
+    assert _citation_claim_compatible(citation, chunk, {"legal_basis"}) is False
+
+
+def test_build_transfer_gap_for_transfer_section():
+    section = SectionData(
+        id="s7i",
+        section_order=7,
+        section_title="International Transfers",
+        content="We transfer data outside the EEA and rely on safeguards.",
+        page_start=7,
+        page_end=7,
+    )
+    chunks = [
+        RetrievalChunk(
+            chunk_id="c44",
+            article_number="44",
+            article_title="General principle for transfers",
+            paragraph_ref=None,
+            content="Any transfer of personal data ...",
+            score=0.77,
+        ),
+        RetrievalChunk(
+            chunk_id="c46",
+            article_number="46",
+            article_title="Transfers subject to safeguards",
+            paragraph_ref="1",
+            content="In the absence of an adequacy decision ...",
+            score=0.74,
+        ),
+    ]
+    finding = _build_transfer_gap(section, chunks)
+    assert finding is not None
+    assert finding.status == "gap"
+    assert len(finding.citations) >= 1
 
 
 def test_targeted_notice_query_uses_article_14_for_indirect_mode():
