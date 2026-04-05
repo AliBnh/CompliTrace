@@ -9,6 +9,54 @@ from app.core.config import settings
 from app.models.audit import Audit, Finding, Report
 
 
+def _write_pdf(lines: list[str], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    max_chars = 100
+    wrapped_lines: list[str] = []
+    for line in lines:
+        if not line:
+            wrapped_lines.append("")
+            continue
+        wrapped_lines.extend(line[i : i + max_chars] for i in range(0, len(line), max_chars))
+
+    y = 790
+    commands = ["BT", "/F1 11 Tf", "50 790 Td"]
+    for line in wrapped_lines:
+        safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        commands.append(f"({safe}) Tj")
+        y -= 14
+        if y < 60:
+            break
+        commands.append("0 -14 Td")
+    commands.append("ET")
+    content_stream = "\n".join(commands).encode("latin-1", errors="replace")
+
+    objects: list[bytes] = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        f"5 0 obj\n<< /Length {len(content_stream)} >>\nstream\n".encode("ascii")
+        + content_stream
+        + b"\nendstream\nendobj\n",
+    ]
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj)
+    xref_start = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n".encode("ascii")
+    )
+    out_path.write_bytes(bytes(pdf))
+
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -83,7 +131,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         lines.append("")
 
     out_path = settings.reports_dir / f"audit_{audit_id}_{report.id}.pdf"
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    _write_pdf(lines, out_path)
 
     report.status = "ready"
     report.pdf_path = str(out_path)
