@@ -105,6 +105,15 @@ DIRECT_COLLECTION_SIGNALS = {
     "from you",
     "submitted by you",
     "when you",
+    "you submit",
+    "you share",
+    "you choose to provide",
+    "you enter",
+    "you fill",
+    "account registration",
+    "signup form",
+    "contact form",
+    "application form",
 }
 INDIRECT_COLLECTION_SIGNALS = {
     "from third parties",
@@ -113,6 +122,39 @@ INDIRECT_COLLECTION_SIGNALS = {
     "from suppliers",
     "from resellers",
     "from integrated providers",
+    "provided by third parties",
+    "obtained from third parties",
+    "received from third parties",
+    "public authorities",
+    "publicly available",
+    "data brokers",
+    "social media platforms",
+    "affiliate companies",
+    "our clients provide",
+    "employer provides",
+    "background screening provider",
+    "identity verification provider",
+}
+
+DIRECT_COLLECTION_HINTS = {
+    "we collect directly",
+    "we ask you",
+    "you give us",
+    "information you provide",
+    "directly from data subjects",
+}
+
+INDIRECT_COLLECTION_HINTS = {
+    "we receive",
+    "we obtain",
+    "received from",
+    "obtained from",
+    "collected from",
+    "sourced from",
+    "from external sources",
+    "from other sources",
+    "from third-party",
+    "from third party",
 }
 
 NOTICE_REQUIREMENT_LABELS: dict[str, str] = {
@@ -417,14 +459,23 @@ def _missing_notice_requirements(section: SectionData) -> list[str]:
 
 def _collection_mode(section: SectionData) -> str:
     ctx = _section_context_signals(section)
-    has_direct = _contains_any(ctx, DIRECT_COLLECTION_SIGNALS)
-    has_indirect = _contains_any(ctx, INDIRECT_COLLECTION_SIGNALS)
+    direct_score = sum(1 for signal in DIRECT_COLLECTION_SIGNALS if signal in ctx)
+    direct_score += sum(1 for hint in DIRECT_COLLECTION_HINTS if hint in ctx)
+    indirect_score = sum(1 for signal in INDIRECT_COLLECTION_SIGNALS if signal in ctx)
+    indirect_score += sum(1 for hint in INDIRECT_COLLECTION_HINTS if hint in ctx)
+
+    has_direct = direct_score > 0
+    has_indirect = indirect_score > 0
     if has_direct and has_indirect:
         return "mixed"
     if has_indirect:
         return "indirect"
     if has_direct:
         return "direct"
+    if "we collect" in ctx and "you" in ctx:
+        return "direct"
+    if ("we receive" in ctx or "we obtain" in ctx) and "from" in ctx:
+        return "indirect"
     return "unknown"
 
 

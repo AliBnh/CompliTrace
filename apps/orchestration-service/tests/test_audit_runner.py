@@ -222,6 +222,42 @@ def test_collection_mode_unknown_when_no_source_signals():
     assert _collection_mode(section) == "unknown"
 
 
+def test_collection_mode_direct_from_form_language():
+    section = SectionData(
+        id="s7d",
+        section_order=7,
+        section_title="Contact Form",
+        content="We collect personal data directly when you submit our contact form.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _collection_mode(section) == "direct"
+
+
+def test_collection_mode_indirect_from_obtained_wording():
+    section = SectionData(
+        id="s7e",
+        section_order=7,
+        section_title="Partner Imports",
+        content="Personal data is obtained from external sources and affiliate companies.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _collection_mode(section) == "indirect"
+
+
+def test_collection_mode_mixed_when_both_signals_present():
+    section = SectionData(
+        id="s7f",
+        section_order=7,
+        section_title="Data Sources",
+        content="We collect data when you sign up and also receive profile attributes from partners.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _collection_mode(section) == "mixed"
+
+
 def test_targeted_notice_query_uses_article_14_for_indirect_mode():
     section = SectionData(
         id="s7c",
