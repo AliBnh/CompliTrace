@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.parser import (
     ParsedSection,
+    _detect_boilerplate_lines,
     is_heading,
     is_noise_line,
     scrub_inline_noise,
@@ -48,6 +49,21 @@ def test_split_numbered_heading_and_body():
     assert body.startswith("We use cookies")
 
 
+def test_split_numbered_heading_and_body_returns_none_when_no_body():
+    line = "6. Cookies, Similar Technologies, and Digital Tracking"
+    assert split_numbered_heading_and_body(line) is None
+
+
 def test_scrub_inline_noise():
     line = "NovaStrata Technologies - Privacy Policy 2019.docx"
-    assert scrub_inline_noise(line) == "NovaStrata Technologies -"
+    assert scrub_inline_noise(line) == ""
+
+
+def test_detect_boilerplate_lines():
+    pages = [
+        (1, ["NovaStrata Technologies", "Data Retention"]),
+        (2, ["NovaStrata Technologies", "Access Rights"]),
+        (3, ["NovaStrata Technologies", "Data Minimization"]),
+    ]
+    found = _detect_boilerplate_lines(pages)
+    assert "novastrata technologies" in found
