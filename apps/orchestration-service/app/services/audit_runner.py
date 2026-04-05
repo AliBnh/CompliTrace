@@ -52,6 +52,29 @@ PROCESSING_SIGNALS = {
 
 OBLIGATION_WORDS = {"shall", "must", "required", "obligation", "necessary", "appropriate"}
 
+DOCUMENT_MODE_HINTS: dict[str, set[str]] = {
+    "privacy_notice": {
+        "privacy notice",
+        "privacy policy",
+        "data subject rights",
+        "legal basis",
+        "recipients",
+        "international transfers",
+    },
+    "internal_policy": {
+        "policy purpose",
+        "roles and responsibilities",
+        "incident response",
+        "security controls",
+        "retention schedule",
+    },
+}
+
+MODE_ARTICLE_HINTS: dict[str, str] = {
+    "privacy_notice": "prioritize GDPR Articles 12, 13, 14, and Article 5 principles",
+    "internal_policy": "prioritize GDPR Articles 5, 24, 25, 30, 32 and accountability obligations",
+}
+
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
@@ -79,6 +102,24 @@ def _infer_topic(section: SectionData) -> str:
     if "consent" in title or "lawful" in title:
         return "lawful basis consent processing"
     return section.section_title
+
+
+def _infer_document_mode(sections: list[SectionData]) -> str:
+    scores = {mode: 0 for mode in DOCUMENT_MODE_HINTS}
+    for section in sections:
+        haystack = _norm(f"{section.section_title} {section.content[:500]}")
+        for mode, hints in DOCUMENT_MODE_HINTS.items():
+            scores[mode] += sum(1 for hint in hints if hint in haystack)
+    best_mode = max(scores, key=scores.get)
+    if scores[best_mode] == 0:
+        return "internal_policy"
+    return best_mode
+
+
+def _build_retrieval_query(section: SectionData, topic: str, document_mode: str) -> str:
+    article_hint = MODE_ARTICLE_HINTS.get(document_mode, "prioritize directly applicable GDPR obligations")
+    snippet = section.content[:700]
+    return f"GDPR obligations for {topic}. Context: {article_hint}. Section text: {snippet}"
 
 
 def _topic_keywords(topic: str) -> set[str]:
@@ -172,6 +213,13 @@ def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, bud
     return (now_monotonic - started_monotonic) > budget_seconds
 
 
+def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
+    if section_count <= 0:
+        return configured_cap
+    scaled_budget = max(8, round(section_count * 0.75))
+    return min(configured_cap, scaled_budget)
+
+
 def run_audit(db: Session, audit: Audit) -> Audit:
     ingestion = IngestionClient(settings.ingestion_service_url)
     knowledge = KnowledgeClient(settings.knowledge_service_url)
@@ -186,6 +234,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     db.commit()
 
     sections = ingestion.get_sections(audit.document_id)
+    document_mode = _infer_document_mode(sections)
+    llm_budget_cap = _effective_llm_budget(len(sections), settings.max_llm_calls_per_audit)
     llm_rate_limited = False
     llm_calls_made = 0
     audit_started = time.monotonic()
@@ -224,7 +274,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             continue
 
         topic = _infer_topic(section)
-        query = f"GDPR obligations for {topic}: {section.content[:700]}"
+        query = _build_retrieval_query(section, topic, document_mode)
         chunks = knowledge.search(query=query, k=5)
 
         if _retry_needed(chunks, topic):
@@ -249,11 +299,11 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             db.commit()
             continue
 
-        if llm_rate_limited or llm_calls_made >= settings.max_llm_calls_per_audit:
+        if llm_rate_limited or llm_calls_made >= llm_budget_cap:
             gate_reason = (
                 "LLM rate limit reached earlier in this audit. Manual review required."
                 if llm_rate_limited
-                else f"LLM call budget reached ({settings.max_llm_calls_per_audit}). Manual review required."
+                else f"LLM call budget reached ({llm_budget_cap}). Manual review required."
             )
             llm_finding = LlmFinding(
                 status="needs review",
