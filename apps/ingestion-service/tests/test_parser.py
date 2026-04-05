@@ -88,3 +88,36 @@ def test_refine_sections_splits_embedded_subheading():
     refined = _refine_sections(sections, set())
     assert len(refined) == 2
     assert refined[1].section_title.startswith("6.1 Tracking Technologies")
+
+
+def test_refine_sections_splits_embedded_top_level_heading():
+    sections = [
+        ParsedSection(
+            section_order=1,
+            section_title="6.4 Do Not Track and Similar Signals",
+            content=(
+                "Preference signals may be ignored in some environments. "
+                "7. Sharing, Disclosure, and Downstream Use "
+                "We disclose data to service providers."
+            ),
+            page_start=6,
+            page_end=6,
+        )
+    ]
+    refined = _refine_sections(sections, set())
+    assert len(refined) == 2
+    assert refined[1].section_title.startswith("7")
+
+
+def test_refine_sections_fixes_weak_title_when_numbered_body_starts():
+    sections = [
+        ParsedSection(
+            section_order=1,
+            section_title="We Process",
+            content="2.1 Account, Identity, and Registration Data We collect account data for operations.",
+            page_start=2,
+            page_end=3,
+        )
+    ]
+    refined = _refine_sections(sections, set())
+    assert refined[0].section_title.startswith("2.1 Account, Identity")

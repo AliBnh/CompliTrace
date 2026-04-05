@@ -21,7 +21,7 @@ SECTION_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z].{1,120}$")
 FILE_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/).*(?:\.pdf|\.docx?|\.txt)", re.IGNORECASE)
 MULTISPACE_RE = re.compile(r"\s+")
 INLINE_HEADING_RE = re.compile(r"(?=(?:^|\s)(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+[A-Z])")
-EMBEDDED_SUBHEADING_RE = re.compile(r"\s(?=\d{1,2}\.\d{1,2}\s+[A-Z])")
+EMBEDDED_SUBHEADING_RE = re.compile(r"\s(?=\d{1,2}(?:\.\d{1,2}){0,2}\.?\s+[A-Z])")
 
 SENTENCE_START_WORDS = {
     "we",
@@ -210,7 +210,14 @@ def _remove_boilerplate_phrases(text: str, boilerplate_lines: set[str]) -> str:
 def _split_embedded_numbered_subheadings(text: str) -> list[str]:
     """Split paragraph text when inline numbered subheadings are embedded in body text."""
     parts = EMBEDDED_SUBHEADING_RE.split(text)
-    return [_clean_line(p) for p in parts if _clean_line(p)]
+    cleaned_parts = [_clean_line(p) for p in parts if _clean_line(p)]
+
+    # Avoid pathological splitting when no real heading-like chunk exists.
+    if len(cleaned_parts) <= 1:
+        return cleaned_parts
+    if not any(SECTION_NUM_RE.match(part) for part in cleaned_parts[1:]):
+        return [_clean_line(text)]
+    return cleaned_parts
 
 
 def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str]) -> list[ParsedSection]:
