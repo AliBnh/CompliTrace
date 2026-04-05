@@ -39,7 +39,14 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     citation_coverage = (substantive_with_citations / len(substantive)) if substantive else 1.0
     parse_failures = sum(1 for f in findings if f.gap_note == "LLM parse failure")
     parse_failure_rate = (parse_failures / total) if total else 0.0
-    quality_score = max(0.0, 10.0 - (parse_failure_rate * 6.0) - ((1.0 - citation_coverage) * 4.0))
+    needs_review_rate = (by_status["needs review"] / total) if total else 0.0
+    quality_score = max(
+        0.0,
+        10.0
+        - (parse_failure_rate * 4.0)
+        - ((1.0 - citation_coverage) * 3.0)
+        - (needs_review_rate * 3.0),
+    )
 
     lines = [
         "CompliTrace GDPR Gap Report",
@@ -58,6 +65,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         f"- Not applicable: {by_status['not applicable']}",
         f"- Substantive citation coverage: {citation_coverage:.0%}",
         f"- LLM parse failure rate: {parse_failure_rate:.0%}",
+        f"- Needs review rate: {needs_review_rate:.0%}",
         f"- Report quality score (heuristic): {quality_score:.1f}/10",
         "",
     ]

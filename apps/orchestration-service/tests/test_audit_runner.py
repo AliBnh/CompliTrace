@@ -4,9 +4,13 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.audit_runner import (
+    _article_int,
     _enforce_substantive_citation_gate,
     _evidence_sufficient,
+    _is_legally_relevant_citation,
     _is_not_applicable,
+    _paragraph_ref_compatible,
+    _rerank_chunks_for_mode,
     _retry_needed,
     _runtime_budget_exceeded,
 )
@@ -77,3 +81,44 @@ def test_substantive_finding_with_citations_is_kept():
 def test_runtime_budget_exceeded():
     assert _runtime_budget_exceeded(0.0, 181.0, 180) is True
     assert _runtime_budget_exceeded(0.0, 180.0, 180) is False
+
+
+def test_article_int_parsing():
+    assert _article_int("13") == 13
+    assert _article_int("Article 46") == 46
+    assert _article_int(None) is None
+
+
+def test_paragraph_ref_compatible_tolerates_format_variants():
+    assert _paragraph_ref_compatible("1(f)", "Paragraph 1(f)") is True
+    assert _paragraph_ref_compatible("2", "3") is False
+
+
+def test_rerank_demotes_article_88_for_privacy_notice_non_employment():
+    section = SectionData(
+        id="s2",
+        section_order=2,
+        section_title="International Transfers",
+        content="Data may be accessed from countries outside the EEA.",
+        page_start=2,
+        page_end=2,
+    )
+    chunks = [
+        RetrievalChunk(chunk_id="c1", article_number="88", article_title="", paragraph_ref=None, content="employment context", score=0.90),
+        RetrievalChunk(chunk_id="c2", article_number="46", article_title="", paragraph_ref=None, content="appropriate safeguards", score=0.82),
+    ]
+    reranked = _rerank_chunks_for_mode(section, chunks, "privacy_notice")
+    assert reranked[0].article_number == "46"
+
+
+def test_legal_relevance_rejects_article_30_for_privacy_notice_without_ropa_context():
+    section = SectionData(
+        id="s3",
+        section_order=3,
+        section_title="Privacy Notice",
+        content="We provide transparency about personal data usage.",
+        page_start=3,
+        page_end=3,
+    )
+    citation = LlmCitation(chunk_id="c30", article_number="30")
+    assert _is_legally_relevant_citation(citation, section, "privacy_notice") is False

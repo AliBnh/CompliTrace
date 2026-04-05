@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime
+from typing import Iterable
 
 from prometheus_client import Counter, Histogram
 from sqlalchemy.orm import Session
@@ -75,6 +76,13 @@ MODE_ARTICLE_HINTS: dict[str, str] = {
     "internal_policy": "prioritize GDPR Articles 5, 24, 25, 30, 32 and accountability obligations",
 }
 
+PRIVACY_NOTICE_PREFERRED_ARTICLES = {5, 6, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 44, 45, 46, 47, 49}
+PRIVACY_NOTICE_DISCOURAGED_ARTICLES = {30, 88}
+INTERNAL_POLICY_PREFERRED_ARTICLES = {5, 24, 25, 30, 32, 35}
+
+EMPLOYMENT_SIGNALS = {"employee", "employment", "worker", "staff", "hr", "human resources"}
+ROPA_SIGNALS = {"record of processing", "ropa", "processing register", "register of processing"}
+
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
@@ -122,6 +130,64 @@ def _build_retrieval_query(section: SectionData, topic: str, document_mode: str)
     return f"GDPR obligations for {topic}. Context: {article_hint}. Section text: {snippet}"
 
 
+def _article_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    m = re.search(r"\d+", str(value))
+    if not m:
+        return None
+    return int(m.group(0))
+
+
+def _contains_any(text: str, signals: Iterable[str]) -> bool:
+    return any(signal in text for signal in signals)
+
+
+def _section_context_signals(section: SectionData) -> str:
+    return _norm(f"{section.section_title} {section.content[:1200]}")
+
+
+def _preferred_articles_for_section(section: SectionData, document_mode: str) -> set[int]:
+    topic = _norm(_infer_topic(section))
+    if document_mode == "privacy_notice":
+        preferred = set(PRIVACY_NOTICE_PREFERRED_ARTICLES)
+        if "transfer" in topic or "international" in topic:
+            preferred |= {13, 14, 44, 45, 46, 47, 49}
+        if "rights" in topic or "data subject" in topic:
+            preferred |= {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
+        if "retention" in topic:
+            preferred |= {5, 13, 14}
+        return preferred
+    return set(INTERNAL_POLICY_PREFERRED_ARTICLES)
+
+
+def _rerank_chunks_for_mode(section: SectionData, chunks: list[RetrievalChunk], document_mode: str) -> list[RetrievalChunk]:
+    if not chunks:
+        return chunks
+    section_ctx = _section_context_signals(section)
+    preferred = _preferred_articles_for_section(section, document_mode)
+    allows_employment = _contains_any(section_ctx, EMPLOYMENT_SIGNALS)
+    allows_ropa = _contains_any(section_ctx, ROPA_SIGNALS)
+
+    scored: list[tuple[float, RetrievalChunk]] = []
+    for ch in chunks:
+        article = _article_int(ch.article_number)
+        adjusted = ch.score
+        if article in preferred:
+            adjusted += 0.12
+        if document_mode == "privacy_notice":
+            if article == 88 and not allows_employment:
+                adjusted -= 0.20
+            if article == 30 and not allows_ropa:
+                adjusted -= 0.15
+            if article in PRIVACY_NOTICE_DISCOURAGED_ARTICLES:
+                adjusted -= 0.05
+        scored.append((adjusted, ch))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [ch for _score, ch in scored]
+
+
 def _topic_keywords(topic: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]+", _norm(topic)) if len(w) > 3}
 
@@ -150,7 +216,33 @@ def _evidence_sufficient(chunks: list[RetrievalChunk]) -> bool:
     return False
 
 
-def _validate_citations(citations: list[LlmCitation], retrieved: list[RetrievalChunk]) -> list[LlmCitation]:
+def _paragraph_ref_compatible(citation_ref: str | None, chunk_ref: str | None) -> bool:
+    if not citation_ref or not chunk_ref:
+        return True
+    a = _norm(citation_ref)
+    b = _norm(chunk_ref)
+    return a == b or a in b or b in a
+
+
+def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, document_mode: str) -> bool:
+    article = _article_int(citation.article_number)
+    if article is None:
+        return False
+    section_ctx = _section_context_signals(section)
+    if document_mode == "privacy_notice":
+        if article == 88 and not _contains_any(section_ctx, EMPLOYMENT_SIGNALS):
+            return False
+        if article == 30 and not _contains_any(section_ctx, ROPA_SIGNALS):
+            return False
+    preferred = _preferred_articles_for_section(section, document_mode)
+    if article in preferred:
+        return True
+    if document_mode == "internal_policy":
+        return True
+    return article in {1, 2, 3, 4}
+
+
+def _validate_citations(citations: list[LlmCitation], retrieved: list[RetrievalChunk], section: SectionData, document_mode: str) -> list[LlmCitation]:
     by_chunk = {c.chunk_id: c for c in retrieved}
     valid: list[LlmCitation] = []
     for cit in citations:
@@ -161,10 +253,13 @@ def _validate_citations(citations: list[LlmCitation], retrieved: list[RetrievalC
         if str(cit.article_number).strip() != str(chunk.article_number).strip():
             citation_validation_failure_total.inc()
             continue
-        if cit.paragraph_ref and chunk.paragraph_ref and cit.paragraph_ref != chunk.paragraph_ref:
+        if not _paragraph_ref_compatible(cit.paragraph_ref, chunk.paragraph_ref):
             citation_validation_failure_total.inc()
             continue
         if not cit.chunk_id:
+            citation_validation_failure_total.inc()
+            continue
+        if not _is_legally_relevant_citation(cit, section, document_mode):
             citation_validation_failure_total.inc()
             continue
 
@@ -216,7 +311,9 @@ def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, bud
 def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
     if section_count <= 0:
         return configured_cap
-    scaled_budget = max(8, round(section_count * 0.75))
+    if section_count <= configured_cap:
+        return configured_cap
+    scaled_budget = max(12, round(section_count * 0.85))
     return min(configured_cap, scaled_budget)
 
 
@@ -275,12 +372,12 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         topic = _infer_topic(section)
         query = _build_retrieval_query(section, topic, document_mode)
-        chunks = knowledge.search(query=query, k=5)
+        chunks = _rerank_chunks_for_mode(section, knowledge.search(query=query, k=8), document_mode)[:5]
 
         if _retry_needed(chunks, topic):
             retrieval_retry_total.inc()
-            query_retry = f"GDPR legal requirements and obligations for {topic}"
-            chunks_retry = knowledge.search(query=query_retry, k=5)
+            query_retry = _build_retrieval_query(section, f"{topic} legal requirements", document_mode)
+            chunks_retry = _rerank_chunks_for_mode(section, knowledge.search(query=query_retry, k=8), document_mode)[:5]
             if chunks_retry:
                 chunks = chunks_retry
 
@@ -331,7 +428,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 llm_rate_limited = True
 
         f = _coerce_finding(llm_finding)
-        valid_citations = _validate_citations(f.citations, chunks)
+        valid_citations = _validate_citations(f.citations, chunks, section, document_mode)
         f = _enforce_substantive_citation_gate(f, valid_citations)
 
         finding_row = Finding(
