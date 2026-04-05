@@ -423,7 +423,20 @@ def _collection_mode(section: SectionData) -> str:
         return "mixed"
     if has_indirect:
         return "indirect"
-    return "direct"
+    if has_direct:
+        return "direct"
+    return "unknown"
+
+
+def _targeted_notice_query(section: SectionData) -> str:
+    mode = _collection_mode(section)
+    if mode == "direct":
+        focus = "GDPR Article 13(1)(a)-(f) and 13(2)(a)-(e) mandatory privacy notice disclosures"
+    elif mode == "indirect":
+        focus = "GDPR Article 14(1)(a)-(f) and 14(2)(a)-(e) mandatory privacy notice disclosures"
+    else:
+        focus = "GDPR Articles 13 and 14 mandatory privacy notice disclosures for direct or indirect collection"
+    return f"{focus}. Section context: {section.section_title}. {section.content[:600]}"
 
 
 def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
@@ -436,6 +449,9 @@ def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
     elif mode == "mixed":
         article_basis = "Articles 13(1)-(2) and 14(1)-(2)"
         mode_note = "the excerpt suggests both direct and indirect data collection"
+    elif mode == "unknown":
+        article_basis = "Articles 13(1)-(2) and 14(1)-(2)"
+        mode_note = "the excerpt does not clearly establish whether collection is direct or indirect"
     else:
         article_basis = "Articles 13(1) and 13(2)"
         mode_note = "personal data appears to be collected directly from data subjects in this excerpt"
@@ -448,7 +464,11 @@ def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
 def _tailored_notice_remediation(section: SectionData, missing: list[str]) -> str:
     mode = _collection_mode(section)
     article_hint = (
-        "Article 14(1)-(2)" if mode == "indirect" else "Article 13(1)-(2)" if mode == "direct" else "Articles 13(1)-(2) and 14(1)-(2)"
+        "Article 14(1)-(2)"
+        if mode == "indirect"
+        else "Article 13(1)-(2)"
+        if mode == "direct"
+        else "Articles 13(1)-(2) and 14(1)-(2)"
     )
     lines: list[str] = []
     if "controller_contact" in missing:
@@ -641,6 +661,18 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode)
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
             fallback = _build_mandatory_notice_gap(section, chunks)
+            if fallback is None:
+                targeted_query = _targeted_notice_query(section)
+                targeted_chunks = _rerank_chunks_for_mode(section, knowledge.search(query=targeted_query, k=8), document_mode)
+                merged: list[RetrievalChunk] = []
+                seen_chunk_ids: set[str] = set()
+                for ch in [*chunks, *targeted_chunks]:
+                    if ch.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(ch.chunk_id)
+                    merged.append(ch)
+                chunks = merged[:8]
+                fallback = _build_mandatory_notice_gap(section, chunks)
             if fallback is not None:
                 f = fallback
                 valid_citations = _validate_citations(f.citations, chunks, section, document_mode)

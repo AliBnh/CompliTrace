@@ -16,6 +16,7 @@ from app.services.audit_runner import (
     _rerank_chunks_for_mode,
     _retry_needed,
     _runtime_budget_exceeded,
+    _targeted_notice_query,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
@@ -207,6 +208,31 @@ def test_collection_mode_indirect_when_third_party_signals_present():
         page_end=7,
     )
     assert _collection_mode(section) == "indirect"
+
+
+def test_collection_mode_unknown_when_no_source_signals():
+    section = SectionData(
+        id="s7b",
+        section_order=7,
+        section_title="General Principles",
+        content="We process personal data in line with our privacy principles.",
+        page_start=7,
+        page_end=7,
+    )
+    assert _collection_mode(section) == "unknown"
+
+
+def test_targeted_notice_query_uses_article_14_for_indirect_mode():
+    section = SectionData(
+        id="s7c",
+        section_order=7,
+        section_title="Partner Data",
+        content="We receive account data from partners and suppliers.",
+        page_start=7,
+        page_end=7,
+    )
+    q = _targeted_notice_query(section)
+    assert "Article 14(1)(a)-(f)" in q
 
 
 def test_fallback_notice_citations_excludes_article_14_para_3_4_when_better_fit_exists():
