@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -193,6 +194,17 @@ def _format_citation_label(article_number: str, article_title: str, paragraph_re
     return f"GDPR Article {article_number} — {title}"
 
 
+def _sanitize_user_text(text: str | None) -> str | None:
+    if not text:
+        return text
+
+    cleaned = text
+    cleaned = re.sub(r"chunk_id\s*=\s*gdpr-art-[a-z0-9-]+", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bgdpr-art-[a-z0-9-]+\b", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -257,10 +269,12 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         blocks.append(_TextBlock(section_label, font_size=11, top_gap=10))
         blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
-        if finding.gap_note:
-            blocks.append(_TextBlock(f"Gap note: {finding.gap_note}", bullet=True))
-        if finding.remediation_note:
-            blocks.append(_TextBlock(f"Remediation: {finding.remediation_note}", bullet=True))
+        safe_gap_note = _sanitize_user_text(finding.gap_note)
+        safe_remediation_note = _sanitize_user_text(finding.remediation_note)
+        if safe_gap_note:
+            blocks.append(_TextBlock(f"Gap note: {safe_gap_note}", bullet=True))
+        if safe_remediation_note:
+            blocks.append(_TextBlock(f"Remediation: {safe_remediation_note}", bullet=True))
         for citation in finding.citations:
             blocks.append(
                 _TextBlock(
