@@ -21,6 +21,7 @@ SECTION_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z].{1,120}$")
 FILE_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/).*(?:\.pdf|\.docx?|\.txt)", re.IGNORECASE)
 MULTISPACE_RE = re.compile(r"\s+")
 INLINE_HEADING_RE = re.compile(r"(?=(?:^|\s)(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+[A-Z])")
+EMBEDDED_SUBHEADING_RE = re.compile(r"\s(?=\d{1,2}\.\d{1,2}\s+[A-Z])")
 
 SENTENCE_START_WORDS = {
     "we",
@@ -195,6 +196,95 @@ def _normalize_section_title(title: str) -> str:
     return s
 
 
+def _remove_boilerplate_phrases(text: str, boilerplate_lines: set[str]) -> str:
+    """Remove frequent header/footer phrases even when embedded inside content lines."""
+    cleaned = text
+    for phrase in boilerplate_lines:
+        if not phrase or len(phrase.split()) > 6:
+            continue
+        escaped = re.escape(phrase)
+        cleaned = re.sub(rf"\b{escaped}\b\s*[-–—]?", " ", cleaned, flags=re.IGNORECASE)
+    return _clean_line(cleaned)
+
+
+def _split_embedded_numbered_subheadings(text: str) -> list[str]:
+    """Split paragraph text when inline numbered subheadings are embedded in body text."""
+    parts = EMBEDDED_SUBHEADING_RE.split(text)
+    return [_clean_line(p) for p in parts if _clean_line(p)]
+
+
+def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str]) -> list[ParsedSection]:
+    """Post-process sections to remove boilerplate and split leaked inline subheadings."""
+    refined: list[ParsedSection] = []
+
+    for sec in sections:
+        content = _remove_boilerplate_phrases(sec.content, boilerplate_lines)
+        title = _normalize_section_title(sec.section_title)
+
+        # Fix weak parent titles where body immediately starts with numbered heading.
+        if not SECTION_NUM_RE.match(title):
+            leading = split_numbered_heading_and_body(content)
+            if leading:
+                title = _normalize_section_title(leading[0])
+                content = leading[1]
+
+        parts = _split_embedded_numbered_subheadings(content)
+        if not parts:
+            continue
+
+        primary_content: list[str] = []
+        current_title = title
+        page_start = sec.page_start
+        page_end = sec.page_end
+
+        for idx, part in enumerate(parts):
+            parsed = split_numbered_heading_and_body(part)
+            if idx == 0:
+                if parsed and SECTION_NUM_RE.match(current_title):
+                    primary_content.append(parsed[1])
+                else:
+                    primary_content.append(part)
+                continue
+
+            # If this chunk clearly starts with a subheading, open a new section.
+            if parsed:
+                if primary_content:
+                    refined.append(
+                        ParsedSection(
+                            section_order=0,
+                            section_title=current_title,
+                            content=_clean_line(" ".join(primary_content)),
+                            page_start=page_start,
+                            page_end=page_end,
+                        )
+                    )
+                current_title = _normalize_section_title(parsed[0])
+                primary_content = [parsed[1]]
+            else:
+                primary_content.append(part)
+
+        if primary_content:
+            refined.append(
+                ParsedSection(
+                    section_order=0,
+                    section_title=current_title,
+                    content=_clean_line(" ".join(primary_content)),
+                    page_start=page_start,
+                    page_end=page_end,
+                )
+            )
+
+    for i, sec in enumerate(refined, start=1):
+        refined[i - 1] = ParsedSection(
+            section_order=i,
+            section_title=sec.section_title,
+            content=sec.content,
+            page_start=sec.page_start,
+            page_end=sec.page_end,
+        )
+    return refined
+
+
 def _commit_section(
     sections: list[ParsedSection],
     title: str,
@@ -270,7 +360,7 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
     _commit_section(sections, current_title, current_content, current_start, last_page)
 
     if sections:
-        return sections
+        return _refine_sections(sections, boilerplate)
 
     full_text = _clean_line(" ".join(" ".join(lines) for _, lines in pages))
     return [

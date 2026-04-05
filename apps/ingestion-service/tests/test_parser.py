@@ -6,6 +6,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.services.parser import (
     ParsedSection,
     _detect_boilerplate_lines,
+    _refine_sections,
+    _remove_boilerplate_phrases,
     is_heading,
     is_noise_line,
     split_inline_numbered_chunks,
@@ -60,3 +62,29 @@ def test_detect_boilerplate_lines_generic():
     ]
     found = _detect_boilerplate_lines(pages)
     assert "confidential" in found
+
+
+def test_remove_boilerplate_phrases_inside_content():
+    text = "This is valid text. Confidential - More valid text."
+    cleaned = _remove_boilerplate_phrases(text, {"confidential"})
+    assert "Confidential" not in cleaned
+    assert "More valid text" in cleaned
+
+
+def test_refine_sections_splits_embedded_subheading():
+    sections = [
+        ParsedSection(
+            section_order=1,
+            section_title="5.5 Compliance and Protective Grounds",
+            content=(
+                "We may process personal data as required. "
+                "6.1 Tracking Technologies We Use "
+                "We use cookies and related technologies."
+            ),
+            page_start=6,
+            page_end=6,
+        )
+    ]
+    refined = _refine_sections(sections, set())
+    assert len(refined) == 2
+    assert refined[1].section_title.startswith("6.1 Tracking Technologies")
