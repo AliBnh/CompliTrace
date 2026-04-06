@@ -108,3 +108,4 @@ class LlmFinding(BaseModel):
     gap_note: str | None = None
     remediation_note: str | None = None
     citations: list[LlmCitation] = Field(default_factory=list)
+    candidate_publishability: str | None = Field(default=None, pattern=r"^(publishable|internal_only)$")

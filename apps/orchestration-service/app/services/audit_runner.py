@@ -30,6 +30,10 @@ profiling_pass_total = Counter("profiling_pass_total", "Profiling pass triggered
 transfer_pass_total = Counter("transfer_pass_total", "Transfer pass triggered")
 reviewer_pass_total = Counter("reviewer_pass_total", "Reviewer pass runs")
 publishable_findings_total = Counter("publishable_findings_total", "Publishable findings generated")
+contradiction_fail_total = Counter("contradiction_fail_total", "Findings rejected by contradiction controls")
+local_findings_published_total = Counter("local_findings_published_total", "Published local findings")
+systemic_findings_published_total = Counter("systemic_findings_published_total", "Published systemic findings")
+not_assessable_findings_published_total = Counter("not_assessable_findings_published_total", "Published not-assessable findings")
 
 
 ADMIN_PATTERNS = {
@@ -336,15 +340,18 @@ def _section_auditability_type(section: SectionData) -> str:
         "share",
     }
     if any(signal in text for signal in auditable_signals):
-        return "processing_section"
+        high_value = {"legal basis", "retention", "right", "complaint", "controller", "recipient", "transfer"}
+        if any(sig in text for sig in high_value):
+            return "auditable_primary"
+        return "auditable_secondary"
     if any(t in title for t in {"definition", "glossary", "terms"}):
         return "definition_section"
     if any(t in title for t in {"effective date", "owner", "version", "introduction"}):
         return "administrative_section"
     if any(t in text for t in {"we process", "we collect", "recipient", "rights", "retention", "transfer", "profil"}):
-        return "processing_section"
+        return "auditable_primary"
     if any(t in text for t in {"controller", "processor", "third party", "source"}):
-        return "context_section"
+        return "auditable_secondary"
     return "meta_section"
 
 
@@ -428,7 +435,39 @@ def _is_publishable_finding(section_id: str, status: str, classification: str | 
         return False
     if classification == "supporting_evidence_internal_only":
         return False
+    if classification in {"diagnostic_internal_only", "contradiction_failure_internal_only", "retrieval_failure_internal_only"}:
+        return False
     return True
+
+
+def _pre_persist_consistency_gate(
+    issue_name: str,
+    claim_types: set[str],
+    obligation_under_review: str,
+    citations: list[LlmCitation],
+    remediation_note: str | None,
+    classification: str | None,
+) -> tuple[bool, str | None]:
+    if not _consistency_validator(issue_name, claim_types, citations, remediation_note):
+        return False, "issue/article/citation/remediation mismatch"
+    claim_issue_ids = _claim_issue_ids(claim_types)
+    if claim_issue_ids and issue_name not in claim_issue_ids:
+        return False, "issue type does not match extracted claim type"
+    if obligation_under_review:
+        obligation_map = {
+            "controller_contact": {"missing_controller_identity", "missing_controller_contact"},
+            "legal_basis": {"missing_legal_basis"},
+            "retention": {"missing_retention", "missing_retention_period"},
+            "rights": {"missing_rights_information", "missing_rights_notice"},
+            "complaint": {"missing_complaint_right"},
+            "transfer": {"missing_transfer_notice", "missing_transfer_safeguards_disclosure", "missing_transfer_disclosure"},
+        }
+        allowed_issues = obligation_map.get(obligation_under_review, set())
+        if allowed_issues and issue_name not in allowed_issues:
+            return False, "obligation_under_review mismatches issue type"
+    if classification == "not_assessable" and citations:
+        return False, "not_assessable finding should not carry substantive citation chain"
+    return True, None
 
 
 def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[CandidateIssue]:
@@ -1583,6 +1622,8 @@ def _classify_finding_quality(
     source_mode: str,
 ) -> tuple[str | None, float | None]:
     if f.status == "needs review":
+        if claim_types & CORE_NOTICE_CLAIMS:
+            return "probable_gap", 0.55
         return "not_assessable", 0.2
     if f.status not in {"gap", "partial"}:
         return None, None
@@ -1681,6 +1722,7 @@ def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict
             )
         )
         findings_by_status_total.labels(status="gap").inc()
+        systemic_findings_published_total.inc()
     if to_add:
         db.commit()
 
@@ -1731,6 +1773,7 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
             )
         )
         findings_by_status_total.labels(status="gap").inc()
+        systemic_findings_published_total.inc()
     db.commit()
 
 
@@ -2042,6 +2085,15 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         f = _coerce_finding(llm_finding)
         f.gap_note = _sanitize_legal_reference_text(f.gap_note)
         f.remediation_note = _sanitize_legal_reference_text(f.remediation_note)
+        if f.candidate_publishability == "internal_only":
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note="Model marked this candidate as internal_only due to weak legal confidence.",
+                remediation_note=None,
+                citations=[],
+                candidate_publishability="internal_only",
+            )
         if document_mode == "privacy_notice" and _finding_mentions_internal_control_only(f"{f.gap_note or ''} {f.remediation_note or ''}"):
             f = LlmFinding(
                 status="needs review",
@@ -2217,6 +2269,26 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
             valid_citations = []
         classification, confidence = _classify_finding_quality(f, valid_citations, claim_types, _collection_mode(section))
+        consistency_ok, consistency_reason = _pre_persist_consistency_gate(
+            qualification["issue_name"],
+            claim_types,
+            memo["obligation"],
+            valid_citations,
+            f.remediation_note,
+            classification,
+        )
+        if not consistency_ok:
+            contradiction_fail_total.inc()
+            classification = "contradiction_failure_internal_only"
+            f.status = "needs review"
+            f.severity = None
+            f.gap_note = (
+                "Internal QA consistency gate rejected this draft finding. "
+                f"Reason: {consistency_reason or 'mismatch'}."
+            )
+            f.remediation_note = None
+            valid_citations = []
+            confidence = min(confidence or 0.35, 0.35)
 
         if f.status in {"gap", "partial"}:
             signature = _finding_signature(f, valid_citations)
@@ -2280,6 +2352,9 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         db.add(finding_row)
         if finding_row.publish_flag == "yes":
             publishable_findings_total.inc()
+            local_findings_published_total.inc()
+            if finding_row.classification == "not_assessable":
+                not_assessable_findings_published_total.inc()
         findings_by_status_total.labels(status=f.status).inc()
         db.flush()
 

@@ -649,11 +649,11 @@ def test_classify_finding_quality_outputs_probable_gap_for_core_notice_without_c
     assert conf is not None and conf >= 0.55
 
 
-def test_classify_finding_quality_marks_needs_review_as_not_assessable():
+def test_classify_finding_quality_marks_needs_review_as_probable_gap_for_core_notice():
     finding = LlmFinding(status="needs review", severity=None, gap_note="insufficient evidence", remediation_note=None, citations=[])
     klass, conf = _classify_finding_quality(finding, [], {"retention"}, "unknown")
-    assert klass == "not_assessable"
-    assert conf == 0.2
+    assert klass == "probable_gap"
+    assert conf == 0.55
 
 
 def test_validate_citations_rejects_article_14_for_direct_collection_notice_claims():

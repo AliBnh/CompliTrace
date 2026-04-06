@@ -12,7 +12,7 @@ from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk
 
 SYSTEM_PROMPT = (
     "You are a GDPR compliance analyst. Return strict JSON with keys: "
-    "status, severity, gap_note, remediation_note, citations. "
+    "status, severity, gap_note, remediation_note, citations, candidate_publishability. "
     "Allowed status: compliant, partial, gap, needs review. "
     "Citations must only reference provided chunks and include chunk_id + article_number. "
     "If status is partial or gap, include at least one concrete citation. "
@@ -110,6 +110,7 @@ def _coerce_finding_from_parsed(parsed: dict[str, Any]) -> LlmFinding:
         gap_note=_safe_text(parsed.get("gap_note")),
         remediation_note=_safe_text(parsed.get("remediation_note")),
         citations=_coerce_citations(parsed.get("citations")),
+        candidate_publishability=_safe_text(parsed.get("candidate_publishability")),
     )
 
 

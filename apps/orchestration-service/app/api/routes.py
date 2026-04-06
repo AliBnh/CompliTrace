@@ -62,6 +62,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         .where(Finding.audit_id == audit_id)
         .where(Finding.publish_flag == "yes")
         .where(Finding.finding_type.in_(["local", "systemic"]))
+        .where(Finding.classification.in_(["clear_non_compliance", "probable_gap", "not_assessable", "systemic_violation"]))
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
