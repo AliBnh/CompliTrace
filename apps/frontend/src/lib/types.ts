@@ -46,6 +46,15 @@ export type FindingOut = {
   section_id: UUID
   status: 'compliant' | 'partial' | 'gap' | 'needs review' | 'not applicable'
   severity: 'low' | 'medium' | 'high' | null
+  classification?: string | null
+  finding_type?: string | null
+  publish_flag?: string | null
+  confidence?: number | null
+  confidence_level?: string | null
+  assessment_type?: string | null
+  legal_requirement?: string | null
+  gap_reasoning?: string | null
+  severity_rationale?: string | null
   gap_note: string | null
   remediation_note: string | null
   citations: CitationOut[]
