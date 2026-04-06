@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: complitrace-postgres
+    environment:
+      POSTGRES_DB: complitrace
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    container_name: complitrace-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  knowledge-service:
+    build:
+      context: .
+      dockerfile: apps/knowledge-service/Dockerfile
+    container_name: complitrace-knowledge-service
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: gdpr_chunks
+      GDPR_CHUNKS_PATH: /app/data/processed/gdpr_chunks.jsonl
+      EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
+      FORCE_REINDEX: "false"
+    ports:
+      - "8002:8002"
+
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: apps/ingestion-service/Dockerfile
+    container_name: complitrace-ingestion-service
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/complitrace
+      UPLOADS_DIR: /app/storage/uploads
+    ports:
+      - "8001:8001"
+    volumes:
+      - ingestion_storage:/app/storage
+
+  orchestration-service:
+    build:
+      context: .
+      dockerfile: apps/orchestration-service/Dockerfile
+    container_name: complitrace-orchestration-service
+    depends_on:
+      - postgres
+      - ingestion-service
+      - knowledge-service
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/complitrace
+      INGESTION_SERVICE_URL: http://ingestion-service:8001
+      KNOWLEDGE_SERVICE_URL: http://knowledge-service:8002
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-groq}
+      MODEL_NAME: ${MODEL_NAME:-openai/gpt-oss-120b}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.1}
+      FALLBACK_MODEL_PROVIDER: ${FALLBACK_MODEL_PROVIDER:-gemini}
+      FALLBACK_MODEL_NAME: ${FALLBACK_MODEL_NAME:-gemini-2.5-flash}
+      MAX_LLM_CALLS_PER_AUDIT: ${MAX_LLM_CALLS_PER_AUDIT:-20}
+      MAX_AUDIT_RUNTIME_SECONDS: ${MAX_AUDIT_RUNTIME_SECONDS:-180}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      CORPUS_VERSION: ${CORPUS_VERSION:-gdpr-2016-679-v1}
+      PROMPT_TEMPLATE_VERSION: ${PROMPT_TEMPLATE_VERSION:-v1.0}
+      REPORTS_DIR: /app/storage/reports
+    ports:
+      - "8003:8003"
+    volumes:
+      - orchestration_storage:/app/storage
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: complitrace-prometheus
+    depends_on:
+      - ingestion-service
+      - knowledge-service
+      - orchestration-service
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: complitrace-grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/grafana/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro
+      - ./infra/grafana/dashboards/complitrace-overview.json:/var/lib/grafana/dashboards/complitrace-overview.json:ro
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  qdrant_storage:
+  postgres_data:
+  ingestion_storage:
+  orchestration_storage:
+  prometheus_data:
+  grafana_data:
