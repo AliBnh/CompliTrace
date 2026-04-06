@@ -68,10 +68,23 @@ def _ensure_findings_columns() -> None:
         if "findings" not in inspector.get_table_names():
             return
         columns = {col["name"] for col in inspector.get_columns("findings")}
-        if "classification" not in columns:
-            conn.execute(text("ALTER TABLE findings ADD COLUMN classification VARCHAR(32)"))
-        if "confidence" not in columns:
-            conn.execute(text("ALTER TABLE findings ADD COLUMN confidence DOUBLE PRECISION"))
+        column_ddls = {
+            "classification": "ALTER TABLE findings ADD COLUMN classification VARCHAR(32)",
+            "confidence": "ALTER TABLE findings ADD COLUMN confidence DOUBLE PRECISION",
+            "confidence_evidence": "ALTER TABLE findings ADD COLUMN confidence_evidence DOUBLE PRECISION",
+            "confidence_applicability": "ALTER TABLE findings ADD COLUMN confidence_applicability DOUBLE PRECISION",
+            "confidence_article_fit": "ALTER TABLE findings ADD COLUMN confidence_article_fit DOUBLE PRECISION",
+            "confidence_synthesis": "ALTER TABLE findings ADD COLUMN confidence_synthesis DOUBLE PRECISION",
+            "confidence_overall": "ALTER TABLE findings ADD COLUMN confidence_overall DOUBLE PRECISION",
+            "finding_type": "ALTER TABLE findings ADD COLUMN finding_type VARCHAR(32) DEFAULT 'local'",
+            "publish_flag": "ALTER TABLE findings ADD COLUMN publish_flag VARCHAR(8) DEFAULT 'yes'",
+            "missing_from_section": "ALTER TABLE findings ADD COLUMN missing_from_section VARCHAR(8)",
+            "missing_from_document": "ALTER TABLE findings ADD COLUMN missing_from_document VARCHAR(8)",
+            "not_visible_in_excerpt": "ALTER TABLE findings ADD COLUMN not_visible_in_excerpt VARCHAR(8)",
+        }
+        for column_name, ddl in column_ddls.items():
+            if column_name not in columns:
+                conn.execute(text(ddl))
 
 
 @app.get("/metrics")
