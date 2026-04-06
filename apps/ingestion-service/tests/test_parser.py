@@ -6,10 +6,12 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.services.parser import (
     ParsedSection,
     _detect_boilerplate_lines,
+    _merge_front_matter_sections,
     _refine_sections,
     _remove_boilerplate_phrases,
     is_heading,
     is_noise_line,
+    parse_pdf_into_sections,
     split_inline_numbered_chunks,
     split_numbered_heading_and_body,
 )
@@ -121,3 +123,51 @@ def test_refine_sections_fixes_weak_title_when_numbered_body_starts():
     ]
     refined = _refine_sections(sections, set())
     assert refined[0].section_title.startswith("2.1 Account, Identity")
+
+
+def test_merge_front_matter_sections_combines_short_preface_blocks():
+    sections = [
+        ParsedSection(1, "Privacy Policy", "Enterprise Data Services and Digital Platform Operations", 1, 1),
+        ParsedSection(2, "Effective Date: April 5, 2026", "Applies to websites and applications", 1, 1),
+        ParsedSection(3, "Policy Owner", "Privacy Office in coordination with Legal", 1, 1),
+        ParsedSection(4, "1.1 Purpose of this Policy", "This policy describes...", 2, 2),
+    ]
+    merged = _merge_front_matter_sections(sections)
+    assert len(merged) == 2
+    assert merged[0].section_title == "Privacy Policy"
+    assert "Effective Date: April 5, 2026" in merged[0].content
+    assert "Policy Owner" in merged[0].content
+
+
+def test_parse_pdf_into_sections_preserves_parent_heading_context(monkeypatch):
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_text(self, _mode: str) -> str:
+            return self._text
+
+    class _FakeDoc(list):
+        pass
+
+    class _FakeFitz:
+        @staticmethod
+        def open(_path: str):
+            return _FakeDoc(
+                [
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "1. Introduction and Scope",
+                                "1.1 Purpose of this Policy",
+                                "This Privacy Policy describes processing practices.",
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
+    sections = parse_pdf_into_sections("dummy.pdf")
+    assert len(sections) == 1
+    assert sections[0].section_title.startswith("1 Introduction and Scope — 1.1 Purpose of this Policy")
