@@ -116,3 +116,10 @@ def test_sanitize_user_text_removes_chunk_ids():
     assert cleaned is not None
     assert "gdpr-art-" not in cleaned
     assert "GDPR evidence reference" in cleaned
+
+
+def test_sanitize_user_text_strips_diagnostics():
+    text = "Substantive finding withheld. Diagnostic: citation mismatch across anchors."
+    cleaned = _sanitize_user_text(text)
+    assert cleaned is not None
+    assert "Diagnostic:" not in cleaned

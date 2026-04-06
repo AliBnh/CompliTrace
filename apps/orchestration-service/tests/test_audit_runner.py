@@ -4,6 +4,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.audit_runner import (
+    _applicability_memo,
     _article_int,
     _build_transfer_gap,
     _build_retention_gap,
@@ -21,8 +22,10 @@ from app.services.audit_runner import (
     _paragraph_ref_compatible,
     _rerank_chunks_for_mode,
     _retry_needed,
+    _reviewer_agent,
     _salvage_citations_from_retrieved,
     _sanitize_legal_reference_text,
+    _document_posture_agent,
     _finding_mentions_internal_control_only,
     _runtime_budget_exceeded,
     _targeted_notice_query,
@@ -701,3 +704,38 @@ def test_validate_citations_rejects_article_21_for_complaint_claims():
         claim_text="Missing complaint mechanism and supervisory authority details",
     )
     assert valid == []
+
+
+def test_document_posture_agent_identifies_notice_excerpt():
+    sections = [
+        SectionData(
+            id="p1",
+            section_order=1,
+            section_title="Privacy Notice",
+            content="This privacy notice explains legal basis and rights.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    posture = _document_posture_agent(sections, "privacy_notice")
+    assert "external_privacy_notice" in posture["document_type"]
+    assert "articles_12_14_transparency" in posture["triggered_duties"]
+
+
+def test_reviewer_agent_downgrades_not_assessable_visibility():
+    finding = LlmFinding(status="gap", severity="high", gap_note="Possible issue", remediation_note="Fix", citations=[])
+    memo = _applicability_memo(
+        SectionData(
+            id="p2",
+            section_order=2,
+            section_title="Snippet",
+            content="Short.",
+            page_start=2,
+            page_end=2,
+        ),
+        {"legal_basis"},
+        {"document_type": "external_privacy_notice_excerpt", "triggered_duties": [], "not_triggered_duties": [], "not_assessable_duties": []},
+    )
+    reviewed, reviewed_citations = _reviewer_agent(finding, [], {"legal_basis"}, memo)
+    assert reviewed.status == "needs review"
+    assert reviewed_citations == []

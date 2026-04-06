@@ -237,6 +237,8 @@ def _sanitize_user_text(text: str | None) -> str | None:
         return text
 
     cleaned = text
+    cleaned = re.sub(r"Diagnostic:\s.*$", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"Potential duplicate of section [^.;]+[.;]?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"chunk_id\s*=\s*gdpr-art-[a-z0-9-]+", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bgdpr-art-[a-z0-9-]+\b", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
@@ -345,6 +347,9 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             blocks.append(_TextBlock(f"Confidence: {finding.confidence:.2f}", bullet=True))
         safe_gap_note = _sanitize_user_text(finding.gap_note)
         safe_remediation_note = _sanitize_user_text(finding.remediation_note)
+        if finding.status == "needs review" and safe_gap_note and "insufficient legally compatible citation support" in safe_gap_note.lower():
+            safe_gap_note = "Not assessable with current excerpt quality; legal review needed with stronger evidence."
+            safe_remediation_note = "Provide complete section text and rerun audit."
         if safe_gap_note:
             blocks.append(_TextBlock(f"Gap note: {safe_gap_note}", bullet=True))
         if safe_remediation_note:
