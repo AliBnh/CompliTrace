@@ -114,6 +114,20 @@ services:
       - ./infra/grafana/dashboards/complitrace-overview.json:/var/lib/grafana/dashboards/complitrace-overview.json:ro
       - grafana_data:/var/lib/grafana
 
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+    container_name: complitrace-frontend
+    depends_on:
+      - ingestion-service
+      - orchestration-service
+    environment:
+      VITE_INGESTION_URL: http://localhost:8001
+      VITE_ORCHESTRATION_URL: http://localhost:8003
+    ports:
+      - "5173:5173"
+
 volumes:
   qdrant_storage:
   postgres_data:
