@@ -38,6 +38,10 @@ from app.services.audit_runner import (
     _clean_remediation_legal_mismatches,
     _classify_finding_quality,
     _validate_citations,
+    _section_auditability_type,
+    _spot_candidate_issues,
+    _legal_qualification_for_issue,
+    _violates_forbidden_article_matrix,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
@@ -775,3 +779,46 @@ def test_applicability_gate_filters_disallowed_notice_article():
     gated = _apply_applicability_gate_to_citations(citations, decision, {"legal_basis"})
     assert len(gated) == 1
     assert gated[0].article_number == "13"
+
+
+def test_section_auditability_identifies_definition_section():
+    section = SectionData(
+        id="q1",
+        section_order=1,
+        section_title="Definitions",
+        content="This glossary defines terminology used in this notice.",
+        page_start=1,
+        page_end=1,
+    )
+    assert _section_auditability_type(section) == "definition_section"
+
+
+def test_spot_candidate_issues_returns_notice_missing_candidates():
+    section = SectionData(
+        id="q2",
+        section_order=2,
+        section_title="Data We Collect",
+        content="We collect identifiers and usage data.",
+        page_start=2,
+        page_end=2,
+    )
+    issues = _spot_candidate_issues(section, "direct")
+    assert any(i["candidate_issue_type"] == "missing_legal_basis" for i in issues)
+
+
+def test_legal_qualification_maps_transfer_notice_to_13_1_f():
+    issue = {
+        "candidate_issue_type": "missing_transfer_notice",
+        "evidence_text": "Transfers occur",
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "indirect",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    assert qual["primary_article"] == "13(1)(f)"
+
+
+def test_forbidden_matrix_rejects_article_21_for_complaint():
+    citations = [LlmCitation(chunk_id="z1", article_number="21")]
+    assert _violates_forbidden_article_matrix({"complaint"}, citations) is True

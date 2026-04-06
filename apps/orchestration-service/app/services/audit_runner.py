@@ -256,6 +256,24 @@ class SpecializedReview(TypedDict):
     role_allocation: str | None
 
 
+class CandidateIssue(TypedDict):
+    candidate_issue_type: str
+    evidence_text: str
+    evidence_strength: float
+    local_or_document_level: str
+    possible_collection_mode: str
+    is_visible_gap: bool
+
+
+class LegalQualification(TypedDict):
+    issue_name: str
+    primary_article: str
+    secondary_articles: list[str]
+    rejected_articles: list[str]
+    reason_primary_article_fits: str
+    reason_rejected_articles_do_not_fit: str
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
 
@@ -266,6 +284,88 @@ def _is_not_applicable(section: SectionData) -> bool:
         return False
     content = _norm(section.content)
     return not any(k in content for k in PROCESSING_SIGNALS)
+
+
+def _section_auditability_type(section: SectionData) -> str:
+    title = _norm(section.section_title)
+    text = _section_context_signals(section)
+    if any(t in title for t in {"definition", "glossary", "terms"}):
+        return "definition_section"
+    if any(t in title for t in {"effective date", "owner", "version", "introduction"}):
+        return "administrative_section"
+    if any(t in text for t in {"we process", "we collect", "recipient", "rights", "retention", "transfer", "profil"}):
+        return "processing_section"
+    if any(t in text for t in {"controller", "processor", "third party", "source"}):
+        return "context_section"
+    return "meta_section"
+
+
+def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[CandidateIssue]:
+    text = _section_context_signals(section)
+    candidates: list[CandidateIssue] = []
+    patterns: list[tuple[str, set[str], str]] = [
+        ("missing_controller_identity", {"controller", "identity", "contact"}, "document"),
+        ("missing_legal_basis", {"legal basis", "lawful basis"}, "document"),
+        ("missing_retention", {"retention", "kept for", "storage period"}, "document"),
+        ("missing_rights_information", {"right to access", "rectification", "erasure", "object"}, "document"),
+        ("missing_complaint_right", {"supervisory authority", "complaint"}, "document"),
+        ("missing_transfer_notice", {"transfer", "third country", "outside the eea"}, "local"),
+        ("profiling_disclosure_gap", {"profil", "score", "segmentation", "predictive"}, "local"),
+        ("special_category_basis_unclear", {"health", "biometric", "religious", "political", "ethnic", "genetic"}, "local"),
+        ("controller_processor_role_ambiguity", {"controller", "processor", "on behalf of"}, "local"),
+    ]
+    for issue, signals, level in patterns:
+        hits = sum(1 for s in signals if s in text)
+        if hits == 0:
+            if issue.startswith("missing_") and _is_notice_disclosure_section(section):
+                candidates.append(
+                    CandidateIssue(
+                        candidate_issue_type=issue,
+                        evidence_text=section.content[:200],
+                        evidence_strength=0.45,
+                        local_or_document_level=level,
+                        possible_collection_mode=collection_mode,
+                        is_visible_gap=False,
+                    )
+                )
+            continue
+        candidates.append(
+            CandidateIssue(
+                candidate_issue_type=issue,
+                evidence_text=section.content[:260],
+                evidence_strength=min(0.95, 0.55 + (hits * 0.12)),
+                local_or_document_level=level,
+                possible_collection_mode=collection_mode,
+                is_visible_gap=hits > 0,
+            )
+        )
+    return candidates[:6]
+
+
+def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
+    mapping: dict[str, tuple[str, list[str], list[str], str, str]] = {
+        "missing_controller_identity": ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Controller identity disclosure duty.", "Article 21/22 do not govern identity notice content."),
+        "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
+        "missing_retention": ("13(2)(a)", ["14(2)(a)"], ["5(1)(e)"], "Retention period/criteria is explicit notice content duty.", "Article 5 principle alone is not the primary notice anchor."),
+        "missing_rights_information": ("13(2)(b)", ["13(2)(c)", "13(2)(d)", "14(2)(c)", "14(2)(d)", "14(2)(e)"], ["5(1)(a)"], "Rights notice obligations are in Articles 13(2)/14(2).", "Article 5 principle is supporting, not primary rights notice basis."),
+        "missing_complaint_right": ("13(2)(d)", ["14(2)(e)"], ["21"], "Complaint-right disclosure is explicit in 13(2)(d)/14(2)(e).", "Article 21 is objection right, not complaint-right anchor."),
+        "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V support.", "Article 15 access right is not transfer notice anchor."),
+        "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "21"], ["22"], "Profiling transparency starts with notice disclosure paragraphs.", "Article 22 is conditional on effects threshold."),
+        "special_category_basis_unclear": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"], "Special-category processing requires Article 9 condition.", "Article 21 is not lawful condition for special-category processing."),
+        "controller_processor_role_ambiguity": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"], "Role clarity is transparency duty in notice context.", "Article 28 only applies where processor-contract obligations are in scope."),
+    }
+    primary, secondary, rejected, reason_fit, reason_reject = mapping.get(
+        issue["candidate_issue_type"],
+        ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Closest notice anchor selected.", "Rejected articles are less direct."),
+    )
+    return LegalQualification(
+        issue_name=issue["candidate_issue_type"],
+        primary_article=primary,
+        secondary_articles=secondary,
+        rejected_articles=rejected,
+        reason_primary_article_fits=reason_fit,
+        reason_rejected_articles_do_not_fit=reason_reject,
+    )
 
 
 def _infer_topic(section: SectionData) -> str:
@@ -1250,6 +1350,26 @@ def _apply_applicability_gate_to_citations(
     return gated
 
 
+def _violates_forbidden_article_matrix(claim_types: set[str], citations: list[LlmCitation]) -> bool:
+    articles = {_article_int(c.article_number) for c in citations if _article_int(c.article_number) is not None}
+    if "complaint" in claim_types and 21 in articles:
+        return True
+    if "transfer" in claim_types and 15 in articles:
+        return True
+    if "legal_basis" in claim_types and ({13, 14} & articles) and ("transfer" not in claim_types):
+        bad_paragraph = any(
+            (_article_int(c.article_number) in {13, 14}) and _norm(c.paragraph_ref or "").startswith("1(f)") for c in citations
+        )
+        if bad_paragraph:
+            return True
+    if "profiling" in claim_types and 22 in articles:
+        # Article 22 must be support unless significant-effects signal is present elsewhere.
+        primary_22_only = len(articles) == 1
+        if primary_22_only:
+            return True
+    return False
+
+
 def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
     if f is None:
         return LlmFinding(status="needs review", severity=None, gap_note="LLM parse failure", remediation_note=None, citations=[])
@@ -1528,14 +1648,46 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
             db.commit()
             continue
+        auditability = _section_auditability_type(section)
+        if auditability in {"definition_section", "administrative_section", "meta_section"}:
+            findings_by_status_total.labels(status="not applicable").inc()
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="not applicable",
+                    severity=None,
+                    classification="out_of_scope",
+                    confidence=0.95,
+                    gap_note=f"Section filtered by auditability gate ({auditability}).",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
 
-        topic = _infer_topic(section)
+        collection_mode = _collection_mode(section)
+        candidate_issues = _spot_candidate_issues(section, collection_mode)
+        primary_issue = candidate_issues[0] if candidate_issues else CandidateIssue(
+            candidate_issue_type="missing_controller_identity",
+            evidence_text=section.content[:180],
+            evidence_strength=0.35,
+            local_or_document_level="local",
+            possible_collection_mode=collection_mode,
+            is_visible_gap=False,
+        )
+        qualification = _legal_qualification_for_issue(primary_issue)
+        topic = f"{_infer_topic(section)} qualified_issue:{qualification['issue_name']} primary_article:{qualification['primary_article']}"
         query = _build_retrieval_query(section, topic, document_mode)
         chunks = _rerank_chunks_for_mode(section, knowledge.search(query=query, k=8), document_mode)[:5]
 
         if _retry_needed(chunks, topic):
             retrieval_retry_total.inc()
-            query_retry = _build_retrieval_query(section, f"{topic} legal requirements", document_mode)
+            query_retry = _build_retrieval_query(
+                section,
+                f"{qualification['issue_name']} {qualification['primary_article']} {', '.join(qualification['secondary_articles'])}",
+                document_mode,
+            )
             chunks_retry = _rerank_chunks_for_mode(section, knowledge.search(query=query_retry, k=8), document_mode)[:5]
             if chunks_retry:
                 chunks = chunks_retry
@@ -1610,6 +1762,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         f.remediation_note = _clean_remediation_legal_mismatches(f.remediation_note, claim_types)
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+        if _violates_forbidden_article_matrix(claim_types, valid_citations):
+            valid_citations = []
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
             salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
             if salvaged:
@@ -1630,12 +1784,16 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 if salvaged:
                     valid_citations = salvaged
                 valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+                if _violates_forbidden_article_matrix(claim_types, valid_citations):
+                    valid_citations = []
                 fallback = _build_transfer_gap(section, chunks) if "transfer" in claim_types else _build_mandatory_notice_gap(section, chunks)
             if fallback is not None:
                 f = fallback
                 claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
                 valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
                 valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+                if _violates_forbidden_article_matrix(claim_types, valid_citations):
+                    valid_citations = []
         if f.status == "needs review" and document_mode == "privacy_notice":
             review_text = _norm(f"{f.gap_note or ''} {section.section_title} {section.content[:500]}")
             if "retention" in review_text or "storage period" in review_text:
@@ -1659,6 +1817,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
                     valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
                     valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+                    if _violates_forbidden_article_matrix(claim_types, valid_citations):
+                        valid_citations = []
         if f.status in {"gap", "partial"} and not valid_citations:
             diagnostic = _citation_diagnostic_reason(section, claim_types, _collection_mode(section))
             f = LlmFinding(
@@ -1718,6 +1878,13 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 f"{f.gap_note} Applicability memo: obligation={memo['obligation']}; "
                 f"collection_mode={memo['collection_mode']}; visibility={memo['visibility']}; "
                 f"confidence={memo['applicability_confidence']:.2f}; applicability_status={applicability['applicability_status']}."
+            )
+            f.gap_note = (
+                f"{f.gap_note} Legal qualification: issue={qualification['issue_name']}; "
+                f"primary={qualification['primary_article']}; secondary={', '.join(qualification['secondary_articles'])}; "
+                f"rejected={', '.join(qualification['rejected_articles'])}. "
+                f"Primary fit: {qualification['reason_primary_article_fits']} "
+                f"Rejected rationale: {qualification['reason_rejected_articles_do_not_fit']}"
             )
             specialized_bits = [v for v in specialized_review.values() if v]
             if specialized_bits:
