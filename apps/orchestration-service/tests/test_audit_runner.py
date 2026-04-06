@@ -642,11 +642,11 @@ def test_clean_remediation_rewrites_wrong_13_1_f_legal_basis_reference():
     assert "Article 6(1)" in (cleaned or "")
 
 
-def test_classify_finding_quality_outputs_not_assessable_without_citations():
+def test_classify_finding_quality_outputs_probable_gap_for_core_notice_without_citations():
     finding = LlmFinding(status="gap", severity="high", gap_note="Missing retention.", remediation_note="Add retention.", citations=[])
     klass, conf = _classify_finding_quality(finding, [], {"retention"}, "direct")
-    assert klass == "not_assessable"
-    assert conf is not None and conf < 0.5
+    assert klass == "probable_gap"
+    assert conf is not None and conf >= 0.55
 
 
 def test_classify_finding_quality_marks_needs_review_as_not_assessable():

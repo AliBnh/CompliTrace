@@ -110,6 +110,7 @@ NOTICE_REQUIREMENT_SIGNALS: dict[str, set[str]] = {
     "retention": {"retention", "retain", "kept for", "storage period"},
     "complaint": {"complaint", "supervisory authority", "data protection authority"},
 }
+CORE_NOTICE_CLAIMS = {"controller_contact", "legal_basis", "retention", "rights", "complaint", "transfer"}
 
 DIRECT_COLLECTION_SIGNALS = {
     "you provide",
@@ -320,6 +321,12 @@ def _section_auditability_type(section: SectionData) -> str:
         "behavioral",
         "special category",
         "sensitive",
+        "personal data",
+        "personal information",
+        "identifier",
+        "identity",
+        "usage",
+        "share",
     }
     if any(signal in text for signal in auditable_signals):
         return "processing_section"
@@ -562,7 +569,8 @@ def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, boo
     }
 
 
-def _applicability_decision(section: SectionData, memo: ApplicabilityMemo) -> ApplicabilityDecision:
+def _applicability_decision(section: SectionData, memo: ApplicabilityMemo, claim_types: set[str] | None = None) -> ApplicabilityDecision:
+    claim_types = claim_types or set()
     mode = memo["collection_mode"]
     if mode == "direct":
         return ApplicabilityDecision(
@@ -592,6 +600,13 @@ def _applicability_decision(section: SectionData, memo: ApplicabilityMemo) -> Ap
             collection_mode="direct",
             applicability_status="probable",
             allowed_notice_articles=[13],
+            unresolved_trigger=unresolved,
+        )
+    if claim_types & CORE_NOTICE_CLAIMS:
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="probable",
+            allowed_notice_articles=[13, 14],
             unresolved_trigger=unresolved,
         )
     return ApplicabilityDecision(
@@ -1565,6 +1580,8 @@ def _classify_finding_quality(
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
+        if claim_types & CORE_NOTICE_CLAIMS:
+            return "probable_gap", 0.58
         return "not_assessable", 0.2
     has_primary = _claim_has_primary_anchor(claim_types, citations)
     if not has_primary:
@@ -1611,6 +1628,13 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
         "complaint": ("missing_complaint_right", "high"),
         "controller": ("missing_controller_identity", "high"),
     }
+    systemic_wording = {
+        "missing_legal_basis": "The notice does not explain the lawful basis for each processing purpose.",
+        "missing_retention_period": "The notice does not provide retention periods or objective retention criteria by data category.",
+        "missing_rights_notice": "The notice does not describe data subject rights, including access, erasure, restriction, objection, and portability.",
+        "missing_complaint_right": "The notice does not explain the right to lodge a complaint with a supervisory authority.",
+        "missing_controller_identity": "The notice does not clearly identify the controller legal entity and contact route.",
+    }
     to_add: list[tuple[str, str]] = []
     for token, (issue_id, severity) in mandatory.items():
         if token not in corpus:
@@ -1635,8 +1659,10 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
                 missing_from_document="yes",
                 not_visible_in_excerpt="no",
                 gap_note=(
-                    f"The privacy notice does not clearly disclose '{issue_id.replace('_', ' ')}' at document level. "
-                    "Articles 13/14 require this transparency element to be present and intelligible for data subjects."
+                    systemic_wording.get(
+                        issue_id,
+                        "The notice omits a mandatory transparency element required under Articles 13/14.",
+                    )
                 ),
                 remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
             )
@@ -1698,15 +1724,33 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     seen_root_keys: dict[str, str] = {}
     for row in rows:
+        if row.finding_type is None:
+            row.finding_type = "local"
+        if row.publish_flag is None:
+            row.publish_flag = "no" if row.status in {"not applicable", "needs review"} else "yes"
+        if row.confidence_level is None:
+            row.confidence_level = _confidence_level_for(row.confidence)
+        if row.assessment_type is None:
+            row.assessment_type = "not_assessable" if row.classification == "not_assessable" else "probable"
+        if row.severity_rationale is None:
+            row.severity_rationale = _severity_rationale(
+                LlmFinding(status=row.status, severity=row.severity, gap_note=row.gap_note, remediation_note=row.remediation_note, citations=[]),
+                _claim_types_from_text(f"{row.gap_note or ''} {row.remediation_note or ''}"),
+            )
         text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''}")
         if row.status == "needs review":
+            row.status = "partial"
             row.classification = "not_assessable"
             row.finding_type = "local"
             row.publish_flag = "yes"
             if row.gap_note:
                 row.gap_note = "Not assessable from provided excerpt; additional documentary context is required."
             row.remediation_note = "Provide complete notice excerpts and rerun legal qualification."
-            row.confidence = min(row.confidence or 0.45, 0.45)
+            row.confidence = min(row.confidence or 0.45, 0.45) if row.classification == "not_assessable" else max(row.confidence or 0.6, 0.6)
+            continue
+        if row.classification == "out_of_scope":
+            row.publish_flag = "no"
+            row.finding_type = "supporting_evidence"
             continue
         if row.status not in {"gap", "partial"}:
             continue
@@ -1934,7 +1978,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
         memo = _applicability_memo(section, claim_types, posture)
         applicability_calls_total.inc()
-        applicability = _applicability_decision(section, memo)
+        applicability = _applicability_decision(section, memo, claim_types)
         if any(t in claim_types for t in {"profiling_disclosure_gap", "article_22_threshold_unclear"}):
             profiling_pass_total.inc()
         if any(t in claim_types for t in {"transfer_notice", "transfer_safeguards"}):
@@ -2173,6 +2217,65 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
 
         db.commit()
+
+        if (
+            f.status in {"gap", "partial"}
+            and {"controller_contact", "legal_basis"}.issubset(claim_types)
+            and qualification["issue_name"] == "missing_controller_identity"
+        ):
+            split_gap = (
+                "Evidence indicates purposes/processing are described, but lawful basis per purpose is not disclosed. "
+                "This is evaluated separately from controller identity/contact."
+            )
+            split_row = Finding(
+                audit_id=audit.id,
+                section_id=section.id,
+                status="partial",
+                severity="high",
+                classification="probable_gap",
+                confidence=0.62,
+                confidence_evidence=round(min(0.9, 0.22 + 0.12 * len(valid_citations)), 2),
+                confidence_applicability=round(memo["applicability_confidence"], 2),
+                confidence_article_fit=0.7 if valid_citations else 0.52,
+                confidence_synthesis=0.7,
+                confidence_overall=0.62,
+                finding_type="local",
+                publish_flag="yes",
+                missing_from_section="yes",
+                missing_from_document="no",
+                not_visible_in_excerpt="no",
+                obligation_under_review="legal_basis",
+                collection_mode=memo["collection_mode"],
+                applicability_status=applicability["applicability_status"],
+                visibility_status=memo["visibility"],
+                section_vs_document_scope="missing_from_section_only",
+                missing_fact_if_unresolved=applicability["unresolved_trigger"],
+                policy_evidence_excerpt=(primary_issue["evidence_text"] or section.content[:220]).strip(),
+                legal_requirement="Primary legal anchor: GDPR Article 13(1)(c) / 14(1)(c) for legal basis disclosure.",
+                gap_reasoning=split_gap,
+                confidence_level="medium",
+                assessment_type="probable",
+                severity_rationale="High severity due to missing legal basis transparency for core notice obligations.",
+                gap_note=split_gap,
+                remediation_note=_issue_specific_remediation("missing_legal_basis", posture["document_type"], systemic=False),
+            )
+            db.add(split_row)
+            findings_by_status_total.labels(status="partial").inc()
+            publishable_findings_total.inc()
+            db.flush()
+            for cit in valid_citations:
+                if _article_int(cit.article_number) in {6, 13, 14}:
+                    db.add(
+                        FindingCitation(
+                            finding_id=split_row.id,
+                            chunk_id=cit.chunk_id,
+                            article_number=cit.article_number,
+                            paragraph_ref=cit.paragraph_ref,
+                            article_title=cit.article_title,
+                            excerpt=cit.excerpt,
+                        )
+                    )
+            db.commit()
 
     if document_mode == "privacy_notice":
         _add_notice_level_synthesis(db, audit.id)
