@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     prompt_template_version: str = Field(default="v1.0", alias="PROMPT_TEMPLATE_VERSION")
 
     reports_dir: Path = Field(default=Path("/app/storage/reports"), alias="REPORTS_DIR")
+    cors_allowed_origins: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        alias="CORS_ALLOWED_ORIGINS",
+    )
 
 
 settings = Settings()
