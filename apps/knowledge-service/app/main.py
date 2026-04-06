@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from fastembed import TextEmbedding
+from starlette.responses import Response
 
 
 class SearchRequest(BaseModel):
@@ -62,6 +64,10 @@ FORCE_REINDEX = os.getenv("FORCE_REINDEX", "false").lower() == "true"
 app = FastAPI(title="CompliTrace Knowledge Service", version="0.1.0")
 embedder: TextEmbedding | None = None
 qdrant: QdrantClient | None = None
+retrieval_query_total = Counter("retrieval_query_total", "Total retrieval queries received")
+retrieval_latency_seconds = Histogram("retrieval_latency_seconds", "Knowledge service retrieval latency")
+retrieval_results_returned_total = Counter("retrieval_results_returned_total", "Total retrieval results returned")
+chunk_lookup_total = Counter("chunk_lookup_total", "Total chunk lookup requests")
 
 
 def chunk_point_id(chunk_id: str) -> str:
@@ -148,14 +154,16 @@ def health() -> dict[str, Any]:
 def search(req: SearchRequest) -> SearchResponse:
     assert qdrant is not None
     assert embedder is not None
+    retrieval_query_total.inc()
 
-    query_vector = next(embedder.embed([req.query])).tolist()
-    response = qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_vector,
-        limit=req.k,
-        with_payload=True,
-    )
+    with retrieval_latency_seconds.time():
+        query_vector = next(embedder.embed([req.query])).tolist()
+        response = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            limit=req.k,
+            with_payload=True,
+        )
 
     results: list[SearchResult] = []
     for point in response.points:
@@ -173,12 +181,14 @@ def search(req: SearchRequest) -> SearchResponse:
             )
         )
 
+    retrieval_results_returned_total.inc(len(results))
     return SearchResponse(query=req.query, k=req.k, results=results)
 
 
 @app.get("/chunks/{chunk_id}", response_model=ChunkResponse)
 def get_chunk(chunk_id: str) -> ChunkResponse:
     assert qdrant is not None
+    chunk_lookup_total.inc()
 
     response = qdrant.scroll(
         collection_name=COLLECTION_NAME,
@@ -195,3 +205,8 @@ def get_chunk(chunk_id: str) -> ChunkResponse:
 
     payload = points[0].payload or {}
     return ChunkResponse(**payload)
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

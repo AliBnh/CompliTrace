@@ -18,6 +18,8 @@ retrieval_retry_total = Counter("retrieval_retry_total", "Retries triggered by f
 evidence_gate_failure_total = Counter("evidence_gate_failure_total", "Sections failing evidence gate")
 citation_validation_failure_total = Counter("citation_validation_failure_total", "Rejected citations")
 llm_inference_latency_seconds = Histogram("llm_inference_latency_seconds", "LLM inference latency")
+audit_duration_seconds = Histogram("audit_duration_seconds", "End-to-end audit duration")
+findings_by_status_total = Counter("findings_by_status_total", "Findings persisted by status", ["status"])
 
 
 ADMIN_PATTERNS = {
@@ -873,6 +875,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             timeout_reached = True
 
         if timeout_reached:
+            findings_by_status_total.labels(status="needs review").inc()
             db.add(
                 Finding(
                     audit_id=audit.id,
@@ -887,6 +890,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             continue
 
         if _is_not_applicable(section):
+            findings_by_status_total.labels(status="not applicable").inc()
             db.add(
                 Finding(
                     audit_id=audit.id,
@@ -913,6 +917,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         if not _evidence_sufficient(chunks):
             evidence_gate_failure_total.inc()
+            findings_by_status_total.labels(status="needs review").inc()
             db.add(
                 Finding(
                     audit_id=audit.id,
@@ -1045,6 +1050,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             remediation_note=f.remediation_note,
         )
         db.add(finding_row)
+        findings_by_status_total.labels(status=f.status).inc()
         db.flush()
 
         for cit in valid_citations:
@@ -1066,4 +1072,5 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     db.add(audit)
     db.commit()
     db.refresh(audit)
+    audit_duration_seconds.observe(time.monotonic() - audit_started)
     return audit

@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import settings
 from app.db.base import Base
 from app.models.audit import Audit, Finding
+from app.services.clients import DocumentData
 from app.services.clients import SectionData
-from app.services.reports import _format_citation_label, _sanitize_user_text, _section_labels, generate_report_text
+from app.services.reports import _format_citation_label, _sanitize_user_text, _section_report_meta, generate_report_text
 
 
 def test_generate_report_writes_valid_pdf(tmp_path: Path):
@@ -54,19 +55,34 @@ def test_generate_report_writes_valid_pdf(tmp_path: Path):
             report, out_path = generate_report_text(db, audit.id)
             assert report.status == "ready"
             assert out_path.exists()
-            with out_path.open("rb") as f:
-                header = f.read(5)
+            payload = out_path.read_bytes()
+            header = payload[:5]
             assert header == b"%PDF-"
+            decoded = payload.decode("latin-1", errors="ignore")
+            assert "Document title:" in decoded
+            assert "Audit started at:" in decoded
+            assert "Audit completed at:" in decoded
+            assert "Report generation metadata" in decoded
+            assert "Report schema version:" in decoded
     finally:
         settings.reports_dir = old_reports_dir
 
 
-def test_section_labels_use_human_readable_titles(monkeypatch):
+def test_section_report_meta_uses_human_readable_titles(monkeypatch):
     audit = Audit(id=str(uuid.uuid4()), document_id=str(uuid.uuid4()), status="complete")
 
     class FakeIngestionClient:
         def __init__(self, _base_url: str):
             pass
+
+        def get_document(self, _document_id: str):
+            return DocumentData(
+                id="doc-1",
+                title="Employee Privacy Policy",
+                filename="employee_privacy_policy.pdf",
+                status="parsed",
+                section_count=1,
+            )
 
         def get_sections(self, _document_id: str):
             return [
@@ -81,9 +97,11 @@ def test_section_labels_use_human_readable_titles(monkeypatch):
             ]
 
     monkeypatch.setattr("app.services.reports.IngestionClient", FakeIngestionClient)
-    labels = _section_labels(audit)
+    title, labels = _section_report_meta(audit)
 
-    assert labels["sec-1"] == "Section 1: Purpose and Scope"
+    assert title == "Employee Privacy Policy"
+    assert labels["sec-1"].label == "Section 1: Purpose and Scope"
+    assert labels["sec-1"].page_range == "Page 1"
 
 
 def test_format_citation_label_is_user_friendly():

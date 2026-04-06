@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from prometheus_client import Counter, Histogram
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,11 @@ from app.services.parser import parse_pdf_into_sections
 
 
 router = APIRouter()
+
+documents_upload_total = Counter("documents_upload_total", "Total document upload attempts")
+documents_parsed_total = Counter("documents_parsed_total", "Successfully parsed document uploads")
+documents_parse_failed_total = Counter("documents_parse_failed_total", "Document uploads that failed parsing")
+document_parse_duration_seconds = Histogram("document_parse_duration_seconds", "PDF parse + section extraction duration")
 
 
 @router.get("/health")
@@ -35,6 +41,7 @@ async def upload_document(
     file: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
 ) -> DocumentOut:
+    documents_upload_total.inc()
     content_type = request.headers.get("content-type", "").lower()
     is_raw_upload = ("application/pdf" in content_type) or ("application/octet-stream" in content_type)
 
@@ -74,17 +81,20 @@ async def upload_document(
             f.write(await file.read())
 
     try:
-        sections = parse_pdf_into_sections(str(stored_path))
-        if not sections:
-            raise ValueError("No sections detected")
+        with document_parse_duration_seconds.time():
+            sections = parse_pdf_into_sections(str(stored_path))
+            if not sections:
+                raise ValueError("No sections detected")
 
-        doc = create_document_with_sections(
-            db,
-            title=Path(safe_name).stem,
-            filename=safe_name,
-            parsed_sections=sections,
-        )
+            doc = create_document_with_sections(
+                db,
+                title=Path(safe_name).stem,
+                filename=safe_name,
+                parsed_sections=sections,
+            )
+        documents_parsed_total.inc()
     except Exception as exc:
+        documents_parse_failed_total.inc()
         failed = Document(title=Path(safe_name).stem, filename=safe_name, status="failed", error_message=str(exc))
         db.add(failed)
         db.commit()

@@ -15,6 +15,14 @@ class SectionData(BaseModel):
     page_end: int | None = None
 
 
+class DocumentData(BaseModel):
+    id: str
+    title: str
+    filename: str
+    status: str
+    section_count: int | None = None
+
+
 class RetrievalChunk(BaseModel):
     chunk_id: str
     article_number: str
@@ -47,6 +55,11 @@ class IngestionClient:
         resp = self._request_with_retry("GET", f"/documents/{document_id}/sections", timeout=30)
         resp.raise_for_status()
         return [SectionData.model_validate(x) for x in resp.json()]
+
+    def get_document(self, document_id: str) -> DocumentData:
+        resp = self._request_with_retry("GET", f"/documents/{document_id}", timeout=30)
+        resp.raise_for_status()
+        return DocumentData.model_validate(resp.json())
 
 
 class KnowledgeClient:

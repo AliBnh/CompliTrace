@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -9,7 +10,10 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.models.audit import Audit, Finding, Report
-from app.services.clients import IngestionClient
+from app.services.clients import IngestionClient, SectionData
+
+
+REPORT_SCHEMA_VERSION = "v1.0"
 
 
 class _TextBlock(NamedTuple):
@@ -172,19 +176,40 @@ def _write_pdf(blocks: list[_TextBlock], out_path: Path) -> None:
     out_path.write_bytes(bytes(pdf))
 
 
-def _section_labels(audit: Audit) -> dict[str, str]:
-    try:
-        sections = IngestionClient(settings.ingestion_service_url).get_sections(audit.document_id)
-    except Exception:
-        return {}
+class _SectionReportMeta(NamedTuple):
+    label: str
+    page_range: str | None = None
 
-    labels: dict[str, str] = {}
+
+def _format_page_range(section: SectionData) -> str | None:
+    if section.page_start is None and section.page_end is None:
+        return None
+    if section.page_start is None:
+        return f"Page {section.page_end}"
+    if section.page_end is None:
+        return f"Page {section.page_start}"
+    if section.page_start == section.page_end:
+        return f"Page {section.page_start}"
+    return f"Pages {section.page_start}-{section.page_end}"
+
+
+def _section_report_meta(audit: Audit) -> tuple[str | None, dict[str, _SectionReportMeta]]:
+    try:
+        client = IngestionClient(settings.ingestion_service_url)
+        document = client.get_document(audit.document_id)
+        sections = client.get_sections(audit.document_id)
+    except Exception:
+        return None, {}
+
+    title = document.title.strip() if document.title.strip() else document.filename
+    labels: dict[str, _SectionReportMeta] = {}
     for section in sections:
         if section.section_title.strip():
-            labels[section.id] = f"Section {section.section_order}: {section.section_title}"
+            label = f"Section {section.section_order}: {section.section_title}"
         else:
-            labels[section.id] = f"Section {section.section_order}"
-    return labels
+            label = f"Section {section.section_order}"
+        labels[section.id] = _SectionReportMeta(label=label, page_range=_format_page_range(section))
+    return title, labels
 
 
 def _format_citation_label(article_number: str, article_title: str, paragraph_ref: str | None) -> str:
@@ -243,10 +268,24 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         - ((1.0 - citation_coverage) * 3.0)
         - (needs_review_rate * 3.0),
     )
-    section_labels = _section_labels(audit)
+    document_title, section_meta = _section_report_meta(audit)
+    started_at = audit.started_at.isoformat(sep=" ", timespec="seconds") if isinstance(audit.started_at, datetime) else "n/a"
+    completed_at = (
+        audit.completed_at.isoformat(sep=" ", timespec="seconds")
+        if isinstance(audit.completed_at, datetime)
+        else "n/a"
+    )
+    report_created_at = (
+        report.created_at.isoformat(sep=" ", timespec="seconds")
+        if isinstance(report.created_at, datetime)
+        else "n/a"
+    )
 
     blocks: list[_TextBlock] = [
         _TextBlock("CompliTrace GDPR Gap Report", font_size=16, top_gap=0),
+        _TextBlock(f"Document title: {document_title or 'Unavailable'}", font_size=10, top_gap=8),
+        _TextBlock(f"Audit started at: {started_at}", font_size=10),
+        _TextBlock(f"Audit completed at: {completed_at}", font_size=10),
         _TextBlock(f"Model: {audit.model_provider}:{audit.model_name}", font_size=10),
         _TextBlock(f"Embedding model: {audit.embedding_model}", font_size=10),
         _TextBlock(f"Corpus version: {audit.corpus_version}", font_size=10),
@@ -265,8 +304,10 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     ]
 
     for finding in findings:
-        section_label = section_labels.get(finding.section_id, "Document section")
-        blocks.append(_TextBlock(section_label, font_size=11, top_gap=10))
+        meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
+        blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
+        if meta.page_range:
+            blocks.append(_TextBlock(f"Section page range: {meta.page_range}", bullet=True))
         blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
         safe_gap_note = _sanitize_user_text(finding.gap_note)
@@ -284,6 +325,9 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             )
             if citation.excerpt:
                 blocks.append(_TextBlock(f'Evidence: "{citation.excerpt}"', bullet=True))
+    blocks.append(_TextBlock("Report generation metadata", font_size=12, top_gap=14))
+    blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
+    blocks.append(_TextBlock(f"Report schema version: {REPORT_SCHEMA_VERSION}", bullet=True))
 
     out_path = settings.reports_dir / f"audit_{audit_id}_{report.id}.pdf"
     _write_pdf(blocks, out_path)
