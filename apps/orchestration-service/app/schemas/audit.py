@@ -28,6 +28,18 @@ class FindingOut(BaseModel):
     missing_from_section: str | None = None
     missing_from_document: str | None = None
     not_visible_in_excerpt: str | None = None
+    obligation_under_review: str | None = None
+    collection_mode: str | None = None
+    applicability_status: str | None = None
+    visibility_status: str | None = None
+    section_vs_document_scope: str | None = None
+    missing_fact_if_unresolved: str | None = None
+    policy_evidence_excerpt: str | None = None
+    legal_requirement: str | None = None
+    gap_reasoning: str | None = None
+    confidence_level: str | None = None
+    assessment_type: str | None = None
+    severity_rationale: str | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

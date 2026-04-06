@@ -20,6 +20,16 @@ citation_validation_failure_total = Counter("citation_validation_failure_total",
 llm_inference_latency_seconds = Histogram("llm_inference_latency_seconds", "LLM inference latency")
 audit_duration_seconds = Histogram("audit_duration_seconds", "End-to-end audit duration")
 findings_by_status_total = Counter("findings_by_status_total", "Findings persisted by status", ["status"])
+audit_sections_total = Counter("audit_sections_total", "Total sections processed by audit")
+audit_sections_auditable_total = Counter("audit_sections_auditable_total", "Auditable sections processed by audit")
+audit_sections_filtered_total = Counter("audit_sections_filtered_total", "Sections filtered before substantive audit")
+issue_spotting_calls_total = Counter("issue_spotting_calls_total", "Issue spotting agent calls")
+applicability_calls_total = Counter("applicability_calls_total", "Applicability agent calls")
+legal_qualification_calls_total = Counter("legal_qualification_calls_total", "Legal qualification calls")
+profiling_pass_total = Counter("profiling_pass_total", "Profiling pass triggered")
+transfer_pass_total = Counter("transfer_pass_total", "Transfer pass triggered")
+reviewer_pass_total = Counter("reviewer_pass_total", "Reviewer pass runs")
+publishable_findings_total = Counter("publishable_findings_total", "Publishable findings generated")
 
 
 ADMIN_PATTERNS = {
@@ -360,6 +370,50 @@ def _consistency_validator(issue_name: str, claim_types: set[str], citations: li
             return False
         if "retention" in issue_name and "transfer" in rem:
             return False
+    return True
+
+
+def _assessment_type_for(finding: LlmFinding, classification: str | None) -> str:
+    if classification == "clear_non_compliance":
+        return "confirmed"
+    if classification == "probable_gap":
+        return "probable"
+    return "not_assessable"
+
+
+def _confidence_level_for(confidence: float | None) -> str:
+    if confidence is None:
+        return "low"
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.55:
+        return "medium"
+    return "low"
+
+
+def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
+    if finding.severity == "high":
+        return "High severity due to central GDPR transparency obligation impact and broad rights exposure."
+    if finding.severity == "medium":
+        return "Medium severity due to meaningful transparency gap with partially bounded scope."
+    if finding.severity == "low":
+        return "Low severity due to localized clarity issue without clear document-wide omission."
+    if finding.status == "needs review":
+        return "Severity withheld because substantive legal support is not yet assessable."
+    if "transfer" in claim_types:
+        return "Severity calibrated to transfer disclosure context and safeguard visibility."
+    return "Severity calibrated from obligation criticality, scope, and evidence confidence."
+
+
+def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
+    if section_id.startswith("__"):
+        return False
+    if status in {"needs review", "not applicable"}:
+        return False
+    if finding_type == "supporting_evidence":
+        return False
+    if classification == "supporting_evidence_internal_only":
+        return False
     return True
 
 
@@ -1565,7 +1619,7 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
         db.add(
             Finding(
                 audit_id=audit_id,
-                section_id="__notice__",
+                section_id=f"systemic:{issue_id}",
                 status="gap",
                 severity=severity,
                 classification="systemic_violation",
@@ -1613,7 +1667,7 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
         db.add(
             Finding(
                 audit_id=audit_id,
-                section_id="__systemic__",
+                section_id=f"systemic:{issue_id}",
                 status="gap",
                 severity="high" if len(group) >= 3 else "medium",
                 classification="systemic_violation",
@@ -1629,10 +1683,10 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
                 missing_from_document="yes",
                 not_visible_in_excerpt="no",
                 gap_note=(
-                    f"Systemic issue '{issue_id}' observed across sections [{supporting_sections}]. "
-                    "Repeated section-level symptoms were consolidated into one root-cause finding."
+                    f"The notice shows a repeated '{issue_id.replace('_', ' ')}' transparency defect across sections "
+                    f"[{supporting_sections}], indicating a document-level compliance gap."
                 ),
-                remediation_note="Implement one notice-wide remediation program and track closure by section evidence.",
+                remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
             )
         )
         findings_by_status_total.labels(status="gap").inc()
@@ -1640,6 +1694,7 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
 
 
 def _partner_review_pass(db: Session, audit_id: str) -> None:
+    reviewer_pass_total.inc()
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     seen_root_keys: dict[str, str] = {}
     for row in rows:
@@ -1660,7 +1715,7 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             if issue.replace("_", " ") in text:
                 key = issue
                 break
-        if key in seen_root_keys and row.section_id not in {"__systemic__", "__notice__"}:
+        if key in seen_root_keys and not row.section_id.startswith("systemic:"):
             row.status = "not applicable"
             row.classification = "supporting_evidence"
             row.finding_type = "supporting_evidence"
@@ -1670,7 +1725,7 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             row.gap_note = f"Supporting evidence for systemic issue in section {seen_root_keys[key]}."
             row.remediation_note = None
         else:
-            if row.section_id in {"__systemic__", "__notice__"}:
+            if row.section_id.startswith("systemic:"):
                 row.finding_type = "systemic"
                 row.publish_flag = "yes"
             else:
@@ -1694,6 +1749,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     db.commit()
 
     sections = ingestion.get_sections(audit.document_id)
+    audit_sections_total.inc(len(sections))
     document_mode = _infer_document_mode(sections)
     posture = _document_posture_agent(sections, document_mode)
     obligation_map = _build_document_obligation_map(sections)
@@ -1726,6 +1782,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             continue
 
         if _is_not_applicable(section):
+            audit_sections_filtered_total.inc()
             findings_by_status_total.labels(status="not applicable").inc()
             db.add(
                 Finding(
@@ -1753,6 +1810,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             continue
         auditability = _section_auditability_type(section)
         if auditability in {"definition_section", "administrative_section", "meta_section"}:
+            audit_sections_filtered_total.inc()
             findings_by_status_total.labels(status="not applicable").inc()
             db.add(
                 Finding(
@@ -1779,7 +1837,9 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             db.commit()
             continue
 
+        audit_sections_auditable_total.inc()
         collection_mode = _collection_mode(section)
+        issue_spotting_calls_total.inc()
         candidate_issues = _spot_candidate_issues(section, collection_mode)
         primary_issue = candidate_issues[0] if candidate_issues else CandidateIssue(
             candidate_issue_type="missing_controller_identity",
@@ -1790,6 +1850,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             is_visible_gap=False,
         )
         qualification = _legal_qualification_for_issue(primary_issue)
+        legal_qualification_calls_total.inc()
         topic = f"{_infer_topic(section)} qualified_issue:{qualification['issue_name']} primary_article:{qualification['primary_article']}"
         query = _build_retrieval_query(section, topic, document_mode)
         chunks = _rerank_chunks_for_mode(section, knowledge.search(query=query, k=8), document_mode)[:5]
@@ -1872,7 +1933,12 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
         claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
         memo = _applicability_memo(section, claim_types, posture)
+        applicability_calls_total.inc()
         applicability = _applicability_decision(section, memo)
+        if any(t in claim_types for t in {"profiling_disclosure_gap", "article_22_threshold_unclear"}):
+            profiling_pass_total.inc()
+        if any(t in claim_types for t in {"transfer_notice", "transfer_safeguards"}):
+            transfer_pass_total.inc()
         specialized_review = _specialized_legal_review(section, claim_types)
         f.remediation_note = _clean_remediation_legal_mismatches(f.remediation_note, claim_types)
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
@@ -2062,14 +2128,35 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             confidence_synthesis=0.8 if classification == "systemic_violation" else 0.65,
             confidence_overall=confidence,
             finding_type="local",
-            publish_flag="yes" if f.status in {"gap", "partial"} else "no",
+            publish_flag="yes" if _is_publishable_finding(section.id, f.status, classification, "local") else "no",
             missing_from_section="yes" if f.status in {"gap", "partial"} else "no",
             missing_from_document="yes" if (f.status in {"gap", "partial"} and not any(obligation_map.values())) else "no",
             not_visible_in_excerpt="yes" if classification == "not_assessable" else "no",
+            obligation_under_review=memo["obligation"],
+            collection_mode=memo["collection_mode"],
+            applicability_status=applicability["applicability_status"],
+            visibility_status=memo["visibility"],
+            section_vs_document_scope=(
+                "missing_from_document"
+                if f.status in {"gap", "partial"} and not any(obligation_map.values())
+                else "missing_from_section_only"
+            ),
+            missing_fact_if_unresolved=applicability["unresolved_trigger"],
+            policy_evidence_excerpt=(primary_issue["evidence_text"] or section.content[:220]).strip(),
+            legal_requirement=(
+                f"Primary legal anchor: GDPR Article {qualification['primary_article']} for issue "
+                f"{qualification['issue_name']}."
+            ),
+            gap_reasoning=f.gap_note,
+            confidence_level=_confidence_level_for(confidence),
+            assessment_type=_assessment_type_for(f, classification),
+            severity_rationale=_severity_rationale(f, claim_types),
             gap_note=f.gap_note,
             remediation_note=f.remediation_note,
         )
         db.add(finding_row)
+        if finding_row.publish_flag == "yes":
+            publishable_findings_total.inc()
         findings_by_status_total.labels(status=f.status).inc()
         db.flush()
 

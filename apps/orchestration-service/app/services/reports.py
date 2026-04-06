@@ -263,7 +263,8 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     ).all()
     systemic_findings = [f for f in findings if f.finding_type == "systemic" and f.publish_flag == "yes"]
     publishable_findings = [f for f in findings if f.finding_type == "local" and f.publish_flag == "yes"]
-    supporting_findings = [f for f in findings if f.finding_type == "supporting_evidence"]
+    not_assessable_findings = [f for f in publishable_findings if f.classification == "not_assessable"]
+    publishable_local_findings = [f for f in publishable_findings if f.classification != "not_assessable"]
 
     total = len(findings)
     by_status = {
@@ -324,7 +325,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Compliant: {by_status['compliant']}", bullet=True),
         _TextBlock(f"Partial: {by_status['partial']}", bullet=True),
         _TextBlock(f"Gap: {by_status['gap']}", bullet=True),
-        _TextBlock(f"Needs review (internal log only): {by_status['needs review']}", bullet=True),
+        _TextBlock(f"Needs review (internal only, not published): {by_status['needs review']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
         _TextBlock(f"Substantive citation coverage: {citation_coverage:.0%}", bullet=True),
         _TextBlock(f"Clear non-compliance findings: {by_classification['clear_non_compliance']}", bullet=True),
@@ -347,8 +348,8 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         if finding.remediation_note:
             blocks.append(_TextBlock(f"Remediation: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
 
-    blocks.append(_TextBlock("Publishable Local Findings", font_size=13, top_gap=14))
-    for finding in publishable_findings:
+    blocks.append(_TextBlock("Unique Local Findings", font_size=13, top_gap=14))
+    for finding in publishable_local_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
         if meta.page_range:
@@ -385,13 +386,24 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             )
             if citation.excerpt:
                 blocks.append(_TextBlock(f'Evidence: "{citation.excerpt}"', bullet=True))
-    if supporting_findings:
-        blocks.append(_TextBlock("Section-level Supporting Evidence", font_size=13, top_gap=14))
-        for finding in supporting_findings:
+    if not_assessable_findings:
+        blocks.append(_TextBlock("Not Assessable from Provided Excerpt", font_size=13, top_gap=14))
+        for finding in not_assessable_findings:
             meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
             blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
             if finding.gap_note:
-                blocks.append(_TextBlock(f"Evidence node: {_sanitize_user_text(finding.gap_note)}", bullet=True))
+                blocks.append(_TextBlock(f"Constraint: {_sanitize_user_text(finding.gap_note)}", bullet=True))
+            if finding.missing_fact_if_unresolved:
+                blocks.append(_TextBlock(f"Missing context to resolve: {finding.missing_fact_if_unresolved}", bullet=True))
+            if finding.remediation_note:
+                blocks.append(_TextBlock(f"Next step: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
+    roadmap_items = [f for f in findings if f.publish_flag == "yes" and f.remediation_note]
+    if roadmap_items:
+        blocks.append(_TextBlock("Prioritized Remediation Roadmap", font_size=13, top_gap=14))
+        for finding in sorted(roadmap_items, key=lambda row: {"high": 0, "medium": 1, "low": 2}.get((row.severity or "low"), 3)):
+            title = finding.gap_note or "Remediate transparency obligation gap."
+            blocks.append(_TextBlock(_sanitize_user_text(title)[:180], bullet=True))
+            blocks.append(_TextBlock(f"Action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
     blocks.append(_TextBlock("Report generation metadata", font_size=12, top_gap=14))
     blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
     blocks.append(_TextBlock(f"Report schema version: {REPORT_SCHEMA_VERSION}", bullet=True))

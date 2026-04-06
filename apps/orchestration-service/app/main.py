@@ -81,6 +81,18 @@ def _ensure_findings_columns() -> None:
             "missing_from_section": "ALTER TABLE findings ADD COLUMN missing_from_section VARCHAR(8)",
             "missing_from_document": "ALTER TABLE findings ADD COLUMN missing_from_document VARCHAR(8)",
             "not_visible_in_excerpt": "ALTER TABLE findings ADD COLUMN not_visible_in_excerpt VARCHAR(8)",
+            "obligation_under_review": "ALTER TABLE findings ADD COLUMN obligation_under_review VARCHAR(64)",
+            "collection_mode": "ALTER TABLE findings ADD COLUMN collection_mode VARCHAR(32)",
+            "applicability_status": "ALTER TABLE findings ADD COLUMN applicability_status VARCHAR(32)",
+            "visibility_status": "ALTER TABLE findings ADD COLUMN visibility_status VARCHAR(32)",
+            "section_vs_document_scope": "ALTER TABLE findings ADD COLUMN section_vs_document_scope VARCHAR(32)",
+            "missing_fact_if_unresolved": "ALTER TABLE findings ADD COLUMN missing_fact_if_unresolved TEXT",
+            "policy_evidence_excerpt": "ALTER TABLE findings ADD COLUMN policy_evidence_excerpt TEXT",
+            "legal_requirement": "ALTER TABLE findings ADD COLUMN legal_requirement TEXT",
+            "gap_reasoning": "ALTER TABLE findings ADD COLUMN gap_reasoning TEXT",
+            "confidence_level": "ALTER TABLE findings ADD COLUMN confidence_level VARCHAR(32)",
+            "assessment_type": "ALTER TABLE findings ADD COLUMN assessment_type VARCHAR(32)",
+            "severity_rationale": "ALTER TABLE findings ADD COLUMN severity_rationale TEXT",
         }
         for column_name, ddl in column_ddls.items():
             if column_name not in columns:
