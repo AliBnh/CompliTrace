@@ -435,7 +435,7 @@ def _is_publishable_finding(section_id: str, status: str, classification: str | 
         return False
     if classification == "supporting_evidence_internal_only":
         return False
-    if classification in {"diagnostic_internal_only", "contradiction_failure_internal_only", "retrieval_failure_internal_only"}:
+    if classification in {"diagnostic_internal_only", "contradiction_internal_only", "retrieval_failure_internal_only"}:
         return False
     return True
 
@@ -2279,7 +2279,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         )
         if not consistency_ok:
             contradiction_fail_total.inc()
-            classification = "contradiction_failure_internal_only"
+            classification = "contradiction_internal_only"
             f.status = "needs review"
             f.severity = None
             f.gap_note = (
