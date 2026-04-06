@@ -17,7 +17,17 @@ class FindingOut(BaseModel):
     status: str
     severity: str | None
     classification: str | None = None
+    finding_type: str | None = None
+    publish_flag: str | None = None
     confidence: float | None = None
+    confidence_evidence: float | None = None
+    confidence_applicability: float | None = None
+    confidence_article_fit: float | None = None
+    confidence_synthesis: float | None = None
+    confidence_overall: float | None = None
+    missing_from_section: str | None = None
+    missing_from_document: str | None = None
+    not_visible_in_excerpt: str | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

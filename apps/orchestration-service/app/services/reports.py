@@ -261,9 +261,9 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         .where(Finding.audit_id == audit_id)
         .order_by(Finding.section_id.asc())
     ).all()
-    systemic_findings = [f for f in findings if f.classification == "systemic_violation"]
-    publishable_findings = [f for f in findings if f.status in {"gap", "partial", "not applicable"} and f.classification != "supporting_evidence"]
-    supporting_findings = [f for f in findings if f.classification == "supporting_evidence"]
+    systemic_findings = [f for f in findings if f.finding_type == "systemic" and f.publish_flag == "yes"]
+    publishable_findings = [f for f in findings if f.finding_type == "local" and f.publish_flag == "yes"]
+    supporting_findings = [f for f in findings if f.finding_type == "supporting_evidence"]
 
     total = len(findings)
     by_status = {
@@ -324,7 +324,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Compliant: {by_status['compliant']}", bullet=True),
         _TextBlock(f"Partial: {by_status['partial']}", bullet=True),
         _TextBlock(f"Gap: {by_status['gap']}", bullet=True),
-        _TextBlock(f"Needs review: {by_status['needs review']}", bullet=True),
+        _TextBlock(f"Needs review (internal log only): {by_status['needs review']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
         _TextBlock(f"Substantive citation coverage: {citation_coverage:.0%}", bullet=True),
         _TextBlock(f"Clear non-compliance findings: {by_classification['clear_non_compliance']}", bullet=True),
@@ -359,6 +359,14 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             blocks.append(_TextBlock(f"Classification: {finding.classification}", bullet=True))
         if finding.confidence is not None:
             blocks.append(_TextBlock(f"Confidence: {finding.confidence:.2f}", bullet=True))
+        if finding.confidence_overall is not None:
+            blocks.append(_TextBlock(f"Confidence (overall): {finding.confidence_overall:.2f}", bullet=True))
+        if finding.confidence_evidence is not None:
+            blocks.append(_TextBlock(f"Confidence (evidence): {finding.confidence_evidence:.2f}", bullet=True))
+        if finding.confidence_applicability is not None:
+            blocks.append(_TextBlock(f"Confidence (applicability): {finding.confidence_applicability:.2f}", bullet=True))
+        if finding.confidence_article_fit is not None:
+            blocks.append(_TextBlock(f"Confidence (article fit): {finding.confidence_article_fit:.2f}", bullet=True))
         safe_gap_note = _sanitize_user_text(finding.gap_note)
         safe_remediation_note = _sanitize_user_text(finding.remediation_note)
         if finding.status == "needs review" and safe_gap_note and "insufficient legally compatible citation support" in safe_gap_note.lower():

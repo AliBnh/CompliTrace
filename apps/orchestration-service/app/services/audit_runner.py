@@ -1507,6 +1507,16 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
                 severity=severity,
                 classification="systemic_violation",
                 confidence=0.85,
+                confidence_evidence=0.8,
+                confidence_applicability=0.9,
+                confidence_article_fit=0.9,
+                confidence_synthesis=0.9,
+                confidence_overall=0.85,
+                finding_type="systemic",
+                publish_flag="yes",
+                missing_from_section="yes",
+                missing_from_document="yes",
+                not_visible_in_excerpt="no",
                 gap_note=(
                     f"Fact: The notice-wide findings do not cover mandatory transparency element '{issue_id}'. "
                     "Rule: Articles 13/14 require complete notice disclosures for core transparency elements. "
@@ -1547,6 +1557,16 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
                 severity="high" if len(group) >= 3 else "medium",
                 classification="systemic_violation",
                 confidence=0.88 if len(group) >= 3 else 0.8,
+                confidence_evidence=0.82,
+                confidence_applicability=0.86,
+                confidence_article_fit=0.84,
+                confidence_synthesis=0.9,
+                confidence_overall=0.88 if len(group) >= 3 else 0.8,
+                finding_type="systemic",
+                publish_flag="yes",
+                missing_from_section="yes",
+                missing_from_document="yes",
+                not_visible_in_excerpt="no",
                 gap_note=(
                     f"Systemic issue '{issue_id}' observed across sections [{supporting_sections}]. "
                     "Repeated section-level symptoms were consolidated into one root-cause finding."
@@ -1565,6 +1585,8 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''}")
         if row.status == "needs review":
             row.classification = "not_assessable"
+            row.finding_type = "local"
+            row.publish_flag = "yes"
             if row.gap_note:
                 row.gap_note = "Not assessable from provided excerpt; additional documentary context is required."
             row.remediation_note = "Provide complete notice excerpts and rerun legal qualification."
@@ -1580,11 +1602,19 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         if key in seen_root_keys and row.section_id not in {"__systemic__", "__notice__"}:
             row.status = "not applicable"
             row.classification = "supporting_evidence"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
             row.severity = None
             row.confidence = 0.7
             row.gap_note = f"Supporting evidence for systemic issue in section {seen_root_keys[key]}."
             row.remediation_note = None
         else:
+            if row.section_id in {"__systemic__", "__notice__"}:
+                row.finding_type = "systemic"
+                row.publish_flag = "yes"
+            else:
+                row.finding_type = "local"
+                row.publish_flag = "yes"
             seen_root_keys[key] = row.section_id
     db.commit()
 
@@ -1625,6 +1655,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     section_id=section.id,
                     status="needs review",
                     severity=None,
+                    finding_type="local",
+                    publish_flag="no",
                     gap_note=f"Audit runtime budget exceeded ({settings.max_audit_runtime_seconds}s). Manual review required.",
                     remediation_note=None,
                 )
@@ -1642,6 +1674,16 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     severity=None,
                     classification="out_of_scope",
                     confidence=1.0,
+                    confidence_evidence=0.95,
+                    confidence_applicability=0.95,
+                    confidence_article_fit=0.95,
+                    confidence_synthesis=0.7,
+                    confidence_overall=1.0,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
                     gap_note=None,
                     remediation_note=None,
                 )
@@ -1659,6 +1701,16 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     severity=None,
                     classification="out_of_scope",
                     confidence=0.95,
+                    confidence_evidence=0.9,
+                    confidence_applicability=0.9,
+                    confidence_article_fit=0.9,
+                    confidence_synthesis=0.7,
+                    confidence_overall=0.95,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
                     gap_note=f"Section filtered by auditability gate ({auditability}).",
                     remediation_note=None,
                 )
@@ -1701,6 +1753,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     section_id=section.id,
                     status="needs review",
                     severity=None,
+                    finding_type="local",
+                    publish_flag="no",
                     gap_note="Evidence sufficiency gate failed.",
                     remediation_note=None,
                 )
@@ -1918,6 +1972,16 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             severity=f.severity,
             classification=classification,
             confidence=confidence,
+            confidence_evidence=round(min(0.95, 0.25 + 0.15 * len(valid_citations)), 2),
+            confidence_applicability=round(memo["applicability_confidence"], 2),
+            confidence_article_fit=round(0.88 if valid_citations and not _violates_forbidden_article_matrix(claim_types, valid_citations) else 0.45, 2),
+            confidence_synthesis=0.8 if classification == "systemic_violation" else 0.65,
+            confidence_overall=confidence,
+            finding_type="local",
+            publish_flag="yes" if f.status in {"gap", "partial"} else "no",
+            missing_from_section="yes" if f.status in {"gap", "partial"} else "no",
+            missing_from_document="yes" if (f.status in {"gap", "partial"} and not any(obligation_map.values())) else "no",
+            not_visible_in_excerpt="yes" if classification == "not_assessable" else "no",
             gap_note=f.gap_note,
             remediation_note=f.remediation_note,
         )
