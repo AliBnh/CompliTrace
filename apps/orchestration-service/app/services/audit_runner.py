@@ -111,6 +111,13 @@ NOTICE_REQUIREMENT_SIGNALS: dict[str, set[str]] = {
     "complaint": {"complaint", "supervisory authority", "data protection authority"},
 }
 CORE_NOTICE_CLAIMS = {"controller_contact", "legal_basis", "retention", "rights", "complaint", "transfer"}
+CORE_NOTICE_SYSTEMIC_ISSUES = {
+    "missing_controller_identity",
+    "missing_legal_basis",
+    "missing_retention_period",
+    "missing_rights_notice",
+    "missing_complaint_right",
+}
 
 DIRECT_COLLECTION_SIGNALS = {
     "you provide",
@@ -1621,11 +1628,12 @@ def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
 def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     corpus = " ".join(_norm(f"{r.gap_note or ''} {r.remediation_note or ''}") for r in rows if r.status in {"gap", "partial"})
+    existing_obligations = {_norm(r.obligation_under_review or "") for r in rows}
     mandatory = {
         "legal basis": ("missing_legal_basis", "high"),
-        "retention": ("missing_retention_period", "high"),
-        "rights": ("missing_rights_notice", "high"),
-        "complaint": ("missing_complaint_right", "high"),
+        "retention": ("missing_retention_period", "medium"),
+        "rights": ("missing_rights_notice", "medium"),
+        "complaint": ("missing_complaint_right", "medium"),
         "controller": ("missing_controller_identity", "high"),
     }
     systemic_wording = {
@@ -1637,6 +1645,11 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
     }
     to_add: list[tuple[str, str]] = []
     for token, (issue_id, severity) in mandatory.items():
+        if issue_id == "missing_legal_basis":
+            has_legal_basis_issue = ("legal basis" in corpus) or ("legal_basis" in existing_obligations)
+            if not has_legal_basis_issue:
+                to_add.append((issue_id, severity))
+            continue
         if token not in corpus:
             to_add.append((issue_id, severity))
     for issue_id, severity in to_add:
@@ -1695,7 +1708,7 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
                 audit_id=audit_id,
                 section_id=f"systemic:{issue_id}",
                 status="gap",
-                severity="high" if len(group) >= 3 else "medium",
+                severity="medium" if issue_id in {"missing_complaint_right", "missing_retention_period"} else ("high" if len(group) >= 3 else "medium"),
                 classification="systemic_violation",
                 confidence=0.88 if len(group) >= 3 else 0.8,
                 confidence_evidence=0.82,
@@ -1722,7 +1735,9 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
 def _partner_review_pass(db: Session, audit_id: str) -> None:
     reviewer_pass_total.inc()
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    systemic_issue_keys = {row.section_id.split("systemic:", 1)[1] for row in rows if row.section_id.startswith("systemic:")}
     seen_root_keys: dict[str, str] = {}
+    seen_supporting_pairs: set[tuple[str, str]] = set()
     for row in rows:
         if row.finding_type is None:
             row.finding_type = "local"
@@ -1769,6 +1784,11 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             row.confidence = 0.7
             row.gap_note = f"Supporting evidence for systemic issue in section {seen_root_keys[key]}."
             row.remediation_note = None
+            pair = (row.section_id, key)
+            if pair in seen_supporting_pairs:
+                db.delete(row)
+                continue
+            seen_supporting_pairs.add(pair)
         else:
             if row.section_id.startswith("systemic:"):
                 row.finding_type = "systemic"
@@ -1777,6 +1797,20 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                 row.finding_type = "local"
                 row.publish_flag = "yes"
             seen_root_keys[key] = row.section_id
+        if key in CORE_NOTICE_SYSTEMIC_ISSUES and key in systemic_issue_keys and not row.section_id.startswith("systemic:"):
+            row.status = "not applicable"
+            row.classification = "supporting_evidence"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.severity = None
+            row.confidence = max(row.confidence or 0.7, 0.7)
+            row.gap_note = f"Supporting evidence for systemic notice-level issue '{key}'."
+            row.remediation_note = None
+            pair = (row.section_id, key)
+            if pair in seen_supporting_pairs:
+                db.delete(row)
+                continue
+            seen_supporting_pairs.add(pair)
     db.commit()
 
 
@@ -1913,6 +1947,48 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         if not _evidence_sufficient(chunks):
             evidence_gate_failure_total.inc()
+            fallback_issue = next((c for c in candidate_issues if c["candidate_issue_type"].startswith("missing_")), None)
+            if document_mode == "privacy_notice" and fallback_issue is not None:
+                issue_name = fallback_issue["candidate_issue_type"]
+                issue_to_obligation = {
+                    "missing_controller_identity": "controller_contact",
+                    "missing_legal_basis": "legal_basis",
+                    "missing_retention": "retention",
+                    "missing_rights_information": "rights",
+                    "missing_complaint_right": "complaint",
+                    "missing_transfer_notice": "transfer",
+                }
+                obligation = issue_to_obligation.get(issue_name)
+                if obligation in CORE_NOTICE_CLAIMS:
+                    findings_by_status_total.labels(status="partial").inc()
+                    db.add(
+                        Finding(
+                            audit_id=audit.id,
+                            section_id=section.id,
+                            status="partial",
+                            severity="medium",
+                            classification="probable_gap",
+                            confidence=0.6,
+                            finding_type="local",
+                            publish_flag="yes",
+                            obligation_under_review=obligation,
+                            collection_mode=collection_mode,
+                            applicability_status="probable",
+                            visibility_status="inferred_from_silence",
+                            section_vs_document_scope="missing_from_document",
+                            missing_fact_if_unresolved="citation retrieval insufficient; probable silence-based notice omission",
+                            confidence_level="medium",
+                            assessment_type="probable",
+                            severity_rationale="Probable core-notice omission inferred from silence despite weak citation retrieval.",
+                            gap_note=(
+                                "Probable gap: required privacy-notice element is not visible in the provided excerpt. "
+                                "Classification kept substantive (not downgraded to not_assessable) for core notice duty."
+                            ),
+                            remediation_note=_issue_specific_remediation(issue_name, posture["document_type"], systemic=False),
+                        )
+                    )
+                    db.commit()
+                    continue
             findings_by_status_total.labels(status="needs review").inc()
             db.add(
                 Finding(
