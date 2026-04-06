@@ -52,6 +52,12 @@ export type FindingOut = {
   confidence?: number | null
   confidence_level?: string | null
   assessment_type?: string | null
+  primary_legal_anchor?: string[] | null
+  secondary_legal_anchors?: string[] | null
+  document_evidence_refs?: string[] | null
+  citation_summary_text?: string | null
+  support_complete?: boolean | null
+  omission_basis?: boolean | null
   legal_requirement?: string | null
   gap_reasoning?: string | null
   severity_rationale?: string | null

@@ -40,6 +40,12 @@ class FindingOut(BaseModel):
     confidence_level: str | None = None
     assessment_type: str | None = None
     severity_rationale: str | None = None
+    primary_legal_anchor: list[str] | None = None
+    secondary_legal_anchors: list[str] | None = None
+    document_evidence_refs: list[str] | None = None
+    citation_summary_text: str | None = None
+    support_complete: bool | None = None
+    omission_basis: bool | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

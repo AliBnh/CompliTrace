@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -20,6 +21,24 @@ from app.services.reports import generate_report_text
 
 
 router = APIRouter()
+
+
+def _deserialize_json_list(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, list):
+        return [str(v) for v in parsed]
+    return None
+
+
+def _deserialize_bool_flag(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    return raw.lower() == "true"
 
 
 @router.get("/health")
@@ -106,6 +125,12 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 confidence_level=row.confidence_level,
                 assessment_type=row.assessment_type,
                 severity_rationale=row.severity_rationale,
+                primary_legal_anchor=_deserialize_json_list(row.primary_legal_anchor),
+                secondary_legal_anchors=_deserialize_json_list(row.secondary_legal_anchors),
+                document_evidence_refs=_deserialize_json_list(row.document_evidence_refs),
+                citation_summary_text=row.citation_summary_text,
+                support_complete=_deserialize_bool_flag(row.support_complete),
+                omission_basis=_deserialize_bool_flag(row.omission_basis),
                 gap_note=row.gap_note,
                 remediation_note=row.remediation_note,
                 citations=[

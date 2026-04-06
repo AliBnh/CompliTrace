@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import json
 from datetime import datetime
 from typing import Iterable, TypedDict
 
@@ -121,6 +122,55 @@ CORE_NOTICE_SYSTEMIC_ISSUES = {
     "missing_retention_period",
     "missing_rights_notice",
     "missing_complaint_right",
+}
+
+SYSTEMIC_ANCHOR_MAP: dict[str, dict[str, list[str]]] = {
+    "missing_controller_identity": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_legal_basis": {
+        "primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_retention_period": {
+        "primary": ["GDPR Art. 13(2)(a)", "GDPR Art. 14(2)(a)"],
+        "secondary": ["GDPR Art. 5(1)(e)"],
+    },
+    "missing_rights_notice": {
+        "primary": ["GDPR Art. 13(2)(b)-(d)", "GDPR Art. 14(2)(c)-(e)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_complaint_right": {
+        "primary": ["GDPR Art. 13(2)(d)", "GDPR Art. 14(2)(e)"],
+        "secondary": ["GDPR Art. 77"],
+    },
+    "missing_transfer_notice": {
+        "primary": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)"],
+        "secondary": ["GDPR Art. 44"],
+    },
+    "profiling_disclosure_gap": {
+        "primary": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)"],
+        "secondary": ["GDPR Art. 22"],
+    },
+}
+
+SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
+    "missing_controller_identity": "controller_identity_present",
+    "missing_legal_basis": "legal_basis_present",
+    "missing_retention_period": "retention_present",
+    "missing_rights_notice": "rights_present",
+    "missing_complaint_right": "complaint_present",
+}
+
+SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
+    "missing_controller_identity": {"controller", "company", "contact", "privacy notice", "personal data"},
+    "missing_legal_basis": {"purpose", "process", "collect", "use", "personal data"},
+    "missing_retention_period": {"retain", "retention", "storage", "personal data", "process"},
+    "missing_rights_notice": {"right", "data subject", "access", "rectification", "erasure", "process"},
+    "missing_complaint_right": {"complaint", "supervisory authority", "rights", "personal data", "privacy"},
+    "missing_transfer_notice": {"transfer", "third country", "international", "recipient"},
+    "profiling_disclosure_gap": {"profil", "automated", "decision", "score", "segmentation"},
 }
 
 DIRECT_COLLECTION_SIGNALS = {
@@ -358,15 +408,15 @@ def _section_auditability_type(section: SectionData) -> str:
 def _issue_specific_remediation(issue_name: str, document_type: str, systemic: bool) -> str:
     prefix = "For the notice as a whole" if systemic else "For this section"
     mapping = {
-        "missing_controller_identity": f"{prefix}, state the controller legal entity name and contact details clearly in the external privacy notice.",
+        "missing_controller_identity": f"{prefix}, identify the controller legal entity and provide a direct contact route in the external privacy notice.",
         "missing_controller_contact": f"{prefix}, add a direct contact channel (email/webform/address) for privacy inquiries.",
         "missing_dpo_contact": f"{prefix}, disclose DPO contact details where a DPO is appointed or legally required.",
         "missing_purposes": f"{prefix}, list processing purposes in plain language and map each to relevant processing activities.",
-        "missing_legal_basis": f"{prefix}, disclose lawful basis per purpose (e.g., contract, legal obligation, legitimate interests, consent).",
+        "missing_legal_basis": f"{prefix}, for each processing purpose described in the notice, state the lawful basis relied upon (e.g., contract, legal obligation, legitimate interests, or consent).",
         "missing_recipients": f"{prefix}, identify recipient categories and third-party disclosure contexts.",
-        "missing_retention": f"{prefix}, state exact retention periods or objective retention criteria by data category.",
+        "missing_retention": f"{prefix}, state either the applicable retention periods or the objective criteria used to determine them for each relevant category of personal data.",
         "missing_rights_information": f"{prefix}, add complete rights information (access, rectification, erasure, restriction, objection, portability).",
-        "missing_complaint_right": f"{prefix}, include complaint-right details and supervisory authority reference/contact.",
+        "missing_complaint_right": f"{prefix}, state that data subjects have the right to lodge a complaint with a supervisory authority and identify the relevant supervisory authority route where appropriate.",
         "missing_transfer_notice": f"{prefix}, disclose whether third-country transfers occur and in what contexts.",
         "missing_transfer_safeguards_disclosure": f"{prefix}, specify adequacy/SCC/BCR/derogation mechanism and how safeguard details can be obtained.",
         "profiling_disclosure_gap": (
@@ -375,6 +425,9 @@ def _issue_specific_remediation(issue_name: str, document_type: str, systemic: b
         "article_22_threshold_unclear": f"{prefix}, clarify whether automated decision-making with legal/similarly significant effects is performed and apply Article 22 safeguards if triggered.",
         "special_category_basis_unclear": f"{prefix}, identify Article 9 category and explicit Article 9(2) condition relied upon.",
         "controller_processor_role_ambiguity": f"{prefix}, clarify when the organization acts as controller vs processor and how role changes are communicated.",
+        "missing_retention_period": f"{prefix}, state either the applicable retention periods or the objective criteria used to determine them for each relevant category of personal data.",
+        "missing_rights_notice": f"{prefix}, add a dedicated rights section describing access, rectification, erasure, restriction, objection, portability, and any other applicable rights.",
+        "missing_transfer_notice": f"{prefix}, disclose whether third-country transfers occur and in what contexts.",
     }
     return mapping.get(issue_name, f"{prefix}, add obligation-specific notice wording aligned to GDPR transparency duties.")
 
@@ -609,6 +662,7 @@ def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, boo
         "dpo_present": any(t in corpus for t in {"data protection officer", "dpo"}),
         "rights_present": any(t in corpus for t in {"right of access", "right to object", "rectification", "erasure"}),
         "retention_present": any(t in corpus for t in {"retention", "kept for", "storage period"}),
+        "complaint_present": any(t in corpus for t in {"complaint", "supervisory authority", "data protection authority"}),
         "transfer_present": any(t in corpus for t in THIRD_COUNTRY_TRANSFER_SIGNALS),
         "recipients_present": any(t in corpus for t in {"recipient", "third party", "processor"}),
         "legal_basis_present": any(t in corpus for t in {"legal basis", "lawful basis", "article 6"}),
@@ -1777,6 +1831,172 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
     db.commit()
 
 
+def _finding_issue_id(row: Finding) -> str | None:
+    if row.section_id.startswith("systemic:"):
+        return row.section_id.split("systemic:", 1)[1]
+    text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''} {row.obligation_under_review or ''}")
+    for issue in CLAIM_ARTICLE_RULES:
+        if issue.replace("_", " ") in text:
+            return issue
+    return None
+
+
+def _section_ref(section: SectionData) -> str:
+    short_title = section.section_title.strip() if section.section_title.strip() else f"Section {section.section_order}"
+    return f"section:{section.id}:{short_title}"
+
+
+def _serialize_json_list(values: list[str]) -> str:
+    unique = list(dict.fromkeys(v for v in values if v))
+    return json.dumps(unique, ensure_ascii=False)
+
+
+def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligation_map: dict[str, bool]) -> tuple[list[str], bool]:
+    section_signals = SYSTEMIC_SECTION_SIGNALS.get(issue_id, {"process", "collect", "personal data"})
+    matched_sections: list[str] = []
+    for section in sections:
+        haystack = _section_context_signals(section)
+        if any(signal in haystack for signal in section_signals):
+            matched_sections.append(_section_ref(section))
+        if len(matched_sections) >= 3:
+            break
+    obligation_key = SYSTEMIC_REQUIRED_OBLIGATION_KEYS.get(issue_id)
+    omission_basis = False
+    if obligation_key:
+        if obligation_map.get(obligation_key) is False:
+            matched_sections.append(f"obligation_map:{obligation_key}=not_visible")
+            omission_basis = True
+        else:
+            matched_sections.append(f"obligation_map:{obligation_key}=visible")
+    return list(dict.fromkeys(matched_sections)), omission_basis
+
+
+def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool) -> str:
+    base = {
+        "missing_controller_identity": "The notice describes personal-data processing contexts but does not clearly disclose controller identity/contact details across the document.",
+        "missing_legal_basis": "The notice describes multiple processing contexts but no lawful basis is disclosed anywhere in the notice.",
+        "missing_retention_period": "The notice references processing activities but does not state retention periods or objective retention criteria for relevant data categories.",
+        "missing_rights_notice": "The notice indicates personal-data processing yet does not provide a complete rights disclosure set.",
+        "missing_complaint_right": "The notice lacks a complaint-right disclosure even though it presents processing activities requiring transparency.",
+        "missing_transfer_notice": "The notice indicates transfer contexts but does not provide the required third-country transfer disclosure wording.",
+        "profiling_disclosure_gap": "The notice references profiling-like processing but does not provide required profiling transparency details.",
+    }.get(issue_id, "The notice-level evidence indicates a missing transparency obligation.")
+    if omission_basis:
+        return f"{base} Omission basis confirmed via document obligation map and section-level processing references."
+    if refs:
+        return f"{base} Evidence sections reviewed: {', '.join(refs[:3])}."
+    return base
+
+
+def _coverage_to_support_valid(issue_id: str, refs: list[str], obligation_map: dict[str, bool], anchors: list[str]) -> bool:
+    if not anchors or not refs:
+        return False
+    has_processing_evidence = any(r.startswith("section:") for r in refs)
+    if not has_processing_evidence:
+        return False
+    required_key = SYSTEMIC_REQUIRED_OBLIGATION_KEYS.get(issue_id)
+    if required_key and obligation_map.get(required_key) is not False:
+        return False
+    return True
+
+
+def _copy_supporting_citations(db: Session, audit_id: str, systemic_row: Finding, issue_id: str) -> int:
+    supporting_rows = db.query(Finding).filter(Finding.audit_id == audit_id).filter(Finding.section_id.notlike("systemic:%")).all()
+    copied = 0
+    for row in supporting_rows:
+        if row.id == systemic_row.id:
+            continue
+        if _finding_issue_id(row) != issue_id:
+            continue
+        citations = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).limit(3 - copied).all()
+        for citation in citations:
+            db.add(
+                FindingCitation(
+                    finding_id=systemic_row.id,
+                    chunk_id=citation.chunk_id,
+                    article_number=citation.article_number,
+                    paragraph_ref=citation.paragraph_ref,
+                    article_title=citation.article_title,
+                    excerpt=citation.excerpt,
+                )
+            )
+            copied += 1
+            if copied >= 3:
+                return copied
+    return copied
+
+
+def _add_anchor_citations(db: Session, systemic_row: Finding, anchors: list[str], summary: str) -> None:
+    for idx, anchor in enumerate(anchors, start=1):
+        db.add(
+            FindingCitation(
+                finding_id=systemic_row.id,
+                chunk_id=f"systemic-anchor:{systemic_row.section_id}:{idx}",
+                article_number=anchor,
+                paragraph_ref=None,
+                article_title="Deterministic systemic legal anchor",
+                excerpt=summary,
+            )
+        )
+
+
+def _build_systemic_support(
+    db: Session,
+    audit_id: str,
+    sections: list[SectionData],
+    obligation_map: dict[str, bool],
+) -> None:
+    systemic_rows = db.query(Finding).filter(Finding.audit_id == audit_id).filter(Finding.finding_type == "systemic").all()
+    if not systemic_rows:
+        return
+
+    for row in systemic_rows:
+        issue_id = _finding_issue_id(row)
+        if not issue_id:
+            row.publish_flag = "no"
+            row.support_complete = "false"
+            row.citation_summary_text = "Systemic support could not resolve issue type; downgraded to internal QA."
+            continue
+
+        anchors = SYSTEMIC_ANCHOR_MAP.get(issue_id, {})
+        primary = anchors.get("primary", [])
+        secondary = anchors.get("secondary", [])
+        refs, omission_basis = _systemic_evidence_refs(issue_id, sections, obligation_map)
+        summary = _systemic_summary_text(issue_id, refs, omission_basis)
+        support_valid = _coverage_to_support_valid(issue_id, refs, obligation_map, primary)
+
+        row.primary_legal_anchor = _serialize_json_list(primary)
+        row.secondary_legal_anchors = _serialize_json_list(secondary)
+        row.document_evidence_refs = _serialize_json_list(refs)
+        row.citation_summary_text = summary
+        row.omission_basis = "true" if omission_basis else "false"
+        row.support_complete = "true" if support_valid else "false"
+
+        existing_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        if existing_count == 0:
+            copied = _copy_supporting_citations(db, audit_id, row, issue_id)
+            if copied == 0 and primary:
+                _add_anchor_citations(db, row, primary, summary)
+                existing_count = len(primary)
+            else:
+                existing_count = copied
+
+        publishable = bool(primary) and bool(refs) and bool(summary.strip()) and support_valid and existing_count > 0
+        if not publishable:
+            row.publish_flag = "no"
+            row.finding_type = "supporting_evidence"
+            row.classification = "diagnostic_internal_only"
+            row.support_complete = "false"
+            row.gap_note = "Systemic finding withheld from publication pending complete legal/document support package."
+            contradiction_fail_total.inc()
+        else:
+            row.publish_flag = "yes"
+            row.finding_type = "systemic"
+            row.classification = "systemic_violation"
+            row.support_complete = "true"
+    db.commit()
+
+
 def _partner_review_pass(db: Session, audit_id: str) -> None:
     reviewer_pass_total.inc()
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
@@ -1837,7 +2057,15 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         else:
             if row.section_id.startswith("systemic:"):
                 row.finding_type = "systemic"
-                row.publish_flag = "yes"
+                support_ready = (
+                    row.support_complete == "true"
+                    and bool(row.primary_legal_anchor)
+                    and bool(row.document_evidence_refs)
+                    and bool((row.citation_summary_text or "").strip())
+                )
+                row.publish_flag = "yes" if support_ready else "no"
+                if not support_ready:
+                    row.classification = "diagnostic_internal_only"
             else:
                 row.finding_type = "local"
                 row.publish_flag = "yes"
@@ -2434,6 +2662,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     if document_mode == "privacy_notice":
         _add_notice_level_synthesis(db, audit.id, obligation_map)
     _add_systemic_issue_synthesis(db, audit.id)
+    _build_systemic_support(db, audit.id, sections, obligation_map)
     _partner_review_pass(db, audit.id)
 
     audit.status = "complete"

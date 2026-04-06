@@ -42,6 +42,8 @@ from app.services.audit_runner import (
     _spot_candidate_issues,
     _legal_qualification_for_issue,
     _violates_forbidden_article_matrix,
+    _systemic_evidence_refs,
+    _coverage_to_support_valid,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
@@ -284,6 +286,45 @@ def test_collection_mode_unknown_when_no_source_signals():
         page_end=7,
     )
     assert _collection_mode(section) == "unknown"
+
+
+def test_systemic_evidence_refs_include_obligation_map_omission_marker():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="Data We Collect",
+            content="We collect account and usage data to provide services.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    refs, omission_basis = _systemic_evidence_refs(
+        "missing_legal_basis",
+        sections,
+        {
+            "legal_basis_present": False,
+        },
+    )
+    assert omission_basis is True
+    assert any(ref.startswith("section:") for ref in refs)
+    assert "obligation_map:legal_basis_present=not_visible" in refs
+
+
+def test_coverage_to_support_validator_requires_required_obligation_absence():
+    refs = ["section:s1:Data We Collect", "obligation_map:legal_basis_present=not_visible"]
+    assert _coverage_to_support_valid(
+        "missing_legal_basis",
+        refs,
+        {"legal_basis_present": False},
+        ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+    )
+    assert not _coverage_to_support_valid(
+        "missing_legal_basis",
+        refs,
+        {"legal_basis_present": True},
+        ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+    )
 
 
 def test_collection_mode_direct_from_form_language():

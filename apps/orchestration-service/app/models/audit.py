@@ -59,6 +59,12 @@ class Finding(Base):
     confidence_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
     assessment_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     severity_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    primary_legal_anchor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secondary_legal_anchors: Mapped[str | None] = mapped_column(Text, nullable=True)
+    document_evidence_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    citation_summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    support_complete: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    omission_basis: Mapped[str | None] = mapped_column(String(8), nullable=True)
     gap_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     remediation_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -165,6 +165,10 @@ export function FindingsPage() {
             <Detail label="Section text" value={sectionsById[selected.section_id]?.content ?? 'Systemic synthesized finding (no direct section text).'} />
             <Detail label="Gap note" value={selected.gap_note ?? 'n/a'} />
             <Detail label="Remediation" value={selected.remediation_note ?? 'n/a'} />
+            <Detail label="Legal anchors" value={selected.primary_legal_anchor?.join(', ') ?? 'n/a'} />
+            <Detail label="Secondary anchors" value={selected.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
+            <Detail label="Why flagged" value={selected.citation_summary_text ?? 'n/a'} />
+            <Detail label="Evidence refs" value={selected.document_evidence_refs?.join(', ') ?? 'n/a'} />
             <Detail label="Legal requirement" value={selected.legal_requirement ?? 'n/a'} />
             <Detail label="Gap reasoning" value={selected.gap_reasoning ?? 'n/a'} />
             <Detail label="Severity rationale" value={selected.severity_rationale ?? 'n/a'} />

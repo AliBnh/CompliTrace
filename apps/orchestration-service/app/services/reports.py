@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -245,6 +246,18 @@ def _sanitize_user_text(text: str | None) -> str | None:
     return cleaned
 
 
+def _decode_json_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
+
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -343,6 +356,17 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
         blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
+        primary_anchors = _decode_json_list(finding.primary_legal_anchor)
+        secondary_anchors = _decode_json_list(finding.secondary_legal_anchors)
+        evidence_refs = _decode_json_list(finding.document_evidence_refs)
+        if primary_anchors:
+            blocks.append(_TextBlock(f"Legal basis: {', '.join(primary_anchors)}", bullet=True))
+        if secondary_anchors:
+            blocks.append(_TextBlock(f"Secondary anchors: {', '.join(secondary_anchors)}", bullet=True))
+        if finding.citation_summary_text:
+            blocks.append(_TextBlock(f"Why flagged: {_sanitize_user_text(finding.citation_summary_text)}", bullet=True))
+        if evidence_refs:
+            blocks.append(_TextBlock(f"Evidence sections: {', '.join(evidence_refs[:4])}", bullet=True))
         if finding.gap_note:
             blocks.append(_TextBlock(f"Gap note: {_sanitize_user_text(finding.gap_note)}", bullet=True))
         if finding.remediation_note:
