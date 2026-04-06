@@ -196,6 +196,19 @@ def _normalize_section_title(title: str) -> str:
     return s
 
 
+def _section_number_prefix(title: str) -> str | None:
+    m = SECTION_NUM_RE.match(_clean_line(title))
+    return m.group(1) if m else None
+
+
+def _is_parent_child_heading(parent_title: str, child_title: str) -> bool:
+    parent_num = _section_number_prefix(parent_title)
+    child_num = _section_number_prefix(child_title)
+    if not parent_num or not child_num:
+        return False
+    return child_num.startswith(f"{parent_num}.")
+
+
 def _remove_boilerplate_phrases(text: str, boilerplate_lines: set[str]) -> str:
     """Remove frequent header/footer phrases even when embedded inside content lines."""
     cleaned = text
@@ -281,6 +294,8 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
                 )
             )
 
+    refined = _merge_front_matter_sections(refined)
+
     for i, sec in enumerate(refined, start=1):
         refined[i - 1] = ParsedSection(
             section_order=i,
@@ -290,6 +305,45 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
             page_end=sec.page_end,
         )
     return refined
+
+
+def _merge_front_matter_sections(sections: list[ParsedSection]) -> list[ParsedSection]:
+    """Merge short metadata-like preface blocks on first page into a single intro section."""
+    if len(sections) < 2:
+        return sections
+
+    leading: list[ParsedSection] = []
+    rest_start = 0
+    for i, sec in enumerate(sections):
+        if SECTION_NUM_RE.match(_clean_line(sec.section_title)):
+            rest_start = i
+            break
+        content_words = len(_clean_line(sec.content).split())
+        if sec.page_start != 1 or sec.page_end != 1 or content_words > 40:
+            rest_start = i
+            break
+        leading.append(sec)
+        rest_start = i + 1
+
+    if len(leading) <= 1:
+        return sections
+
+    title = leading[0].section_title
+    parts: list[str] = []
+    for sec in leading:
+        if sec.section_title and sec.section_title != title:
+            parts.append(sec.section_title)
+        if sec.content:
+            parts.append(sec.content)
+
+    merged = ParsedSection(
+        section_order=1,
+        section_title=title,
+        content=_clean_line(" ".join(parts)),
+        page_start=min(sec.page_start or 1 for sec in leading),
+        page_end=max(sec.page_end or 1 for sec in leading),
+    )
+    return [merged, *sections[rest_start:]]
 
 
 def _commit_section(
@@ -354,8 +408,15 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
                 continue
 
             if is_heading(line):
+                next_title = line
+                if (
+                    current_title != "Introduction"
+                    and not current_content
+                    and _is_parent_child_heading(current_title, line)
+                ):
+                    next_title = f"{_normalize_section_title(current_title)} — {_normalize_section_title(line)}"
                 _commit_section(sections, current_title, current_content, current_start, last_page)
-                current_title = line
+                current_title = next_title
                 current_content = []
                 current_start = page_num
                 last_page = page_num

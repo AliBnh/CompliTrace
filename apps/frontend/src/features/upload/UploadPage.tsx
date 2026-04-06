@@ -76,7 +76,7 @@ export function UploadPage() {
             { title: 'Generate and download report', tone: 'from-emerald-500 to-teal-500', desc: 'Export executive-ready PDF report.' },
           ].map((step, index) => (
             <li key={step.title} className="relative">
-              {index < 3 && <div className="absolute left-[14px] top-[36px] h-[34px] w-[2px] bg-slate-200" />}
+              {index < 3 && <div className="absolute left-[26px] top-[40px] h-[40px] w-[2px] bg-slate-200" />}
               <div className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white/80 p-3 transition hover:border-slate-300 hover:shadow-sm">
                 <span className={`mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${step.tone} text-xs font-bold text-white shadow`}>
                   {index + 1}
