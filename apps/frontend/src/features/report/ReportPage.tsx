@@ -14,12 +14,6 @@ export function ReportPage() {
   useEffect(() => {
     if (!auditId) return
     getFindings(auditId).then(setFindings).catch((e) => setError(e.message))
-    getReport(auditId)
-      .then((r) => {
-        setReport(r)
-        if (r.status === 'ready') setStatus('ready')
-      })
-      .catch(() => undefined)
   }, [auditId])
 
   useEffect(() => {
@@ -54,16 +48,16 @@ export function ReportPage() {
     }
   }
 
-  if (!auditId) return <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-6 text-slate-300">Run an audit first.</div>
+  if (!auditId) return <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600 shadow-soft">Run an audit first.</div>
 
   return (
     <section>
       <h1 className="text-2xl font-semibold">Report</h1>
-      <p className="mt-1 text-slate-300">Executive summary and PDF artifact.</p>
+      <p className="mt-1 text-slate-600">Executive summary and PDF artifact.</p>
 
       <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {Object.entries(counts).map(([label, count]) => (
-          <article key={label} className="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+          <article key={label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-soft">
             <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
             <div className="mt-2 text-2xl font-semibold">{count}</div>
           </article>
@@ -85,7 +79,7 @@ export function ReportPage() {
             href={reportDownloadUrl(auditId)}
             target="_blank"
             rel="noreferrer"
-            className="rounded-xl border border-emerald-400/40 bg-emerald-500/15 px-5 py-3 font-semibold text-emerald-200"
+            className="rounded-xl border border-emerald-300 bg-emerald-100 px-5 py-3 font-semibold text-emerald-700"
           >
             Download PDF
           </a>

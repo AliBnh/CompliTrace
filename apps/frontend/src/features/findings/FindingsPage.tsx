@@ -64,11 +64,11 @@ export function FindingsPage() {
         <header className="mb-4 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Findings</h1>
-            <p className="text-sm text-slate-300">Audit status: <span className="font-medium">{status}</span></p>
+            <p className="text-sm text-slate-600">Audit status: <span className="font-medium">{status}</span></p>
           </div>
           <div className="flex gap-2 text-xs">
             {Object.entries(counts).map(([label, count]) => (
-              <span key={label} className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-slate-300">
+              <span key={label} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-slate-600">
                 {label}: {count}
               </span>
             ))}
@@ -77,9 +77,9 @@ export function FindingsPage() {
 
         {error && <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
 
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/50">
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-soft">
           <table className="w-full text-sm">
-            <thead className="bg-slate-900/90 text-left text-slate-400">
+            <thead className="bg-slate-100 text-left text-slate-600">
               <tr>
                 <th className="px-4 py-3">Section</th>
                 <th className="px-4 py-3">Status</th>
@@ -93,11 +93,11 @@ export function FindingsPage() {
                   <tr
                     key={finding.id}
                     onClick={() => setSelectedId(finding.id)}
-                    className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800/40 ${selectedId === finding.id ? 'bg-slate-800/60' : ''}`}
+                    className={`cursor-pointer border-t border-slate-200 hover:bg-slate-50 ${selectedId === finding.id ? 'bg-cyan-50' : ''}`}
                   >
-                    <td className="px-4 py-3 text-slate-200">{section?.section_title ?? finding.section_id}</td>
+                    <td className="px-4 py-3 text-slate-800">{section?.section_title ?? finding.section_id}</td>
                     <td className="px-4 py-3"><StatusBadge status={finding.status} /></td>
-                    <td className="px-4 py-3 text-slate-300">{finding.severity ?? 'n/a'}</td>
+                    <td className="px-4 py-3 text-slate-600">{finding.severity ?? 'n/a'}</td>
                   </tr>
                 )
               })}
@@ -106,9 +106,9 @@ export function FindingsPage() {
         </div>
       </div>
 
-      <aside className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+      <aside className="rounded-xl border border-slate-200 bg-white p-5 shadow-soft">
         {!selected ? (
-          <p className="text-slate-300">Select a finding to inspect full details.</p>
+          <p className="text-slate-600">Select a finding to inspect full details.</p>
         ) : (
           <div className="space-y-4">
             <h2 className="text-lg font-semibold">{sectionsById[selected.section_id]?.section_title ?? 'Finding details'}</h2>
@@ -117,13 +117,13 @@ export function FindingsPage() {
             <Detail label="Gap note" value={selected.gap_note ?? 'n/a'} />
             <Detail label="Remediation" value={selected.remediation_note ?? 'n/a'} />
             <div>
-              <h3 className="text-sm font-semibold text-slate-200">GDPR evidence</h3>
-              <ul className="mt-2 space-y-2 text-sm text-slate-300">
+              <h3 className="text-sm font-semibold text-slate-700">GDPR evidence</h3>
+              <ul className="mt-2 space-y-2 text-sm text-slate-600">
                 {selected.citations.length === 0 ? <li>No citations.</li> : selected.citations.map((c, idx) => (
-                  <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                     <div className="font-medium">Article {c.article_number}: {c.article_title}</div>
                     <div className="text-xs text-slate-400">Paragraph: {c.paragraph_ref ?? 'n/a'}</div>
-                    <p className="mt-2 text-slate-300">{c.excerpt}</p>
+                    <p className="mt-2 text-slate-600">{c.excerpt}</p>
                   </li>
                 ))}
               </ul>
@@ -138,12 +138,12 @@ export function FindingsPage() {
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <h3 className="text-sm font-semibold text-slate-200">{label}</h3>
-      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-300">{value}</p>
+      <h3 className="text-sm font-semibold text-slate-700">{label}</h3>
+      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{value}</p>
     </div>
   )
 }
 
 function EmptyState({ message }: { message: string }) {
-  return <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-6 text-slate-300">{message}</div>
+  return <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600 shadow-soft">{message}</div>
 }

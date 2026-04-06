@@ -31,25 +31,25 @@ export function UploadPage() {
 
   return (
     <section className="grid gap-6 lg:grid-cols-[1.3fr_1fr]">
-      <article className="rounded-2xl border border-slate-800 bg-slate-900/60 p-8 shadow-soft">
+      <article className="rounded-2xl border border-slate-200 bg-white p-8 shadow-soft">
         <h1 className="text-3xl font-semibold">Upload Policy Document</h1>
-        <p className="mt-3 text-slate-300">Upload a PDF policy to start section extraction and GDPR pre-audit analysis.</p>
+        <p className="mt-3 text-slate-600">Upload a PDF policy to start section extraction and GDPR pre-audit analysis.</p>
 
-        <label className="mt-8 block rounded-xl border border-dashed border-slate-700 bg-slate-950/40 p-8 text-center hover:border-cyan-500/50">
+        <label className="mt-8 block rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center hover:border-cyan-500/50">
           <input
             type="file"
             accept="application/pdf"
             className="hidden"
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
-          <div className="text-sm text-slate-300">Click to choose a PDF (max 20 MB)</div>
-          <div className="mt-2 font-medium text-cyan-300">{file?.name ?? 'No file selected'}</div>
+          <div className="text-sm text-slate-600">Click to choose a PDF (max 20 MB)</div>
+          <div className="mt-2 font-medium text-cyan-700">{file?.name ?? 'No file selected'}</div>
         </label>
 
         {loading && (
           <div className="mt-6">
-            <div className="mb-2 text-sm text-slate-300">Uploading and parsing... {progress}%</div>
-            <div className="h-2 rounded-full bg-slate-800">
+            <div className="mb-2 text-sm text-slate-600">Uploading and parsing... {progress}%</div>
+            <div className="h-2 rounded-full bg-slate-200">
               <div className="h-full rounded-full bg-cyan-500 transition-all" style={{ width: `${progress}%` }} />
             </div>
           </div>
@@ -66,9 +66,9 @@ export function UploadPage() {
         </button>
       </article>
 
-      <aside className="rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
+      <aside className="rounded-2xl border border-slate-200 bg-white p-6 shadow-soft">
         <h2 className="text-lg font-semibold">Workflow</h2>
-        <ol className="mt-4 space-y-3 text-sm text-slate-300">
+        <ol className="mt-4 space-y-3 text-sm text-slate-600">
           <li>1. Upload policy PDF</li>
           <li>2. Review extracted sections</li>
           <li>3. Trigger audit and inspect findings</li>
