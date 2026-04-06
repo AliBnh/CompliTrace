@@ -26,6 +26,10 @@ from app.services.audit_runner import (
     _finding_mentions_internal_control_only,
     _runtime_budget_exceeded,
     _targeted_notice_query,
+    _claim_has_primary_anchor,
+    _normalize_severity,
+    _finding_signature,
+    _ensure_reasoning_chain,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
@@ -566,3 +570,50 @@ def test_fallback_notice_citations_excludes_article_14_para_3_4_when_better_fit_
     fallback = _fallback_notice_citations(section, chunks)
     assert fallback
     assert all(c.chunk_id != "c14p34" for c in fallback)
+
+
+def test_claim_has_primary_anchor_requires_matching_claim_articles():
+    citations = [LlmCitation(chunk_id="c1", article_number="21")]
+    assert _claim_has_primary_anchor({"complaint"}, citations) is False
+    citations.append(LlmCitation(chunk_id="c2", article_number="77"))
+    assert _claim_has_primary_anchor({"complaint"}, citations) is True
+
+
+def test_normalize_severity_escalates_key_transparency_claims():
+    assert _normalize_severity("gap", "medium", {"retention"}) == "high"
+    assert _normalize_severity("partial", None, {"rights"}) == "high"
+    assert _normalize_severity("compliant", "high", {"rights"}) is None
+
+
+def test_finding_signature_is_stable_for_same_semantics():
+    finding = LlmFinding(status="gap", severity="high", gap_note="Missing legal basis details", remediation_note=None, citations=[])
+    cits_a = [LlmCitation(chunk_id="x1", article_number="13"), LlmCitation(chunk_id="x2", article_number="6")]
+    cits_b = [LlmCitation(chunk_id="x3", article_number="6"), LlmCitation(chunk_id="x4", article_number="13")]
+    assert _finding_signature(finding, cits_a) == _finding_signature(finding, cits_b)
+
+
+def test_ensure_reasoning_chain_adds_evidence_requirement_assessment():
+    section = SectionData(
+        id="s9",
+        section_order=9,
+        section_title="Legal Basis",
+        content="We process data to improve service quality.",
+        page_start=9,
+        page_end=9,
+    )
+    finding = LlmFinding(
+        status="gap",
+        severity="high",
+        gap_note="Missing explicit lawful basis mapping.",
+        remediation_note="Add lawful basis by purpose.",
+        citations=[],
+    )
+    updated = _ensure_reasoning_chain(
+        finding,
+        section,
+        [LlmCitation(chunk_id="c13", article_number="13")],
+        {"legal_basis"},
+    )
+    assert "Evidence:" in (updated.gap_note or "")
+    assert "Requirement:" in (updated.gap_note or "")
+    assert "Assessment:" in (updated.gap_note or "")

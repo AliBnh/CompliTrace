@@ -167,6 +167,17 @@ NOTICE_REQUIREMENT_LABELS: dict[str, str] = {
     "complaint": "complaint-right and supervisory authority details",
 }
 
+CLAIM_PRIMARY_ARTICLES: dict[str, set[int]] = {
+    "legal_basis": {6, 13, 14},
+    "retention": {5, 13, 14},
+    "rights": {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22},
+    "controller_contact": {13, 14},
+    "complaint": {13, 14, 77},
+    "transfer": {13, 14, 44, 45, 46, 47, 49},
+    "sensitive_data": {9, 13, 14},
+    "profiling": {13, 14, 22},
+}
+
 NOTICE_SECTION_TITLE_SIGNALS = {
     "privacy notice",
     "privacy policy",
@@ -418,12 +429,44 @@ def _citation_claim_compatible(citation: LlmCitation, chunk: RetrievalChunk, cla
         if article in {44, 45, 46, 47, 49}:
             allowed = True
         elif article in {13, 14}:
-            allowed = allowed or (not para_known or para.startswith("1"))
+            transfer_terms = {"third country", "international transfer", "outside the eea", "outside eea", "safeguard"}
+            content = _norm(chunk.content)
+            has_transfer_content = any(term in content for term in transfer_terms)
+            allowed = allowed or ((not para_known or para.startswith("1")) and has_transfer_content)
     if "sensitive_data" in claim_types:
         allowed = allowed or article in {9, 13, 14}
     if "profiling" in claim_types:
-        allowed = allowed or article in {13, 14, 22}
+        norm_text = _norm(chunk.content)
+        has_significant_effect_signal = any(
+            t in norm_text for t in {"legal effect", "similarly significant", "automated decision-making", "article 22"}
+        )
+        if article in {13, 14}:
+            allowed = True
+        elif article == 22:
+            allowed = allowed or has_significant_effect_signal
     return allowed
+
+
+def _claim_has_primary_anchor(claim_types: set[str], citations: list[LlmCitation]) -> bool:
+    if not claim_types:
+        return bool(citations)
+    article_set = {_article_int(c.article_number) for c in citations}
+    for claim in claim_types:
+        allowed = CLAIM_PRIMARY_ARTICLES.get(claim)
+        if not allowed:
+            continue
+        if not any(article in allowed for article in article_set):
+            return False
+    return True
+
+
+def _citation_diagnostic_reason(section: SectionData, claim_types: set[str], source_mode: str) -> str:
+    if not claim_types:
+        return "No claim type could be inferred from the finding text."
+    if source_mode == "unknown":
+        return "Collection source mode is ambiguous; Article 13 vs 14 applicability could not be confirmed."
+    missing = ", ".join(sorted(claim_types))
+    return f"Validated citations did not satisfy primary legal anchors for claims: {missing}."
 
 
 def _fallback_claim_types_from_section(section: SectionData) -> set[str]:
@@ -524,6 +567,8 @@ def _validate_citations(
             cit.article_title = chunk.article_title
         valid.append(cit)
 
+    if valid and document_mode == "privacy_notice" and not _claim_has_primary_anchor(claim_types, valid):
+        return []
     return valid
 
 
@@ -836,6 +881,39 @@ def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmC
     return f
 
 
+def _normalize_severity(status: str, severity: str | None, claim_types: set[str]) -> str | None:
+    if status not in {"gap", "partial"}:
+        return None
+    high_claims = {"legal_basis", "rights", "retention", "complaint", "transfer"}
+    if claim_types & high_claims:
+        return "high"
+    if severity in {"high", "medium", "low"}:
+        return severity
+    return "medium"
+
+
+def _finding_signature(f: LlmFinding, citations: list[LlmCitation]) -> str:
+    gap_key = _norm((f.gap_note or "")[:240])
+    article_key = ",".join(sorted({str(_article_int(c.article_number) or c.article_number) for c in citations}))
+    return f"{f.status}|{f.severity}|{gap_key}|{article_key}"
+
+
+def _ensure_reasoning_chain(f: LlmFinding, section: SectionData, citations: list[LlmCitation], claim_types: set[str]) -> LlmFinding:
+    if f.status not in {"gap", "partial"}:
+        return f
+    gap = f.gap_note or ""
+    if "Evidence:" in gap and "Requirement:" in gap and "Assessment:" in gap:
+        return f
+    evidence = _norm(section.content)[:220]
+    requirement_articles = ", ".join(sorted({c.article_number for c in citations})) or "validated GDPR disclosure obligations"
+    claim_text = ", ".join(sorted(claim_types)) if claim_types else "identified transparency obligations"
+    f.gap_note = (
+        f"Evidence: {evidence}. Requirement: {requirement_articles} ({claim_text}). "
+        f"Assessment: {gap or 'Policy language appears incomplete against cited obligations.'}"
+    )
+    return f
+
+
 def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
     return (now_monotonic - started_monotonic) > budget_seconds
 
@@ -869,6 +947,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     llm_calls_made = 0
     audit_started = time.monotonic()
     timeout_reached = False
+    seen_signatures: dict[str, str] = {}
 
     for section in sorted(sections, key=lambda s: s.section_order):
         if not timeout_reached and _runtime_budget_exceeded(audit_started, time.monotonic(), settings.max_audit_runtime_seconds):
@@ -978,6 +1057,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 citations=[],
             )
         claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
+        claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
             salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
@@ -1038,8 +1118,36 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 if retention_gap is not None:
                     f = retention_gap
                     claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
+                    claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
                     valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         f = _enforce_substantive_citation_gate(f, valid_citations)
+        if f.status in {"gap", "partial"} and not valid_citations:
+            diagnostic = _citation_diagnostic_reason(section, claim_types, _collection_mode(section))
+            f.gap_note = f"{f.gap_note} Diagnostic: {diagnostic}"
+            f.remediation_note = (
+                "Collect additional legally relevant evidence and rerun with section-level source mode confirmation "
+                "before issuing a substantive non-compliance conclusion."
+            )
+        f.severity = _normalize_severity(f.status, f.severity, claim_types)
+        f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
+
+        if f.status in {"gap", "partial"}:
+            signature = _finding_signature(f, valid_citations)
+            first_section = seen_signatures.get(signature)
+            if first_section:
+                f = LlmFinding(
+                    status="needs review",
+                    severity=None,
+                    gap_note=(
+                        f"Potential duplicate of section {first_section}; consolidated to reduce repeated findings. "
+                        "Review section-level nuances manually if needed."
+                    ),
+                    remediation_note=None,
+                    citations=[],
+                )
+                valid_citations = []
+            else:
+                seen_signatures[signature] = section.id
 
         finding_row = Finding(
             audit_id=audit.id,
