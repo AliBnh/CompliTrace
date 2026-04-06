@@ -261,6 +261,9 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         .where(Finding.audit_id == audit_id)
         .order_by(Finding.section_id.asc())
     ).all()
+    systemic_findings = [f for f in findings if f.classification == "systemic_violation"]
+    publishable_findings = [f for f in findings if f.status in {"gap", "partial", "not applicable"} and f.classification != "supporting_evidence"]
+    supporting_findings = [f for f in findings if f.classification == "supporting_evidence"]
 
     total = len(findings)
     by_status = {
@@ -331,10 +334,21 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Needs review rate: {needs_review_rate:.0%}", bullet=True),
         _TextBlock(f"Citation contradiction rate: {contradiction_rate:.0%}", bullet=True),
         _TextBlock(f"Report quality score (heuristic): {quality_score:.1f}/10", bullet=True),
-        _TextBlock("Detailed Findings", font_size=13, top_gap=14),
+        _TextBlock("Top Systemic Findings", font_size=13, top_gap=14),
     ]
 
-    for finding in findings:
+    for finding in systemic_findings:
+        meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
+        blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
+        blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
+        blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
+        if finding.gap_note:
+            blocks.append(_TextBlock(f"Gap note: {_sanitize_user_text(finding.gap_note)}", bullet=True))
+        if finding.remediation_note:
+            blocks.append(_TextBlock(f"Remediation: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
+
+    blocks.append(_TextBlock("Publishable Local Findings", font_size=13, top_gap=14))
+    for finding in publishable_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
         if meta.page_range:
@@ -363,6 +377,13 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             )
             if citation.excerpt:
                 blocks.append(_TextBlock(f'Evidence: "{citation.excerpt}"', bullet=True))
+    if supporting_findings:
+        blocks.append(_TextBlock("Section-level Supporting Evidence", font_size=13, top_gap=14))
+        for finding in supporting_findings:
+            meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
+            blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
+            if finding.gap_note:
+                blocks.append(_TextBlock(f"Evidence node: {_sanitize_user_text(finding.gap_note)}", bullet=True))
     blocks.append(_TextBlock("Report generation metadata", font_size=12, top_gap=14))
     blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
     blocks.append(_TextBlock(f"Report schema version: {REPORT_SCHEMA_VERSION}", bullet=True))

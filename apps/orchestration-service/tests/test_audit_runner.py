@@ -5,6 +5,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.audit_runner import (
     _applicability_memo,
+    _applicability_decision,
+    _apply_applicability_gate_to_citations,
     _article_int,
     _build_transfer_gap,
     _build_retention_gap,
@@ -739,3 +741,37 @@ def test_reviewer_agent_downgrades_not_assessable_visibility():
     reviewed, reviewed_citations = _reviewer_agent(finding, [], {"legal_basis"}, memo)
     assert reviewed.status == "needs review"
     assert reviewed_citations == []
+
+
+def test_applicability_decision_direct_allows_article_13():
+    section = SectionData(
+        id="a1",
+        section_order=1,
+        section_title="Signup",
+        content="We collect personal data directly from you via forms.",
+        page_start=1,
+        page_end=1,
+    )
+    memo = _applicability_memo(
+        section,
+        {"legal_basis"},
+        {"document_type": "external_privacy_notice", "triggered_duties": [], "not_triggered_duties": [], "not_assessable_duties": []},
+    )
+    decision = _applicability_decision(section, memo)
+    assert decision["allowed_notice_articles"] == [13]
+
+
+def test_applicability_gate_filters_disallowed_notice_article():
+    citations = [
+        LlmCitation(chunk_id="c13", article_number="13"),
+        LlmCitation(chunk_id="c14", article_number="14"),
+    ]
+    decision = {
+        "collection_mode": "direct",
+        "applicability_status": "confirmed",
+        "allowed_notice_articles": [13],
+        "unresolved_trigger": None,
+    }
+    gated = _apply_applicability_gate_to_citations(citations, decision, {"legal_basis"})
+    assert len(gated) == 1
+    assert gated[0].article_number == "13"

@@ -242,6 +242,20 @@ class ApplicabilityMemo(TypedDict):
     disqualifying_alternatives: list[str]
 
 
+class ApplicabilityDecision(TypedDict):
+    collection_mode: str
+    applicability_status: str
+    allowed_notice_articles: list[int]
+    unresolved_trigger: str | None
+
+
+class SpecializedReview(TypedDict):
+    profiling: str | None
+    transfer: str | None
+    special_category: str | None
+    role_allocation: str | None
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
 
@@ -315,6 +329,59 @@ def _document_posture_agent(sections: list[SectionData], document_mode: str) -> 
         triggered_duties=triggered,
         not_triggered_duties=not_triggered,
         not_assessable_duties=not_assessable,
+    )
+
+
+def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, bool]:
+    corpus = " ".join(_norm(f"{s.section_title} {s.content}") for s in sections)
+    return {
+        "controller_identity_present": any(t in corpus for t in {"controller", "company name", "contact details"}),
+        "dpo_present": any(t in corpus for t in {"data protection officer", "dpo"}),
+        "rights_present": any(t in corpus for t in {"right of access", "right to object", "rectification", "erasure"}),
+        "retention_present": any(t in corpus for t in {"retention", "kept for", "storage period"}),
+        "transfer_present": any(t in corpus for t in THIRD_COUNTRY_TRANSFER_SIGNALS),
+        "recipients_present": any(t in corpus for t in {"recipient", "third party", "processor"}),
+        "legal_basis_present": any(t in corpus for t in {"legal basis", "lawful basis", "article 6"}),
+    }
+
+
+def _applicability_decision(section: SectionData, memo: ApplicabilityMemo) -> ApplicabilityDecision:
+    mode = memo["collection_mode"]
+    if mode == "direct":
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="confirmed",
+            allowed_notice_articles=[13],
+            unresolved_trigger=None,
+        )
+    if mode == "indirect":
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="confirmed",
+            allowed_notice_articles=[14],
+            unresolved_trigger=None,
+        )
+    if mode == "mixed":
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="probable",
+            allowed_notice_articles=[13, 14],
+            unresolved_trigger="mixed collection signals",
+        )
+    hint_text = _section_context_signals(section)
+    unresolved = "insufficient source wording to resolve direct vs indirect collection"
+    if "collect" in hint_text and "from" not in hint_text:
+        return ApplicabilityDecision(
+            collection_mode="direct",
+            applicability_status="probable",
+            allowed_notice_articles=[13],
+            unresolved_trigger=unresolved,
+        )
+    return ApplicabilityDecision(
+        collection_mode=mode,
+        applicability_status="unresolved",
+        allowed_notice_articles=[],
+        unresolved_trigger=unresolved,
     )
 
 
@@ -1123,6 +1190,66 @@ def _clean_remediation_legal_mismatches(remediation: str | None, claim_types: se
     return cleaned
 
 
+def _specialized_legal_review(section: SectionData, claim_types: set[str]) -> SpecializedReview:
+    text = _section_context_signals(section)
+    profiling = None
+    if any(t in text for t in {"profil", "score", "ranking", "segmentation", "predictive", "automated decision"}):
+        has_effect = any(t in text for t in {"legal effect", "similarly significant", "automated decision"})
+        if has_effect:
+            profiling = "Profiling appears present; Article 22 threshold may be triggered in addition to Articles 13(2)(f)/14(2)(g)."
+        else:
+            profiling = "Profiling indicators found; anchor first in Articles 13(2)(f)/14(2)(g), with Article 21 secondary."
+
+    transfer = None
+    if "transfer" in claim_types or _contains_any(text, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        has_mechanism = any(t in text for t in {"adequacy", "standard contractual clauses", "scc", "binding corporate rules", "article 46", "article 49"})
+        transfer = (
+            "Transfer context detected; notice disclosure and mechanism disclosure both appear."
+            if has_mechanism
+            else "Transfer context detected; likely notice gap on safeguards/mechanism disclosure."
+        )
+
+    special_category = None
+    if any(t in text for t in {"health", "biometric", "religious", "political", "ethnic", "genetic"}):
+        has_art9 = any(t in text for t in {"article 9", "explicit consent", "substantial public interest"})
+        special_category = (
+            "Special-category indicators present with Article 9 condition reference."
+            if has_art9
+            else "Special-category indicators present without clear Article 9 condition."
+        )
+
+    role_allocation = None
+    if any(t in text for t in {"controller", "processor", "on behalf of", "customer instructions"}):
+        has_both_roles = "controller" in text and "processor" in text
+        role_allocation = (
+            "Controller/processor role boundary appears mixed; verify role-allocation clarity."
+            if has_both_roles
+            else "Single role stated; verify if role-switch scenarios are disclosed."
+        )
+
+    return SpecializedReview(
+        profiling=profiling,
+        transfer=transfer,
+        special_category=special_category,
+        role_allocation=role_allocation,
+    )
+
+
+def _apply_applicability_gate_to_citations(
+    citations: list[LlmCitation], decision: ApplicabilityDecision, claim_types: set[str]
+) -> list[LlmCitation]:
+    if not citations:
+        return citations
+    if not decision["allowed_notice_articles"]:
+        restricted_claims = {"controller_contact", "legal_basis", "retention", "rights", "complaint"}
+        if claim_types & restricted_claims:
+            return []
+        return citations
+    allowed_articles = set(decision["allowed_notice_articles"]) | {5, 6, 9, 12, 21, 22, 44, 45, 46, 47, 49, 77}
+    gated = [c for c in citations if (_article_int(c.article_number) or -1) in allowed_articles]
+    return gated
+
+
 def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
     if f is None:
         return LlmFinding(status="needs review", severity=None, gap_note="LLM parse failure", remediation_note=None, citations=[])
@@ -1311,6 +1438,37 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
     db.commit()
 
 
+def _partner_review_pass(db: Session, audit_id: str) -> None:
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    seen_root_keys: dict[str, str] = {}
+    for row in rows:
+        text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''}")
+        if row.status == "needs review":
+            row.classification = "not_assessable"
+            if row.gap_note:
+                row.gap_note = "Not assessable from provided excerpt; additional documentary context is required."
+            row.remediation_note = "Provide complete notice excerpts and rerun legal qualification."
+            row.confidence = min(row.confidence or 0.45, 0.45)
+            continue
+        if row.status not in {"gap", "partial"}:
+            continue
+        key = "general"
+        for issue in CLAIM_ARTICLE_RULES:
+            if issue.replace("_", " ") in text:
+                key = issue
+                break
+        if key in seen_root_keys and row.section_id not in {"__systemic__", "__notice__"}:
+            row.status = "not applicable"
+            row.classification = "supporting_evidence"
+            row.severity = None
+            row.confidence = 0.7
+            row.gap_note = f"Supporting evidence for systemic issue in section {seen_root_keys[key]}."
+            row.remediation_note = None
+        else:
+            seen_root_keys[key] = row.section_id
+    db.commit()
+
+
 def run_audit(db: Session, audit: Audit) -> Audit:
     ingestion = IngestionClient(settings.ingestion_service_url)
     knowledge = KnowledgeClient(settings.knowledge_service_url)
@@ -1327,6 +1485,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     sections = ingestion.get_sections(audit.document_id)
     document_mode = _infer_document_mode(sections)
     posture = _document_posture_agent(sections, document_mode)
+    obligation_map = _build_document_obligation_map(sections)
     llm_budget_cap = _effective_llm_budget(len(sections), settings.max_llm_calls_per_audit)
     llm_rate_limited = False
     llm_calls_made = 0
@@ -1446,8 +1605,11 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
         claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
         memo = _applicability_memo(section, claim_types, posture)
+        applicability = _applicability_decision(section, memo)
+        specialized_review = _specialized_legal_review(section, claim_types)
         f.remediation_note = _clean_remediation_legal_mismatches(f.remediation_note, claim_types)
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
+        valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
             salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
             if salvaged:
@@ -1467,11 +1629,13 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
                 if salvaged:
                     valid_citations = salvaged
+                valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
                 fallback = _build_transfer_gap(section, chunks) if "transfer" in claim_types else _build_mandatory_notice_gap(section, chunks)
             if fallback is not None:
                 f = fallback
                 claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
                 valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
+                valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
         if f.status == "needs review" and document_mode == "privacy_notice":
             review_text = _norm(f"{f.gap_note or ''} {section.section_title} {section.content[:500]}")
             if "retention" in review_text or "storage period" in review_text:
@@ -1494,6 +1658,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
                     claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
                     valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
+                    valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
         if f.status in {"gap", "partial"} and not valid_citations:
             diagnostic = _citation_diagnostic_reason(section, claim_types, _collection_mode(section))
             f = LlmFinding(
@@ -1509,6 +1674,42 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 citations=[],
             )
         f, valid_citations = _reviewer_agent(f, valid_citations, claim_types, memo)
+        if applicability["applicability_status"] == "unresolved" and claim_types & {
+            "controller_contact",
+            "legal_basis",
+            "retention",
+            "rights",
+            "complaint",
+        }:
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note=f"Not assessable: {applicability['unresolved_trigger']}.",
+                remediation_note="Provide source-collection wording to resolve Article 13 vs 14 applicability.",
+                citations=[],
+            )
+            valid_citations = []
+
+        if f.status in {"gap", "partial"}:
+            global_missing_conflict = False
+            if "legal_basis" in claim_types and obligation_map["legal_basis_present"]:
+                global_missing_conflict = True
+            if "rights" in claim_types and obligation_map["rights_present"]:
+                global_missing_conflict = True
+            if "retention" in claim_types and obligation_map["retention_present"]:
+                global_missing_conflict = True
+            if global_missing_conflict:
+                f = LlmFinding(
+                    status="partial",
+                    severity="low",
+                    gap_note=(
+                        "Section-local omission detected, but document-wide disclosure appears elsewhere. "
+                        "Treat as local clarity gap rather than full notice non-compliance."
+                    ),
+                    remediation_note="Improve local cross-reference to the global disclosure section.",
+                    citations=valid_citations,
+                )
+
         f = _enforce_substantive_citation_gate(f, valid_citations)
         f.severity = _normalize_severity(f.status, f.severity, claim_types)
         f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
@@ -1516,8 +1717,11 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             f.gap_note = (
                 f"{f.gap_note} Applicability memo: obligation={memo['obligation']}; "
                 f"collection_mode={memo['collection_mode']}; visibility={memo['visibility']}; "
-                f"confidence={memo['applicability_confidence']:.2f}."
+                f"confidence={memo['applicability_confidence']:.2f}; applicability_status={applicability['applicability_status']}."
             )
+            specialized_bits = [v for v in specialized_review.values() if v]
+            if specialized_bits:
+                f.gap_note = f"{f.gap_note} Specialized legal review: {' '.join(specialized_bits)}"
         classification, confidence = _classify_finding_quality(f, valid_citations, claim_types, _collection_mode(section))
 
         if f.status in {"gap", "partial"}:
@@ -1571,6 +1775,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     if document_mode == "privacy_notice":
         _add_notice_level_synthesis(db, audit.id)
     _add_systemic_issue_synthesis(db, audit.id)
+    _partner_review_pass(db, audit.id)
 
     audit.status = "complete"
     audit.completed_at = datetime.utcnow()
