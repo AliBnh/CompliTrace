@@ -106,7 +106,7 @@ def test_section_report_meta_uses_human_readable_titles(monkeypatch):
 
 def test_format_citation_label_is_user_friendly():
     assert _format_citation_label("13", "Information to be provided", "1") == (
-        "GDPR Article 13 — Information to be provided (Paragraph 1)"
+        "GDPR Article 13 - Information to be provided (Paragraph 1)"
     )
 
 

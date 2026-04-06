@@ -107,7 +107,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3001}:3000"
     volumes:
       - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ./infra/grafana/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro

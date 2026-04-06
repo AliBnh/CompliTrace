@@ -14,6 +14,18 @@ from app.services.clients import IngestionClient, SectionData
 
 
 REPORT_SCHEMA_VERSION = "v1.0"
+PDF_SAFE_CHAR_REPLACEMENTS = str.maketrans(
+    {
+        "•": "-",
+        "—": "-",
+        "–": "-",
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "…": "...",
+    }
+)
 
 
 class _TextBlock(NamedTuple):
@@ -24,6 +36,7 @@ class _TextBlock(NamedTuple):
 
 
 def _wrap_text(text: str, max_chars: int, initial_indent: str = "", continuation_indent: str = "") -> list[str]:
+    text = text.translate(PDF_SAFE_CHAR_REPLACEMENTS)
     if not text:
         return [""]
 
@@ -89,7 +102,7 @@ def _write_pdf(blocks: list[_TextBlock], out_path: Path) -> None:
         wrapped = _wrap_text(
             block.text,
             max_chars=max_chars,
-            initial_indent="• " if block.bullet else "",
+            initial_indent="- " if block.bullet else "",
             continuation_indent="  " if block.bullet else "",
         )
 
@@ -128,7 +141,7 @@ def _write_pdf(blocks: list[_TextBlock], out_path: Path) -> None:
             wrapped = _wrap_text(
                 block.text,
                 max_chars=max_chars,
-                initial_indent="• " if block.bullet else "",
+                initial_indent="- " if block.bullet else "",
                 continuation_indent="  " if block.bullet else "",
             )
 
@@ -215,8 +228,8 @@ def _section_report_meta(audit: Audit) -> tuple[str | None, dict[str, _SectionRe
 def _format_citation_label(article_number: str, article_title: str, paragraph_ref: str | None) -> str:
     title = article_title.strip() or "Untitled article"
     if paragraph_ref:
-        return f"GDPR Article {article_number} — {title} (Paragraph {paragraph_ref})"
-    return f"GDPR Article {article_number} — {title}"
+        return f"GDPR Article {article_number} - {title} (Paragraph {paragraph_ref})"
+    return f"GDPR Article {article_number} - {title}"
 
 
 def _sanitize_user_text(text: str | None) -> str | None:
