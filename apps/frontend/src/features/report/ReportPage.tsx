@@ -1,0 +1,91 @@
+import { useEffect, useMemo, useState } from 'react'
+
+import { createReport, getFindings, getReport, reportDownloadUrl } from '../../lib/api'
+import type { FindingOut, ReportOut } from '../../lib/types'
+import { useAppState } from '../../app/state'
+
+export function ReportPage() {
+  const { auditId } = useAppState()
+  const [findings, setFindings] = useState<FindingOut[]>([])
+  const [report, setReport] = useState<ReportOut | null>(null)
+  const [status, setStatus] = useState<'idle' | 'generating' | 'ready'>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!auditId) return
+    getFindings(auditId).then(setFindings).catch((e) => setError(e.message))
+  }, [auditId])
+
+  useEffect(() => {
+    if (!auditId || status !== 'generating') return
+    const timer = setInterval(async () => {
+      try {
+        const r = await getReport(auditId)
+        setReport(r)
+        if (r.status === 'ready') setStatus('ready')
+      } catch {
+        // ignore polling failures temporarily
+      }
+    }, 2500)
+    return () => clearInterval(timer)
+  }, [auditId, status])
+
+  const counts = useMemo(() => {
+    const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
+    for (const finding of findings) base[finding.status] += 1
+    return base
+  }, [findings])
+
+  async function generate() {
+    if (!auditId) return
+    setError(null)
+    setStatus('generating')
+    try {
+      await createReport(auditId)
+    } catch (e) {
+      setStatus('idle')
+      setError(e instanceof Error ? e.message : 'Failed to generate report')
+    }
+  }
+
+  if (!auditId) return <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600 shadow-soft">Run an audit first.</div>
+
+  return (
+    <section>
+      <h1 className="text-2xl font-semibold">Report</h1>
+      <p className="mt-1 text-slate-600">Executive summary and PDF artifact.</p>
+
+      <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        {Object.entries(counts).map(([label, count]) => (
+          <article key={label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-soft">
+            <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
+            <div className="mt-2 text-2xl font-semibold">{count}</div>
+          </article>
+        ))}
+      </div>
+
+      {error && <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
+
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <button
+          onClick={generate}
+          disabled={status === 'generating'}
+          className="rounded-xl bg-cyan-500 px-5 py-3 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-40"
+        >
+          {status === 'generating' ? 'Generating...' : 'Generate PDF'}
+        </button>
+        {status === 'ready' && (
+          <a
+            href={reportDownloadUrl(auditId)}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-xl border border-emerald-300 bg-emerald-100 px-5 py-3 font-semibold text-emerald-700"
+          >
+            Download PDF
+          </a>
+        )}
+        {report?.created_at && <span className="text-sm text-slate-400">Last generated: {new Date(report.created_at).toLocaleString()}</span>}
+      </div>
+    </section>
+  )
+}
