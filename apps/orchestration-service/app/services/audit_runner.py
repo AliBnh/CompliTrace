@@ -1733,8 +1733,9 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         if row.assessment_type is None:
             row.assessment_type = "not_assessable" if row.classification == "not_assessable" else "probable"
         if row.severity_rationale is None:
+            llm_status = row.status if row.status in {"compliant", "partial", "gap", "needs review"} else "needs review"
             row.severity_rationale = _severity_rationale(
-                LlmFinding(status=row.status, severity=row.severity, gap_note=row.gap_note, remediation_note=row.remediation_note, citations=[]),
+                LlmFinding(status=llm_status, severity=row.severity, gap_note=row.gap_note, remediation_note=row.remediation_note, citations=[]),
                 _claim_types_from_text(f"{row.gap_note or ''} {row.remediation_note or ''}"),
             )
         text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''}")
