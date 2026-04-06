@@ -49,9 +49,18 @@ export function SectionsPage() {
           <h1 className="text-2xl font-semibold">Sections Review</h1>
           <p className="text-slate-600">Confirm section extraction before triggering the audit.</p>
         </div>
-        <button onClick={startAudit} disabled={auditLoading || loading || sections.length === 0} className="btn-primary">
-          {auditLoading ? 'Starting...' : 'Start Audit'}
-        </button>
+        <div className="flex items-center gap-4">
+          {auditLoading && (
+            <div className="relative grid h-16 w-16 place-items-center">
+              <div className="absolute h-16 w-16 rounded-full border-4 border-cyan-100" />
+              <div className="absolute h-16 w-16 animate-spin rounded-full border-4 border-transparent border-t-cyan-500 border-r-blue-500" />
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-cyan-700">Running</span>
+            </div>
+          )}
+          <button onClick={startAudit} disabled={auditLoading || loading || sections.length === 0} className="btn-primary">
+            {auditLoading ? 'Starting...' : 'Start Audit'}
+          </button>
+        </div>
       </div>
 
       {error && <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
@@ -60,12 +69,12 @@ export function SectionsPage() {
       ) : (
         <div className="space-y-4">
           {sections.map((section) => (
-            <article key={section.id} className="surface-card p-5">
+            <article key={section.id} className="surface-card p-5 animate-rise">
               <div className="flex items-center justify-between gap-4">
                 <h2 className="font-semibold">{section.section_order}. {section.section_title || 'Untitled section'}</h2>
                 <span className="text-xs text-slate-400">{formatPageRange(section.page_start, section.page_end)}</span>
               </div>
-              <p className="mt-3 line-clamp-3 text-sm text-slate-600">{section.content}</p>
+              <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-600">{section.content}</p>
             </article>
           ))}
         </div>

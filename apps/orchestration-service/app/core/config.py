@@ -4,6 +4,27 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_reports_dir() -> Path:
+    container_default = Path("/app/storage/reports")
+    try:
+        container_default.mkdir(parents=True, exist_ok=True)
+        return container_default
+    except OSError:
+        fallback = Path.cwd() / ".complitrace" / "reports"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def _ensure_writable_dir(path: Path) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except OSError:
+        fallback = Path.cwd() / ".complitrace" / "reports"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -33,7 +54,7 @@ class Settings(BaseSettings):
     corpus_version: str = Field(default="gdpr-2016-679-v1", alias="CORPUS_VERSION")
     prompt_template_version: str = Field(default="v1.0", alias="PROMPT_TEMPLATE_VERSION")
 
-    reports_dir: Path = Field(default=Path("/app/storage/reports"), alias="REPORTS_DIR")
+    reports_dir: Path = Field(default_factory=_default_reports_dir, alias="REPORTS_DIR")
     cors_allowed_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ALLOWED_ORIGINS",
@@ -41,4 +62,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-settings.reports_dir.mkdir(parents=True, exist_ok=True)
+settings.reports_dir = _ensure_writable_dir(settings.reports_dir)

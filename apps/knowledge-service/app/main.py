@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,37 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from fastembed import TextEmbedding
 from starlette.responses import Response
+
+
+class _JsonFormatter(logging.Formatter):
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self._service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "service": self._service,
+            "message": record.getMessage(),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _configure_logging() -> None:
+    root = logging.getLogger()
+    formatter = _JsonFormatter(service="knowledge-service")
+    if root.handlers:
+        for handler in root.handlers:
+            handler.setFormatter(formatter)
+    else:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        root.addHandler(stream_handler)
+    root.setLevel(logging.INFO)
+
+
+_configure_logging()
 
 
 class SearchRequest(BaseModel):
