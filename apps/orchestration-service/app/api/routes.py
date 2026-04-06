@@ -60,6 +60,8 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
+        .where(Finding.publish_flag == "yes")
+        .where(Finding.finding_type.in_(["local", "systemic"]))
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
@@ -80,7 +82,29 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 status=row.status,
                 severity=row.severity,
                 classification=row.classification,
+                finding_type=row.finding_type,
+                publish_flag=row.publish_flag,
                 confidence=row.confidence,
+                confidence_evidence=row.confidence_evidence,
+                confidence_applicability=row.confidence_applicability,
+                confidence_article_fit=row.confidence_article_fit,
+                confidence_synthesis=row.confidence_synthesis,
+                confidence_overall=row.confidence_overall,
+                missing_from_section=row.missing_from_section,
+                missing_from_document=row.missing_from_document,
+                not_visible_in_excerpt=row.not_visible_in_excerpt,
+                obligation_under_review=row.obligation_under_review,
+                collection_mode=row.collection_mode,
+                applicability_status=row.applicability_status,
+                visibility_status=row.visibility_status,
+                section_vs_document_scope=row.section_vs_document_scope,
+                missing_fact_if_unresolved=row.missing_fact_if_unresolved,
+                policy_evidence_excerpt=row.policy_evidence_excerpt,
+                legal_requirement=row.legal_requirement,
+                gap_reasoning=row.gap_reasoning,
+                confidence_level=row.confidence_level,
+                assessment_type=row.assessment_type,
+                severity_rationale=row.severity_rationale,
                 gap_note=row.gap_note,
                 remediation_note=row.remediation_note,
                 citations=[

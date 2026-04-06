@@ -1625,7 +1625,7 @@ def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
     return min(configured_cap, scaled_budget)
 
 
-def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
+def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict[str, bool]) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     corpus = " ".join(_norm(f"{r.gap_note or ''} {r.remediation_note or ''}") for r in rows if r.status in {"gap", "partial"})
     existing_obligations = {_norm(r.obligation_under_review or "") for r in rows}
@@ -1646,7 +1646,7 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
     to_add: list[tuple[str, str]] = []
     for token, (issue_id, severity) in mandatory.items():
         if issue_id == "missing_legal_basis":
-            has_legal_basis_issue = ("legal basis" in corpus) or ("legal_basis" in existing_obligations)
+            has_legal_basis_issue = ("legal basis" in corpus) or ("legal_basis" in existing_obligations) or obligation_map.get("legal_basis_present", False)
             if not has_legal_basis_issue:
                 to_add.append((issue_id, severity))
             continue
@@ -1700,6 +1700,8 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
         by_issue.setdefault(issue_id, []).append(finding)
 
     for issue_id, group in by_issue.items():
+        if issue_id == "general_transparency_gap":
+            continue
         if len(group) < 2:
             continue
         supporting_sections = ", ".join(sorted({g.section_id for g in group})[:6])
@@ -1757,8 +1759,8 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         if row.status == "needs review":
             row.status = "partial"
             row.classification = "not_assessable"
-            row.finding_type = "local"
-            row.publish_flag = "yes"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
             if row.gap_note:
                 row.gap_note = "Not assessable from provided excerpt; additional documentary context is required."
             row.remediation_note = "Provide complete notice excerpts and rerun legal qualification."
@@ -2355,7 +2357,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             db.commit()
 
     if document_mode == "privacy_notice":
-        _add_notice_level_synthesis(db, audit.id)
+        _add_notice_level_synthesis(db, audit.id, obligation_map)
     _add_systemic_issue_synthesis(db, audit.id)
     _partner_review_pass(db, audit.id)
 
