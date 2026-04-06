@@ -176,6 +176,7 @@ CLAIM_PRIMARY_ARTICLES: dict[str, set[int]] = {
     "transfer": {13, 14, 44, 45, 46, 47, 49},
     "sensitive_data": {9, 13, 14},
     "profiling": {13, 14, 22},
+    "right_to_object": {21, 13, 14},
 }
 
 NOTICE_SECTION_TITLE_SIGNALS = {
@@ -392,6 +393,8 @@ def _claim_types_from_text(text: str) -> set[str]:
         claims.add("retention")
     if any(token in norm for token in {"rights", "access", "erasure", "portability", "rectification"}):
         claims.add("rights")
+    if any(token in norm for token in {"right to object", "object to processing", "direct marketing"}):
+        claims.add("right_to_object")
     if any(token in norm for token in {"controller identity", "contact details", "controller"}):
         claims.add("controller_contact")
     if any(token in norm for token in {"supervisory authority", "complaint"}):
@@ -420,7 +423,11 @@ def _citation_claim_compatible(citation: LlmCitation, chunk: RetrievalChunk, cla
     if "retention" in claim_types:
         allowed = allowed or (article == 5) or (article in {13, 14} and (not para_known or para.startswith("2")))
     if "rights" in claim_types:
-        allowed = allowed or (article == 12) or (article in {13, 14} and (not para_known or para.startswith("2"))) or (15 <= article <= 22)
+        allowed = allowed or (article == 12) or (article in {13, 14} and (not para_known or para.startswith("2"))) or (
+            article in {15, 16, 17, 18, 19, 20, 22}
+        )
+        if "right_to_object" in claim_types:
+            allowed = allowed or article == 21
     if "controller_contact" in claim_types:
         allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("1")))
     if "complaint" in claim_types:
@@ -934,7 +941,9 @@ def _normalize_severity(status: str, severity: str | None, claim_types: set[str]
 
 
 def _finding_signature(f: LlmFinding, citations: list[LlmCitation]) -> str:
-    gap_key = _norm((f.gap_note or "")[:240])
+    gap = _norm(f.gap_note or "")
+    assessment_idx = gap.find("assessment:")
+    gap_key = gap[assessment_idx : assessment_idx + 220] if assessment_idx >= 0 else gap[:220]
     article_key = ",".join(sorted({str(_article_int(c.article_number) or c.article_number) for c in citations}))
     return f"{f.status}|{f.severity}|{gap_key}|{article_key}"
 
@@ -961,6 +970,8 @@ def _classify_finding_quality(
     claim_types: set[str],
     source_mode: str,
 ) -> tuple[str | None, float | None]:
+    if f.status == "needs review":
+        return "not_assessable", 0.2
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
@@ -1182,14 +1193,21 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
                     claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
                     valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
-        f = _enforce_substantive_citation_gate(f, valid_citations)
         if f.status in {"gap", "partial"} and not valid_citations:
             diagnostic = _citation_diagnostic_reason(section, claim_types, _collection_mode(section))
-            f.gap_note = f"{f.gap_note} Diagnostic: {diagnostic}"
-            f.remediation_note = (
-                "Collect additional legally relevant evidence and rerun with section-level source mode confirmation "
-                "before issuing a substantive non-compliance conclusion."
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note=(
+                    "Substantive finding withheld due to insufficient legally compatible citation support. "
+                    f"Diagnostic: {diagnostic}"
+                ),
+                remediation_note=(
+                    "Provide stronger section-level evidence and aligned GDPR anchors, then rerun classification."
+                ),
+                citations=[],
             )
+        f = _enforce_substantive_citation_gate(f, valid_citations)
         f.severity = _normalize_severity(f.status, f.severity, claim_types)
         f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
         classification, confidence = _classify_finding_quality(f, valid_citations, claim_types, _collection_mode(section))

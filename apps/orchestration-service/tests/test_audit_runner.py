@@ -349,6 +349,11 @@ def test_claim_types_extract_sensitive_and_profiling():
     assert "sensitive_data" in claims
 
 
+def test_claim_types_extract_right_to_object():
+    claims = _claim_types_from_text("Data subjects have a right to object to direct marketing processing.")
+    assert "right_to_object" in claims
+
+
 def test_fallback_claim_types_from_section_for_transfer_topic():
     section = SectionData(
         id="sx1",
@@ -635,6 +640,13 @@ def test_classify_finding_quality_outputs_not_assessable_without_citations():
     assert conf is not None and conf < 0.5
 
 
+def test_classify_finding_quality_marks_needs_review_as_not_assessable():
+    finding = LlmFinding(status="needs review", severity=None, gap_note="insufficient evidence", remediation_note=None, citations=[])
+    klass, conf = _classify_finding_quality(finding, [], {"retention"}, "unknown")
+    assert klass == "not_assessable"
+    assert conf == 0.2
+
+
 def test_validate_citations_rejects_article_14_for_direct_collection_notice_claims():
     section = SectionData(
         id="sx10",
@@ -659,5 +671,33 @@ def test_validate_citations_rejects_article_14_for_direct_collection_notice_clai
         section,
         "privacy_notice",
         claim_text="Missing legal basis and rights disclosure",
+    )
+    assert valid == []
+
+
+def test_validate_citations_rejects_article_21_for_complaint_claims():
+    section = SectionData(
+        id="sx11",
+        section_order=11,
+        section_title="Complaint Rights",
+        content="You may file complaints with your supervisory authority.",
+        page_start=11,
+        page_end=11,
+    )
+    chunk = RetrievalChunk(
+        chunk_id="c21",
+        article_number="21",
+        article_title="Right to object",
+        paragraph_ref="1-2",
+        content="The data subject shall have the right to object.",
+        score=0.88,
+    )
+    citation = LlmCitation(chunk_id="c21", article_number="21", paragraph_ref="1-2")
+    valid = _validate_citations(
+        [citation],
+        [chunk],
+        section,
+        "privacy_notice",
+        claim_text="Missing complaint mechanism and supervisory authority details",
     )
     assert valid == []
