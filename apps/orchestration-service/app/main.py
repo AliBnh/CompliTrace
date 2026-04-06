@@ -5,6 +5,7 @@ import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy import inspect, text
 from starlette.responses import Response
 
 from app.api.routes import router
@@ -58,6 +59,19 @@ app.include_router(router)
 @app.on_event("startup")
 def startup() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_findings_columns()
+
+
+def _ensure_findings_columns() -> None:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "findings" not in inspector.get_table_names():
+            return
+        columns = {col["name"] for col in inspector.get_columns("findings")}
+        if "classification" not in columns:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN classification VARCHAR(32)"))
+        if "confidence" not in columns:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN confidence DOUBLE PRECISION"))
 
 
 @app.get("/metrics")

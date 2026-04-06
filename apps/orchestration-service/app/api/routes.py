@@ -37,6 +37,7 @@ def create_audit(payload: AuditCreate, db: Session = Depends(get_db)) -> AuditOu
     try:
         audit = run_audit(db, audit)
     except Exception as exc:
+        db.rollback()
         audit.status = "failed"
         db.add(audit)
         db.commit()
