@@ -289,6 +289,30 @@ def _is_not_applicable(section: SectionData) -> bool:
 def _section_auditability_type(section: SectionData) -> str:
     title = _norm(section.section_title)
     text = _section_context_signals(section)
+    auditable_signals = {
+        "process",
+        "collect",
+        "data categories",
+        "source",
+        "transfer",
+        "profil",
+        "retention",
+        "rights",
+        "recipient",
+        "controller",
+        "processor",
+        "audience",
+        "application",
+        "territorial",
+        "partner",
+        "customer-sourced",
+        "device",
+        "behavioral",
+        "special category",
+        "sensitive",
+    }
+    if any(signal in text for signal in auditable_signals):
+        return "processing_section"
     if any(t in title for t in {"definition", "glossary", "terms"}):
         return "definition_section"
     if any(t in title for t in {"effective date", "owner", "version", "introduction"}):
@@ -298,6 +322,45 @@ def _section_auditability_type(section: SectionData) -> str:
     if any(t in text for t in {"controller", "processor", "third party", "source"}):
         return "context_section"
     return "meta_section"
+
+
+def _issue_specific_remediation(issue_name: str, document_type: str, systemic: bool) -> str:
+    prefix = "For the notice as a whole" if systemic else "For this section"
+    mapping = {
+        "missing_controller_identity": f"{prefix}, state the controller legal entity name and contact details clearly in the external privacy notice.",
+        "missing_controller_contact": f"{prefix}, add a direct contact channel (email/webform/address) for privacy inquiries.",
+        "missing_dpo_contact": f"{prefix}, disclose DPO contact details where a DPO is appointed or legally required.",
+        "missing_purposes": f"{prefix}, list processing purposes in plain language and map each to relevant processing activities.",
+        "missing_legal_basis": f"{prefix}, disclose lawful basis per purpose (e.g., contract, legal obligation, legitimate interests, consent).",
+        "missing_recipients": f"{prefix}, identify recipient categories and third-party disclosure contexts.",
+        "missing_retention": f"{prefix}, state exact retention periods or objective retention criteria by data category.",
+        "missing_rights_information": f"{prefix}, add complete rights information (access, rectification, erasure, restriction, objection, portability).",
+        "missing_complaint_right": f"{prefix}, include complaint-right details and supervisory authority reference/contact.",
+        "missing_transfer_notice": f"{prefix}, disclose whether third-country transfers occur and in what contexts.",
+        "missing_transfer_safeguards_disclosure": f"{prefix}, specify adequacy/SCC/BCR/derogation mechanism and how safeguard details can be obtained.",
+        "profiling_disclosure_gap": (
+            f"{prefix}, explain profiling existence, logic, significance, and envisaged consequences under Articles 13(2)(f)/14(2)(g)."
+        ),
+        "article_22_threshold_unclear": f"{prefix}, clarify whether automated decision-making with legal/similarly significant effects is performed and apply Article 22 safeguards if triggered.",
+        "special_category_basis_unclear": f"{prefix}, identify Article 9 category and explicit Article 9(2) condition relied upon.",
+        "controller_processor_role_ambiguity": f"{prefix}, clarify when the organization acts as controller vs processor and how role changes are communicated.",
+    }
+    return mapping.get(issue_name, f"{prefix}, add obligation-specific notice wording aligned to GDPR transparency duties.")
+
+
+def _consistency_validator(issue_name: str, claim_types: set[str], citations: list[LlmCitation], remediation_note: str | None) -> bool:
+    issue_from_claim = _claim_issue_ids(claim_types)
+    if issue_name and issue_from_claim and issue_name not in issue_from_claim:
+        return False
+    if citations and _violates_forbidden_article_matrix(claim_types, citations):
+        return False
+    if remediation_note:
+        rem = _norm(remediation_note)
+        if "transfer" in issue_name and "retention" in rem:
+            return False
+        if "retention" in issue_name and "transfer" in rem:
+            return False
+    return True
 
 
 def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[CandidateIssue]:
@@ -1518,12 +1581,10 @@ def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
                 missing_from_document="yes",
                 not_visible_in_excerpt="no",
                 gap_note=(
-                    f"Fact: The notice-wide findings do not cover mandatory transparency element '{issue_id}'. "
-                    "Rule: Articles 13/14 require complete notice disclosures for core transparency elements. "
-                    "Application: section-level analysis did not identify this mandatory element in disclosed content. "
-                    "Conclusion: systemic notice-level disclosure gap."
+                    f"The privacy notice does not clearly disclose '{issue_id.replace('_', ' ')}' at document level. "
+                    "Articles 13/14 require this transparency element to be present and intelligible for data subjects."
                 ),
-                remediation_note="Add a dedicated notice-wide disclosure section covering this mandatory element.",
+                remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
             )
         )
         findings_by_status_total.labels(status="gap").inc()
@@ -1895,14 +1956,22 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             "rights",
             "complaint",
         }:
-            f = LlmFinding(
-                status="needs review",
-                severity=None,
-                gap_note=f"Not assessable: {applicability['unresolved_trigger']}.",
-                remediation_note="Provide source-collection wording to resolve Article 13 vs 14 applicability.",
-                citations=[],
-            )
-            valid_citations = []
+            if f.status in {"gap", "partial"} and any(i["candidate_issue_type"].startswith("missing_") for i in candidate_issues):
+                f.status = "partial"
+                f.severity = "medium"
+                f.gap_note = (
+                    "Probable gap: core notice element appears missing, but direct vs indirect source mode is not fully resolved "
+                    f"({applicability['unresolved_trigger']})."
+                )
+            else:
+                f = LlmFinding(
+                    status="needs review",
+                    severity=None,
+                    gap_note=f"Not assessable: {applicability['unresolved_trigger']}.",
+                    remediation_note="Provide source-collection wording to resolve Article 13 vs 14 applicability.",
+                    citations=[],
+                )
+                valid_citations = []
 
         if f.status in {"gap", "partial"}:
             global_missing_conflict = False
@@ -1926,6 +1995,12 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         f = _enforce_substantive_citation_gate(f, valid_citations)
         f.severity = _normalize_severity(f.status, f.severity, claim_types)
+        if f.status in {"gap", "partial"}:
+            f.remediation_note = _issue_specific_remediation(
+                qualification["issue_name"],
+                posture["document_type"],
+                systemic=False,
+            )
         f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
         if f.status in {"gap", "partial"} and f.gap_note:
             f.gap_note = (
@@ -1943,6 +2018,15 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             specialized_bits = [v for v in specialized_review.values() if v]
             if specialized_bits:
                 f.gap_note = f"{f.gap_note} Specialized legal review: {' '.join(specialized_bits)}"
+        if not _consistency_validator(qualification["issue_name"], claim_types, valid_citations, f.remediation_note):
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note="Internal consistency check failed between issue, article mapping, citation fit, and remediation.",
+                remediation_note=None,
+                citations=[],
+            )
+            valid_citations = []
         classification, confidence = _classify_finding_quality(f, valid_citations, claim_types, _collection_mode(section))
 
         if f.status in {"gap", "partial"}:
