@@ -279,12 +279,19 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     parse_failures = sum(1 for f in findings if f.gap_note == "LLM parse failure")
     parse_failure_rate = (parse_failures / total) if total else 0.0
     needs_review_rate = (by_status["needs review"] / total) if total else 0.0
+    contradiction_hits = sum(
+        1 for f in findings if (f.gap_note and "insufficient legally compatible citation support" in f.gap_note.lower())
+    )
+    contradiction_rate = (contradiction_hits / total) if total else 0.0
+    systemic_ratio = (sum(1 for f in findings if f.classification == "systemic_violation") / total) if total else 0.0
     quality_score = max(
         0.0,
         10.0
         - (parse_failure_rate * 4.0)
-        - ((1.0 - citation_coverage) * 3.0)
-        - (needs_review_rate * 3.0),
+        - ((1.0 - citation_coverage) * 1.0)
+        - (needs_review_rate * 2.0)
+        - (contradiction_rate * 3.0)
+        + (systemic_ratio * 1.0),
     )
     document_title, section_meta = _section_report_meta(audit)
     started_at = audit.started_at.isoformat(sep=" ", timespec="seconds") if isinstance(audit.started_at, datetime) else "n/a"
@@ -320,6 +327,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Not assessable findings: {by_classification['not_assessable']}", bullet=True),
         _TextBlock(f"LLM parse failure rate: {parse_failure_rate:.0%}", bullet=True),
         _TextBlock(f"Needs review rate: {needs_review_rate:.0%}", bullet=True),
+        _TextBlock(f"Citation contradiction rate: {contradiction_rate:.0%}", bullet=True),
         _TextBlock(f"Report quality score (heuristic): {quality_score:.1f}/10", bullet=True),
         _TextBlock("Detailed Findings", font_size=13, top_gap=14),
     ]

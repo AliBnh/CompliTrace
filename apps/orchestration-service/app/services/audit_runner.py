@@ -179,6 +179,28 @@ CLAIM_PRIMARY_ARTICLES: dict[str, set[int]] = {
     "right_to_object": {21, 13, 14},
 }
 
+PRIVACY_NOTICE_SCOPE_PRIMARY = {5, 6, 9, 12, 13, 14, 21, 22, 44, 45, 46, 47, 49, 77}
+
+CLAIM_ARTICLE_RULES: dict[str, dict[str, set[int]]] = {
+    "missing_controller_identity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_dpo_contact": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_legal_basis": {"primary": {6, 13, 14}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_purposes": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 44, 45, 46, 47, 49}},
+    "missing_recipients": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+    "missing_transfer_disclosure": {"primary": {13, 14}, "support": {44, 45, 46, 47, 49}, "disallowed": {15, 21}},
+    "missing_transfer_safeguard_mechanism": {
+        "primary": {44, 45, 46, 47, 49},
+        "support": {13, 14},
+        "disallowed": {15, 21},
+    },
+    "missing_retention_period": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_rights_notice": {"primary": {13, 14, 12, 15, 16, 17, 18, 19, 20, 21, 22}, "support": {5}, "disallowed": set()},
+    "missing_complaint_right": {"primary": {13, 14, 77}, "support": {12}, "disallowed": {21, 22}},
+    "missing_profiling_logic": {"primary": {13, 14}, "support": {22, 21}, "disallowed": {15}},
+    "missing_special_category_basis": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
+    "controller_processor_role_ambiguity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+}
+
 NOTICE_SECTION_TITLE_SIGNALS = {
     "privacy notice",
     "privacy policy",
@@ -467,6 +489,41 @@ def _claim_has_primary_anchor(claim_types: set[str], citations: list[LlmCitation
     return True
 
 
+def _claim_type_to_issue_id(claim_type: str) -> str:
+    mapping = {
+        "controller_contact": "missing_controller_identity",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights": "missing_rights_notice",
+        "complaint": "missing_complaint_right",
+        "transfer": "missing_transfer_disclosure",
+        "profiling": "missing_profiling_logic",
+        "sensitive_data": "missing_special_category_basis",
+        "right_to_object": "missing_rights_notice",
+    }
+    return mapping.get(claim_type, claim_type)
+
+
+def _claim_issue_ids(claim_types: set[str]) -> set[str]:
+    return {_claim_type_to_issue_id(c) for c in claim_types}
+
+
+def _has_claim_citation_contradiction(claim_types: set[str], citations: list[LlmCitation]) -> bool:
+    issue_ids = _claim_issue_ids(claim_types)
+    articles = {_article_int(c.article_number) for c in citations}
+    for issue in issue_ids:
+        rules = CLAIM_ARTICLE_RULES.get(issue)
+        if not rules:
+            continue
+        disallowed = rules.get("disallowed", set())
+        if any(a in disallowed for a in articles if a is not None):
+            return True
+        allowed = rules.get("primary", set()) | rules.get("support", set())
+        if allowed and not any(a in allowed for a in articles if a is not None):
+            return True
+    return False
+
+
 def _citation_diagnostic_reason(section: SectionData, claim_types: set[str], source_mode: str) -> str:
     if not claim_types:
         return "No claim type could be inferred from the finding text."
@@ -513,6 +570,8 @@ def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, d
         return False
     section_ctx = _section_context_signals(section)
     if document_mode == "privacy_notice":
+        if article not in PRIVACY_NOTICE_SCOPE_PRIMARY:
+            return False
         if article in {24, 25, 33, 34, 70, 18}:
             return False
         if article == 88 and not _contains_any(section_ctx, EMPLOYMENT_SIGNALS):
@@ -596,6 +655,8 @@ def _validate_citations(
         valid.append(cit)
 
     if valid and document_mode == "privacy_notice" and not _claim_has_primary_anchor(claim_types, valid):
+        return []
+    if valid and _has_claim_citation_contradiction(claim_types, valid):
         return []
     return valid
 
@@ -717,6 +778,36 @@ def _targeted_notice_query(section: SectionData) -> str:
     else:
         focus = "GDPR Articles 13 and 14 mandatory privacy notice disclosures for direct or indirect collection"
     return f"{focus}. Section context: {section.section_title}. {section.content[:600]}"
+
+
+def _claim_template_query(section: SectionData, claim_types: set[str]) -> str:
+    if "transfer" in claim_types:
+        return (
+            f"GDPR privacy notice transfer disclosure requirements: Articles 13(1)(f), 14(1)(f), 44-49; "
+            f"include adequacy, SCC/BCR safeguards, and how data subjects can obtain safeguard copies. "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "profiling" in claim_types:
+        return (
+            f"GDPR profiling notice obligations: Articles 13(2)(f), 14(2)(g), and Article 22 threshold test "
+            f"(logic, significance, consequences). Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "retention" in claim_types:
+        return (
+            f"GDPR retention notice obligations: Articles 13(2)(a), 14(2)(a), Article 5(1)(e). "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "complaint" in claim_types:
+        return (
+            f"GDPR complaint-right notice obligations: Articles 13(2)(d), 14(2)(e), and Article 77. "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "legal_basis" in claim_types:
+        return (
+            f"GDPR legal basis notice obligations: Article 6, Articles 13(1)(c), 14(1)(c), purposes and lawful basis mapping. "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    return _targeted_notice_query(section)
 
 
 def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
@@ -975,15 +1066,18 @@ def _classify_finding_quality(
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
-        return "not_assessable", 0.25
+        return "not_assessable", 0.2
     has_primary = _claim_has_primary_anchor(claim_types, citations)
     if not has_primary:
-        return "not_assessable", 0.30
+        return "not_assessable", 0.25
+    contradiction_penalty = 0.2 if _has_claim_citation_contradiction(claim_types, citations) else 0.0
+    source_bonus = 0.1 if source_mode in {"direct", "indirect"} else 0.0
+    base_confidence = max(0.2, min(0.95, 0.65 + source_bonus - contradiction_penalty))
     if source_mode == "unknown" and any(claim in {"controller_contact", "legal_basis", "retention", "rights", "complaint"} for claim in claim_types):
-        return "probable_gap", 0.65
+        return "probable_gap", round(base_confidence - 0.1, 2)
     if f.status == "gap":
-        return "clear_non_compliance", 0.9
-    return "probable_gap", 0.75
+        return "clear_non_compliance", round(base_confidence + 0.15, 2)
+    return "probable_gap", round(base_confidence, 2)
 
 
 def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
@@ -997,6 +1091,43 @@ def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
         return configured_cap
     scaled_budget = max(12, round(section_count * 0.85))
     return min(configured_cap, scaled_budget)
+
+
+def _add_notice_level_synthesis(db: Session, audit_id: str) -> None:
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    corpus = " ".join(_norm(f"{r.gap_note or ''} {r.remediation_note or ''}") for r in rows if r.status in {"gap", "partial"})
+    mandatory = {
+        "legal basis": ("missing_legal_basis", "high"),
+        "retention": ("missing_retention_period", "high"),
+        "rights": ("missing_rights_notice", "high"),
+        "complaint": ("missing_complaint_right", "high"),
+        "controller": ("missing_controller_identity", "high"),
+    }
+    to_add: list[tuple[str, str]] = []
+    for token, (issue_id, severity) in mandatory.items():
+        if token not in corpus:
+            to_add.append((issue_id, severity))
+    for issue_id, severity in to_add:
+        db.add(
+            Finding(
+                audit_id=audit_id,
+                section_id="__notice__",
+                status="gap",
+                severity=severity,
+                classification="systemic_violation",
+                confidence=0.85,
+                gap_note=(
+                    f"Fact: The notice-wide findings do not cover mandatory transparency element '{issue_id}'. "
+                    "Rule: Articles 13/14 require complete notice disclosures for core transparency elements. "
+                    "Application: section-level analysis did not identify this mandatory element in disclosed content. "
+                    "Conclusion: systemic notice-level disclosure gap."
+                ),
+                remediation_note="Add a dedicated notice-wide disclosure section covering this mandatory element.",
+            )
+        )
+        findings_by_status_total.labels(status="gap").inc()
+    if to_add:
+        db.commit()
 
 
 def run_audit(db: Session, audit: Audit) -> Audit:
@@ -1048,6 +1179,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     section_id=section.id,
                     status="not applicable",
                     severity=None,
+                    classification="out_of_scope",
+                    confidence=1.0,
                     gap_note=None,
                     remediation_note=None,
                 )
@@ -1138,11 +1271,11 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 valid_citations = salvaged
             fallback = _build_mandatory_notice_gap(section, chunks)
             if fallback is None and not valid_citations:
-                targeted_query = _targeted_notice_query(section)
-                targeted_chunks = _rerank_chunks_for_mode(section, knowledge.search(query=targeted_query, k=8), document_mode)
+                one_rescue_query = _claim_template_query(section, claim_types)
+                rescue_chunks = _rerank_chunks_for_mode(section, knowledge.search(query=one_rescue_query, k=8), document_mode)
                 merged: list[RetrievalChunk] = []
                 seen_chunk_ids: set[str] = set()
-                for ch in [*chunks, *targeted_chunks]:
+                for ch in [*chunks, *rescue_chunks]:
                     if ch.chunk_id in seen_chunk_ids:
                         continue
                     seen_chunk_ids.add(ch.chunk_id)
@@ -1151,22 +1284,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
                 if salvaged:
                     valid_citations = salvaged
-                fallback = _build_mandatory_notice_gap(section, chunks)
-            if fallback is None and not valid_citations:
-                transfer_query = (
-                    f"GDPR international transfer disclosure obligations for privacy notices: Articles 13(1)(f), "
-                    f"14(1)(f), 44, 45, 46. Section context: {section.section_title}. {section.content[:600]}"
-                )
-                transfer_chunks = _rerank_chunks_for_mode(section, knowledge.search(query=transfer_query, k=8), document_mode)
-                merged: list[RetrievalChunk] = []
-                seen_chunk_ids: set[str] = set()
-                for ch in [*chunks, *transfer_chunks]:
-                    if ch.chunk_id in seen_chunk_ids:
-                        continue
-                    seen_chunk_ids.add(ch.chunk_id)
-                    merged.append(ch)
-                chunks = merged[:8]
-                fallback = _build_transfer_gap(section, chunks)
+                fallback = _build_transfer_gap(section, chunks) if "transfer" in claim_types else _build_mandatory_notice_gap(section, chunks)
             if fallback is not None:
                 f = fallback
                 claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
@@ -1259,6 +1377,9 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
 
         db.commit()
+
+    if document_mode == "privacy_notice":
+        _add_notice_level_synthesis(db, audit.id)
 
     audit.status = "complete"
     audit.completed_at = datetime.utcnow()
