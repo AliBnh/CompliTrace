@@ -31,7 +31,7 @@ export function UploadPage() {
 
   return (
     <section className="grid gap-6 lg:grid-cols-[1.3fr_1fr]">
-      <article className="rounded-2xl border border-slate-200 bg-white p-8 shadow-soft">
+      <article className="surface-card p-8">
         <h1 className="text-3xl font-semibold">Upload Policy Document</h1>
         <p className="mt-3 text-slate-600">Upload a PDF policy to start section extraction and GDPR pre-audit analysis.</p>
 
@@ -57,16 +57,12 @@ export function UploadPage() {
 
         {error && <div className="mt-6 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
 
-        <button
-          onClick={onUpload}
-          disabled={!file || loading}
-          className="mt-8 rounded-xl bg-cyan-500 px-5 py-3 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40"
-        >
+        <button onClick={onUpload} disabled={!file || loading} className="btn-primary mt-8">
           {loading ? 'Uploading...' : 'Upload & Parse'}
         </button>
       </article>
 
-      <aside className="rounded-2xl border border-slate-200 bg-white p-6 shadow-soft">
+      <aside className="surface-card p-6">
         <h2 className="text-lg font-semibold">Workflow</h2>
         <ol className="mt-4 space-y-3 text-sm text-slate-600">
           <li>1. Upload policy PDF</li>

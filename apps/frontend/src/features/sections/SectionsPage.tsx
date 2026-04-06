@@ -49,11 +49,7 @@ export function SectionsPage() {
           <h1 className="text-2xl font-semibold">Sections Review</h1>
           <p className="text-slate-600">Confirm section extraction before triggering the audit.</p>
         </div>
-        <button
-          onClick={startAudit}
-          disabled={auditLoading || loading || sections.length === 0}
-          className="rounded-xl bg-cyan-500 px-5 py-3 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-40"
-        >
+        <button onClick={startAudit} disabled={auditLoading || loading || sections.length === 0} className="btn-primary">
           {auditLoading ? 'Starting...' : 'Start Audit'}
         </button>
       </div>
@@ -64,7 +60,7 @@ export function SectionsPage() {
       ) : (
         <div className="space-y-4">
           {sections.map((section) => (
-            <article key={section.id} className="rounded-xl border border-slate-200 bg-white p-5 shadow-soft">
+            <article key={section.id} className="surface-card p-5">
               <div className="flex items-center justify-between gap-4">
                 <h2 className="font-semibold">{section.section_order}. {section.section_title || 'Untitled section'}</h2>
                 <span className="text-xs text-slate-400">{formatPageRange(section.page_start, section.page_end)}</span>
@@ -85,5 +81,5 @@ function formatPageRange(start: number | null, end: number | null) {
 }
 
 function EmptyState({ message }: { message: string }) {
-  return <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600 shadow-soft">{message}</div>
+  return <div className="surface-card p-6 text-slate-600">{message}</div>
 }

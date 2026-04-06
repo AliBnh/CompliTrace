@@ -48,7 +48,7 @@ export function ReportPage() {
     }
   }
 
-  if (!auditId) return <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600 shadow-soft">Run an audit first.</div>
+  if (!auditId) return <div className="surface-card p-6 text-slate-600">Run an audit first.</div>
 
   return (
     <section>
@@ -57,7 +57,7 @@ export function ReportPage() {
 
       <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {Object.entries(counts).map(([label, count]) => (
-          <article key={label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-soft">
+          <article key={label} className="surface-card p-4">
             <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
             <div className="mt-2 text-2xl font-semibold">{count}</div>
           </article>
@@ -67,11 +67,7 @@ export function ReportPage() {
       {error && <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <button
-          onClick={generate}
-          disabled={status === 'generating'}
-          className="rounded-xl bg-cyan-500 px-5 py-3 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-40"
-        >
+        <button onClick={generate} disabled={status === 'generating'} className="btn-primary">
           {status === 'generating' ? 'Generating...' : 'Generate PDF'}
         </button>
         {status === 'ready' && (

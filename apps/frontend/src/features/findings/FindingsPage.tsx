@@ -12,6 +12,7 @@ export function FindingsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [status, setStatus] = useState<string>('pending')
   const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<number>(12)
 
   useEffect(() => {
     if (!documentId) return
@@ -32,6 +33,11 @@ export function FindingsPage() {
         const audit = await getAudit(auditId)
         if (cancelled) return
         setStatus(audit.status)
+        if (audit.status === 'complete') {
+          setProgress(100)
+        } else if (audit.status === 'running' || audit.status === 'pending') {
+          setProgress((previous) => Math.min(previous + Math.random() * 6 + 2, 92))
+        }
         const rows = await getFindings(auditId)
         if (cancelled) return
         setFindings(rows)
@@ -49,12 +55,21 @@ export function FindingsPage() {
     }
   }, [auditId, selectedId])
 
-  const selected = findings.find((f) => f.id === selectedId) ?? null
+  const orderedFindings = useMemo(() => {
+    return [...findings].sort((a, b) => {
+      const aOrder = sectionsById[a.section_id]?.section_order ?? Number.MAX_SAFE_INTEGER
+      const bOrder = sectionsById[b.section_id]?.section_order ?? Number.MAX_SAFE_INTEGER
+      if (aOrder !== bOrder) return aOrder - bOrder
+      return a.id.localeCompare(b.id)
+    })
+  }, [findings, sectionsById])
+
+  const selected = orderedFindings.find((f) => f.id === selectedId) ?? null
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    for (const finding of findings) base[finding.status] += 1
+    for (const finding of orderedFindings) base[finding.status] += 1
     return base
-  }, [findings])
+  }, [orderedFindings])
 
   if (!auditId) return <EmptyState message="No audit in progress. Trigger an audit from Sections page." />
 
@@ -66,6 +81,23 @@ export function FindingsPage() {
             <h1 className="text-2xl font-semibold">Findings</h1>
             <p className="text-sm text-slate-600">Audit status: <span className="font-medium">{status}</span></p>
           </div>
+          {(status === 'running' || status === 'pending') && (
+            <div className="relative grid h-20 w-20 place-items-center">
+              <svg className="h-20 w-20 -rotate-90" viewBox="0 0 100 100" aria-label="Audit progress">
+                <circle cx="50" cy="50" r="42" strokeWidth="8" className="fill-none stroke-slate-200" />
+                <circle
+                  cx="50"
+                  cy="50"
+                  r="42"
+                  strokeWidth="8"
+                  strokeDasharray={264}
+                  strokeDashoffset={264 - (264 * progress) / 100}
+                  className="fill-none stroke-cyan-500 transition-all duration-700"
+                />
+              </svg>
+              <span className="absolute text-sm font-semibold text-cyan-700">{Math.round(progress)}%</span>
+            </div>
+          )}
           <div className="flex gap-2 text-xs">
             {Object.entries(counts).map(([label, count]) => (
               <span key={label} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-slate-600">
@@ -77,7 +109,7 @@ export function FindingsPage() {
 
         {error && <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
 
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-soft">
+        <div className="surface-card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-100 text-left text-slate-600">
               <tr>
@@ -87,7 +119,7 @@ export function FindingsPage() {
               </tr>
             </thead>
             <tbody>
-              {findings.map((finding) => {
+              {orderedFindings.map((finding) => {
                 const section = sectionsById[finding.section_id]
                 return (
                   <tr
@@ -106,7 +138,7 @@ export function FindingsPage() {
         </div>
       </div>
 
-      <aside className="rounded-xl border border-slate-200 bg-white p-5 shadow-soft">
+      <aside className="surface-card p-5">
         {!selected ? (
           <p className="text-slate-600">Select a finding to inspect full details.</p>
         ) : (
@@ -145,5 +177,5 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function EmptyState({ message }: { message: string }) {
-  return <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600 shadow-soft">{message}</div>
+  return <div className="surface-card p-6 text-slate-600">{message}</div>
 }
