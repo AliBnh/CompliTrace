@@ -534,6 +534,7 @@ def _validate_citations(
     if not claim_types:
         claim_types = _fallback_claim_types_from_section(section)
     valid: list[LlmCitation] = []
+    source_mode = _collection_mode(section)
     for cit in citations:
         chunk = by_chunk.get(cit.chunk_id)
         if not chunk:
@@ -560,6 +561,26 @@ def _validate_citations(
         if document_mode == "privacy_notice" and not _citation_claim_compatible(cit, chunk, claim_types):
             citation_validation_failure_total.inc()
             continue
+        if document_mode == "privacy_notice":
+            article = _article_int(cit.article_number)
+            if source_mode == "direct" and article == 14 and claim_types & {
+                "controller_contact",
+                "legal_basis",
+                "retention",
+                "rights",
+                "complaint",
+            }:
+                citation_validation_failure_total.inc()
+                continue
+            if source_mode == "indirect" and article == 13 and claim_types & {
+                "controller_contact",
+                "legal_basis",
+                "retention",
+                "rights",
+                "complaint",
+            }:
+                citation_validation_failure_total.inc()
+                continue
 
         if not cit.excerpt:
             cit.excerpt = chunk.content[:180]
@@ -846,7 +867,27 @@ def _sanitize_legal_reference_text(text: str | None) -> str | None:
     fixed = re.sub(r"Article\s*13\(b\)", "Article 13(1)(b)", fixed, flags=re.IGNORECASE)
     fixed = re.sub(r"Article\s*13\(c\)", "Article 13(1)(c)", fixed, flags=re.IGNORECASE)
     fixed = re.sub(r"Article\s*14\(b\)", "Article 14(1)(b)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(
+        r"Article\s*13\(1\)\(f\)\s+as\s+the\s+legal\s+basis",
+        "Article 6(1) as the legal basis (and Article 13(1)(f) only for transfer disclosures)",
+        fixed,
+        flags=re.IGNORECASE,
+    )
     return fixed
+
+
+def _clean_remediation_legal_mismatches(remediation: str | None, claim_types: set[str]) -> str | None:
+    if not remediation:
+        return remediation
+    cleaned = remediation
+    if "legal_basis" in claim_types and re.search(r"article\s*13\(1\)\(f\).{0,30}legal basis", cleaned, flags=re.IGNORECASE):
+        cleaned = re.sub(
+            r"Article\s*13\(1\)\(f\)",
+            "Article 6(1) and Article 13(1)(c)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    return cleaned
 
 
 def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
@@ -912,6 +953,26 @@ def _ensure_reasoning_chain(f: LlmFinding, section: SectionData, citations: list
         f"Assessment: {gap or 'Policy language appears incomplete against cited obligations.'}"
     )
     return f
+
+
+def _classify_finding_quality(
+    f: LlmFinding,
+    citations: list[LlmCitation],
+    claim_types: set[str],
+    source_mode: str,
+) -> tuple[str | None, float | None]:
+    if f.status not in {"gap", "partial"}:
+        return None, None
+    if not citations:
+        return "not_assessable", 0.25
+    has_primary = _claim_has_primary_anchor(claim_types, citations)
+    if not has_primary:
+        return "not_assessable", 0.30
+    if source_mode == "unknown" and any(claim in {"controller_contact", "legal_basis", "retention", "rights", "complaint"} for claim in claim_types):
+        return "probable_gap", 0.65
+    if f.status == "gap":
+        return "clear_non_compliance", 0.9
+    return "probable_gap", 0.75
 
 
 def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
@@ -1058,6 +1119,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
         claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
         claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
+        f.remediation_note = _clean_remediation_legal_mismatches(f.remediation_note, claim_types)
         valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
         if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
             salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
@@ -1130,6 +1192,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
         f.severity = _normalize_severity(f.status, f.severity, claim_types)
         f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
+        classification, confidence = _classify_finding_quality(f, valid_citations, claim_types, _collection_mode(section))
 
         if f.status in {"gap", "partial"}:
             signature = _finding_signature(f, valid_citations)
@@ -1146,6 +1209,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     citations=[],
                 )
                 valid_citations = []
+                classification = "not_assessable"
+                confidence = 0.4
             else:
                 seen_signatures[signature] = section.id
 
@@ -1154,6 +1219,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             section_id=section.id,
             status=f.status,
             severity=f.severity,
+            classification=classification,
+            confidence=confidence,
             gap_note=f.gap_note,
             remediation_note=f.remediation_note,
         )

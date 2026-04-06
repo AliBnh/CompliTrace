@@ -268,6 +268,11 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         "needs review": sum(1 for f in findings if f.status == "needs review"),
         "not applicable": sum(1 for f in findings if f.status == "not applicable"),
     }
+    by_classification = {
+        "clear_non_compliance": sum(1 for f in findings if f.classification == "clear_non_compliance"),
+        "probable_gap": sum(1 for f in findings if f.classification == "probable_gap"),
+        "not_assessable": sum(1 for f in findings if f.classification == "not_assessable"),
+    }
     substantive = [f for f in findings if f.status in {"partial", "gap"}]
     substantive_with_citations = sum(1 for f in substantive if len(f.citations) > 0)
     citation_coverage = (substantive_with_citations / len(substantive)) if substantive else 1.0
@@ -310,6 +315,9 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Needs review: {by_status['needs review']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
         _TextBlock(f"Substantive citation coverage: {citation_coverage:.0%}", bullet=True),
+        _TextBlock(f"Clear non-compliance findings: {by_classification['clear_non_compliance']}", bullet=True),
+        _TextBlock(f"Probable gap findings: {by_classification['probable_gap']}", bullet=True),
+        _TextBlock(f"Not assessable findings: {by_classification['not_assessable']}", bullet=True),
         _TextBlock(f"LLM parse failure rate: {parse_failure_rate:.0%}", bullet=True),
         _TextBlock(f"Needs review rate: {needs_review_rate:.0%}", bullet=True),
         _TextBlock(f"Report quality score (heuristic): {quality_score:.1f}/10", bullet=True),
@@ -323,6 +331,10 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             blocks.append(_TextBlock(f"Section page range: {meta.page_range}", bullet=True))
         blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
+        if finding.classification:
+            blocks.append(_TextBlock(f"Classification: {finding.classification}", bullet=True))
+        if finding.confidence is not None:
+            blocks.append(_TextBlock(f"Confidence: {finding.confidence:.2f}", bullet=True))
         safe_gap_note = _sanitize_user_text(finding.gap_note)
         safe_remediation_note = _sanitize_user_text(finding.remediation_note)
         if safe_gap_note:

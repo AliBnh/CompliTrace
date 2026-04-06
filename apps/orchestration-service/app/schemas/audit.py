@@ -16,6 +16,8 @@ class FindingOut(BaseModel):
     section_id: str
     status: str
     severity: str | None
+    classification: str | None = None
+    confidence: float | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

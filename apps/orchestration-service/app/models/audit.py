@@ -35,6 +35,8 @@ class Finding(Base):
     section_id: Mapped[str] = mapped_column(String(36), index=True)
     status: Mapped[str] = mapped_column(String(32))
     severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     gap_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     remediation_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 

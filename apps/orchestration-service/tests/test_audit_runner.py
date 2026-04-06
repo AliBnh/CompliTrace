@@ -30,6 +30,9 @@ from app.services.audit_runner import (
     _normalize_severity,
     _finding_signature,
     _ensure_reasoning_chain,
+    _clean_remediation_legal_mismatches,
+    _classify_finding_quality,
+    _validate_citations,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 
@@ -617,3 +620,44 @@ def test_ensure_reasoning_chain_adds_evidence_requirement_assessment():
     assert "Evidence:" in (updated.gap_note or "")
     assert "Requirement:" in (updated.gap_note or "")
     assert "Assessment:" in (updated.gap_note or "")
+
+
+def test_clean_remediation_rewrites_wrong_13_1_f_legal_basis_reference():
+    remediation = "Cite Article 13(1)(f) as the legal basis for this disclosure."
+    cleaned = _clean_remediation_legal_mismatches(remediation, {"legal_basis"})
+    assert "Article 6(1)" in (cleaned or "")
+
+
+def test_classify_finding_quality_outputs_not_assessable_without_citations():
+    finding = LlmFinding(status="gap", severity="high", gap_note="Missing retention.", remediation_note="Add retention.", citations=[])
+    klass, conf = _classify_finding_quality(finding, [], {"retention"}, "direct")
+    assert klass == "not_assessable"
+    assert conf is not None and conf < 0.5
+
+
+def test_validate_citations_rejects_article_14_for_direct_collection_notice_claims():
+    section = SectionData(
+        id="sx10",
+        section_order=10,
+        section_title="Account Registration",
+        content="We collect personal data directly when you create an account.",
+        page_start=10,
+        page_end=10,
+    )
+    chunk = RetrievalChunk(
+        chunk_id="c14",
+        article_number="14",
+        article_title="Information to be provided where personal data have not been obtained",
+        paragraph_ref="1",
+        content="The controller shall provide information where personal data are not obtained from the data subject.",
+        score=0.9,
+    )
+    citation = LlmCitation(chunk_id="c14", article_number="14", paragraph_ref="1")
+    valid = _validate_citations(
+        [citation],
+        [chunk],
+        section,
+        "privacy_notice",
+        claim_text="Missing legal basis and rights disclosure",
+    )
+    assert valid == []
