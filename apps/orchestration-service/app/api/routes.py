@@ -151,7 +151,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     if audit.status == "review_required":
-        return []
+        raise HTTPException(status_code=409, detail="Published findings blocked: audit requires review")
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
@@ -533,6 +533,8 @@ def create_report(audit_id: str, db: Session = Depends(get_db)) -> ReportTrigger
         raise HTTPException(status_code=404, detail="Audit not found")
 
     if audit.status != "complete":
+        if audit.status == "review_required":
+            raise HTTPException(status_code=409, detail="Report generation blocked: audit requires reviewer resolution")
         raise HTTPException(status_code=409, detail="Audit is not complete")
 
     try:
