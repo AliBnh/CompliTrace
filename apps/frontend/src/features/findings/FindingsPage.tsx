@@ -126,8 +126,8 @@ export function FindingsPage() {
       <div>
         <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold">Findings</h1>
-            <p className="text-sm text-slate-600">Audit status: <span className="font-medium">{status}</span></p>
+            <h1 className="section-title">Findings</h1>
+            <p className="section-subtitle">Audit status: <span className="font-medium text-slate-700">{status}</span></p>
           </div>
           {(status === 'running' || status === 'pending') && (
             <div className="relative grid h-20 w-20 place-items-center">

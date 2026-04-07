@@ -46,8 +46,8 @@ export function SectionsPage() {
     <section>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Sections Review</h1>
-          <p className="text-slate-600">Confirm section extraction before triggering the audit.</p>
+          <h1 className="section-title">Sections Review</h1>
+          <p className="section-subtitle">Confirm section extraction before triggering the audit.</p>
         </div>
         <div className="flex items-center gap-4">
           {auditLoading && (

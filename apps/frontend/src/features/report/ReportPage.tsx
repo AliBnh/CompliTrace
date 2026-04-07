@@ -59,8 +59,8 @@ export function ReportPage() {
 
   return (
     <section>
-      <h1 className="text-2xl font-semibold">Report</h1>
-      <p className="mt-1 text-slate-600">Executive summary and PDF artifact.</p>
+      <h1 className="section-title">Report</h1>
+      <p className="section-subtitle">Executive summary and downloadable PDF artifact.</p>
 
       <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {Object.entries(counts).map(([label, count]) => (

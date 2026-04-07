@@ -32,8 +32,8 @@ export function UploadPage() {
   return (
     <section className="grid gap-6 lg:grid-cols-[1.3fr_1fr]">
       <article className="surface-card p-8 animate-rise">
-        <h1 className="text-3xl font-semibold">Upload Policy Document</h1>
-        <p className="mt-3 text-slate-600">Upload a PDF policy to start section extraction and GDPR pre-audit analysis.</p>
+        <h1 className="section-title">Upload Policy Document</h1>
+        <p className="section-subtitle">Upload a PDF policy to start section extraction and GDPR pre-audit analysis.</p>
 
         <label className="group mt-8 block cursor-pointer rounded-2xl border-2 border-dashed border-cyan-300 bg-gradient-to-br from-cyan-50 to-blue-50 p-8 text-center transition-all duration-300 hover:-translate-y-0.5 hover:border-cyan-500 hover:shadow-lg">
           <input
