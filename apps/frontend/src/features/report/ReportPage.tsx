@@ -32,7 +32,8 @@ export function ReportPage() {
 
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    for (const row of reviewRows) {
+    const visibleRows = reviewRows.filter((row) => !row.section_id.startsWith('ledger:'))
+    for (const row of visibleRows) {
       const mapped = normalizeStatus(row.status)
       base[mapped] += 1
     }
