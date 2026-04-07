@@ -209,6 +209,7 @@ def get_analysis(
     artifact_role: str | None = Query(default=None),
     section_id: str | None = Query(default=None),
     analysis_stage: str | None = Query(default=None),
+    debug: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> list[AnalysisItemOut]:
     query = (
@@ -227,6 +228,8 @@ def get_analysis(
     if analysis_stage:
         query = query.where(AuditAnalysisItem.analysis_stage == analysis_stage)
     rows = db.scalars(query.order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())).all()
+    if not debug:
+        rows = [row for row in rows if not row.section_id.startswith("ledger:")]
     if not rows:
         audit = db.get(Audit, audit_id)
         if not audit:
@@ -366,6 +369,13 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             disposition = {}
         for duty in ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]:
             item = disposition.get(duty, {})
+            blocked_core_artifact = any(
+                f.publication_state in {"blocked", "internal_only"} and (_issue_from_finding_section(f.section_id) or "").startswith("missing_")
+                for f in findings
+            )
+            final_status = item.get("status")
+            if final_status == "satisfied" and blocked_core_artifact:
+                final_status = "not_assessable"
             out.append(
                 ReviewItemOut(
                     item_kind="review_block",
@@ -374,8 +384,11 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
                     status=None,
                     review_group="core_duties",
                     duty=duty,
-                    final_disposition=item.get("status"),
+                    triggered=bool(item.get("triggered", True)),
+                    final_disposition=final_status,
                     reason=item.get("reasoning"),
+                    source_scope_dependency=str(item.get("source_scope_dependency") or "high"),
+                    publication_recommendation=str(item.get("publication_recommendation") or "internal_only"),
                 )
             )
         specialist_triggers = {
@@ -394,9 +407,11 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
                     section_id="review:specialist_families",
                     review_group="specialist_families",
                     family=label,
-                    triggered=item.get("status") != "satisfied",
+                    triggered=bool(item.get("triggered", item.get("status") != "satisfied")),
                     final_disposition=item.get("status"),
                     reason=item.get("reasoning"),
+                    source_scope_dependency=str(item.get("source_scope_dependency") or "low"),
+                    publication_recommendation=str(item.get("publication_recommendation") or "internal_only"),
                 )
             )
     return out

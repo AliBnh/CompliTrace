@@ -2363,11 +2363,22 @@ def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, 
     return "satisfied", "no unresolved issue artifact survived gates"
 
 
+def _has_positive_core_evidence(rows: list[Finding], obligation_key: str) -> bool:
+    for row in rows:
+        if row.status != "compliant":
+            continue
+        requirement = _norm(row.legal_requirement or "")
+        under_review = _norm(row.obligation_under_review or "")
+        if obligation_key in requirement or obligation_key in under_review:
+            return True
+    return False
+
+
 def _build_final_disposition_map(
     rows: list[Finding],
     sections: list[SectionData],
     obligation_map: dict[str, bool],
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, str | bool]]:
     families: dict[str, dict[str, str]] = {}
     core_issue_by_family = {
         "controller_identity_contact": "missing_controller_identity",
@@ -2385,11 +2396,19 @@ def _build_final_disposition_map(
     }
     for family, issue in core_issue_by_family.items():
         status, reason = _final_disposition_for_issue(rows, issue)
+        obligation_key = core_obligation_key_by_family.get(family)
         if status == "satisfied":
-            obligation_key = core_obligation_key_by_family.get(family)
             if obligation_key and obligation_map.get(obligation_key) is False:
                 status, reason = "not_assessable", f"{obligation_key}=not_visible and no publishable issue found"
-        families[family] = {"status": status, "reasoning": reason}
+            elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
+                status, reason = "unresolved_internal_error", f"no explicit positive evidence record for {obligation_key}"
+        families[family] = {
+            "status": status,
+            "reasoning": reason,
+            "triggered": True,
+            "publication_recommendation": "publish" if status in {"gap", "referenced_but_unseen"} else "internal_only",
+            "source_scope_dependency": "high",
+        }
 
     specialist_issue_by_family = {
         "transfer": "missing_transfer_notice",
@@ -2404,7 +2423,13 @@ def _build_final_disposition_map(
         status, reason = _final_disposition_for_issue(rows, issue)
         if triggered and status == "satisfied":
             status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
-        families[family] = {"status": status, "reasoning": reason}
+        families[family] = {
+            "status": status,
+            "reasoning": reason,
+            "triggered": triggered,
+            "publication_recommendation": "publish" if status in {"gap", "referenced_but_unseen"} else "internal_only",
+            "source_scope_dependency": "high" if triggered else "low",
+        }
     return families
 
 
@@ -2440,7 +2465,7 @@ def _state_invariant_validator(rows: list[Finding]) -> list[str]:
 def _final_publication_validator(
     db: Session,
     audit_id: str,
-    disposition_map: dict[str, dict[str, str]],
+    disposition_map: dict[str, dict[str, str | bool]],
     source_scope: str,
 ) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()

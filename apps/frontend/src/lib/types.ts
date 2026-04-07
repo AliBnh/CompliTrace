@@ -117,4 +117,6 @@ export type ReviewItemOut = {
   triggered?: boolean | null
   final_disposition?: string | null
   reason?: string | null
+  source_scope_dependency?: string | null
+  publication_recommendation?: string | null
 }

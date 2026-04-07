@@ -158,3 +158,5 @@ class ReviewItemOut(BaseModel):
     triggered: bool | None = None
     final_disposition: str | None = None
     reason: str | None = None
+    source_scope_dependency: str | None = None
+    publication_recommendation: str | None = None
