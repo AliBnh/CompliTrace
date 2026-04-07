@@ -104,7 +104,7 @@ export function FindingsPage() {
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
     for (const row of activeRows) {
-      const status = rowStatus(row)
+      const status = normalizeStatus(rowStatus(row))
       if (status in base) base[status] += 1
     }
     return base
@@ -216,9 +216,9 @@ function displaySectionTitle(finding: { section_id: string }, sectionsById: Reco
   return finding.section_id
 }
 
-function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): FindingOut['status'] {
-  if ('status' in row && row.status) return row.status as FindingOut['status']
-  if ('status_candidate' in row && row.status_candidate) return row.status_candidate as FindingOut['status']
+function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
+  if ('status' in row && row.status) return row.status
+  if ('status_candidate' in row && row.status_candidate) return row.status_candidate
   return 'not applicable'
 }
 
@@ -270,7 +270,7 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
             finding.citations.map((c, idx) => (
               <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                 <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
-                <p className="mt-1 text-slate-600">{c.excerpt}</p>
+                <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
               </li>
             ))
           )}
@@ -286,7 +286,7 @@ function ReviewDetail({ item }: { item: ReviewItemOut }) {
       <h2 className="text-lg font-semibold">Review item details</h2>
       <div className="flex flex-wrap gap-2">
         <Pill value={`source: ${item.item_kind}`} />
-        {item.status && <StatusBadge status={item.status as FindingOut['status']} />}
+        {item.status && <StatusBadge status={item.status} />}
         {item.artifact_role && <Pill value={item.artifact_role} />}
         {item.publication_state && <Pill value={item.publication_state} />}
       </div>
@@ -306,7 +306,7 @@ function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
     <>
       <h2 className="text-lg font-semibold">Analysis artifact details</h2>
       <div className="flex flex-wrap gap-2">
-        {item.status_candidate && <StatusBadge status={item.status_candidate as FindingOut['status']} />}
+        {item.status_candidate && <StatusBadge status={item.status_candidate} />}
         {item.analysis_stage && <Pill value={item.analysis_stage} />}
         <Pill value={item.analysis_type} />
         {item.artifact_role && <Pill value={item.artifact_role} />}
@@ -326,7 +326,7 @@ function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
             item.citations.map((c, idx) => (
               <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                 <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
-                <p className="mt-1 text-slate-600">{c.excerpt}</p>
+                <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
               </li>
             ))
           )}
@@ -351,6 +351,23 @@ function countChipClass(status: FindingOut['status']): string {
   if (status === 'partial' || status === 'needs review') return 'border-amber-300 bg-amber-50 text-amber-700'
   if (status === 'compliant') return 'border-emerald-300 bg-emerald-50 text-emerald-700'
   return 'border-slate-300 bg-slate-100 text-slate-700'
+}
+
+function normalizeStatus(status: string): FindingOut['status'] {
+  const s = status.toLowerCase()
+  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked') return 'gap'
+  if (s === 'candidate_partial' || s === 'partial') return 'partial'
+  if (s === 'candidate_compliant' || s === 'compliant') return 'compliant'
+  if (s === 'needs_review' || s === 'needs review') return 'needs review'
+  return 'not applicable'
+}
+
+function sanitizeCitationText(text: string): string {
+  return text
+    .replace(/section:[a-f0-9-]{12,}:/gi, 'section: ')
+    .replace(/obligation_map:[^,\]]+/gi, 'obligation map signal')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
 }
 
 function EmptyState({ message }: { message: string }) {

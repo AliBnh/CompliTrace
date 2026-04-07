@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { createReport, getFindings, getReport, reportDownloadUrl } from '../../lib/api'
-import type { FindingOut, ReportOut } from '../../lib/types'
+import { createReport, getReport, getReview, reportDownloadUrl } from '../../lib/api'
+import type { ReportOut, ReviewItemOut } from '../../lib/types'
 import { useAppState } from '../../app/state'
 
 export function ReportPage() {
   const { auditId } = useAppState()
-  const [findings, setFindings] = useState<FindingOut[]>([])
+  const [reviewRows, setReviewRows] = useState<ReviewItemOut[]>([])
   const [report, setReport] = useState<ReportOut | null>(null)
   const [status, setStatus] = useState<'idle' | 'generating' | 'ready'>('idle')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!auditId) return
-    getFindings(auditId).then(setFindings).catch((e) => setError(e.message))
+    getReview(auditId).then(setReviewRows).catch((e) => setError(e.message))
   }, [auditId])
 
   useEffect(() => {
@@ -32,9 +32,12 @@ export function ReportPage() {
 
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    for (const finding of findings) base[finding.status] += 1
+    for (const row of reviewRows) {
+      const status = normalizeStatus(row.status)
+      base[status] += 1
+    }
     return base
-  }, [findings])
+  }, [reviewRows])
   const cardStyles: Record<string, string> = {
     compliant: 'from-emerald-50 to-emerald-100 border-emerald-200 text-emerald-900',
     partial: 'from-amber-50 to-amber-100 border-amber-200 text-amber-900',
@@ -91,4 +94,13 @@ export function ReportPage() {
       </div>
     </section>
   )
+}
+
+function normalizeStatus(status?: string | null): 'compliant' | 'partial' | 'gap' | 'needs review' | 'not applicable' {
+  const s = (status ?? '').toLowerCase()
+  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked') return 'gap'
+  if (s === 'candidate_partial' || s === 'partial') return 'partial'
+  if (s === 'candidate_compliant' || s === 'compliant') return 'compliant'
+  if (s === 'needs_review' || s === 'needs review') return 'needs review'
+  return 'not applicable'
 }
