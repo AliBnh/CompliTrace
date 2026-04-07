@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.models.audit import Audit, Finding, Report
+from app.models.audit import Audit, AuditAnalysisItem, Finding, Report
 from app.services.clients import IngestionClient, SectionData
 
 
@@ -264,6 +264,19 @@ def _is_publishable_finding(row: Finding) -> bool:
     return row.publish_flag == "yes"
 
 
+def _normalize_status(status: str | None) -> str:
+    token = (status or "").strip().lower().replace("_", " ")
+    if token in {"candidate gap", "gap", "blocked"}:
+        return "gap"
+    if token in {"candidate partial", "partial"}:
+        return "partial"
+    if token in {"candidate compliant", "compliant"}:
+        return "compliant"
+    if token in {"needs review"}:
+        return "needs review"
+    return "not applicable"
+
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -280,6 +293,30 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         .where(Finding.audit_id == audit_id)
         .order_by(Finding.section_id.asc())
     ).all()
+    analysis_rows = db.scalars(
+        select(AuditAnalysisItem)
+        .where(AuditAnalysisItem.audit_id == audit_id)
+        .where(
+            AuditAnalysisItem.analysis_type.in_(
+                ["completeness_outcome", "referenced_but_unseen", "not_assessable_core_duty", "support_evidence", "excerpt_scope_fact"]
+            )
+        )
+        .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
+    ).all()
+
+    visible_review_findings = [
+        row
+        for row in findings
+        if (
+            row.publication_state == "publishable"
+            or (row.publication_state in {"blocked", "internal_only"} and row.legal_requirement is not None)
+        )
+        and not row.section_id.startswith("ledger:")
+    ]
+    visible_review_analysis = [row for row in analysis_rows if not row.section_id.startswith("ledger:")]
+    review_statuses = [_normalize_status(row.status) for row in visible_review_findings] + [
+        _normalize_status(row.status_candidate) for row in visible_review_analysis
+    ]
     systemic_findings = [
         f
         for f in findings
@@ -291,15 +328,19 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         if _is_publishable_finding(f) and (f.finding_level == "local" or f.finding_type == "local")
     ]
     not_assessable_findings = [f for f in publishable_findings if f.classification == "not_assessable"]
-    publishable_local_findings = [f for f in publishable_findings if f.classification != "not_assessable"]
+    publishable_local_findings = [
+        f
+        for f in publishable_findings
+        if f.classification not in {"not_assessable", "diagnostic_internal_only"} and f.status != "not applicable"
+    ]
 
-    total = len(findings)
+    total = len(review_statuses)
     by_status = {
-        "compliant": sum(1 for f in findings if f.status == "compliant"),
-        "partial": sum(1 for f in findings if f.status == "partial"),
-        "gap": sum(1 for f in findings if f.status == "gap"),
-        "needs review": sum(1 for f in findings if f.status == "needs review"),
-        "not applicable": sum(1 for f in findings if f.status == "not applicable"),
+        "compliant": sum(1 for s in review_statuses if s == "compliant"),
+        "partial": sum(1 for s in review_statuses if s == "partial"),
+        "gap": sum(1 for s in review_statuses if s == "gap"),
+        "needs review": sum(1 for s in review_statuses if s == "needs review"),
+        "not applicable": sum(1 for s in review_statuses if s == "not applicable"),
     }
     by_classification = {
         "clear_non_compliance": sum(1 for f in findings if f.classification == "clear_non_compliance"),
