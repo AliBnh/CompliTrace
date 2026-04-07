@@ -42,7 +42,7 @@ body {
   }
 
   .surface-card {
-    @apply rounded-2xl border border-slate-200/80 bg-white/92 shadow-lg shadow-slate-200/60 backdrop-blur-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-xl;
+    @apply rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-200/60 backdrop-blur-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-xl;
   }
 
   .section-title {
