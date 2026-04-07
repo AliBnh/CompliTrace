@@ -23,6 +23,11 @@ services:
     build:
       context: .
       dockerfile: apps/knowledge-service/Dockerfile
+      args:
+        KNOWLEDGE_BASE_IMAGE: ${KNOWLEDGE_BASE_IMAGE:-python:3.11-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: complitrace-knowledge-service
     depends_on:
       - qdrant
@@ -39,6 +44,11 @@ services:
     build:
       context: .
       dockerfile: apps/ingestion-service/Dockerfile
+      args:
+        INGESTION_BASE_IMAGE: ${INGESTION_BASE_IMAGE:-python:3.11-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: complitrace-ingestion-service
     depends_on:
       - postgres
@@ -55,6 +65,11 @@ services:
     build:
       context: .
       dockerfile: apps/orchestration-service/Dockerfile
+      args:
+        ORCHESTRATION_BASE_IMAGE: ${ORCHESTRATION_BASE_IMAGE:-python:3.10-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: complitrace-orchestration-service
     depends_on:
       - postgres
@@ -120,6 +135,11 @@ services:
     build:
       context: .
       dockerfile: apps/frontend/Dockerfile
+      args:
+        FRONTEND_BASE_IMAGE: ${FRONTEND_BASE_IMAGE:-node:20-alpine}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: complitrace-frontend
     depends_on:
       - ingestion-service
