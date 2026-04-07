@@ -98,7 +98,7 @@ export type AnalysisItemOut = {
 }
 
 export type ReviewItemOut = {
-  item_kind: 'finding' | 'analysis'
+  item_kind: 'finding' | 'analysis' | 'review_block'
   id: UUID
   section_id: string
   issue_type?: string | null
@@ -111,4 +111,10 @@ export type ReviewItemOut = {
   completeness_map?: string | null
   gap_note?: string | null
   remediation_note?: string | null
+  review_group?: string | null
+  duty?: string | null
+  family?: string | null
+  triggered?: boolean | null
+  final_disposition?: string | null
+  reason?: string | null
 }

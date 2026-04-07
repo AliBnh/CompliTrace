@@ -868,6 +868,24 @@ def _source_scope_qualification(sections: list[SectionData], references: list[Cr
     return "uncertain_scope", round(max(0.6, parser_completeness_confidence - 0.1), 2), []
 
 
+def _source_scope_proof_gate(
+    sections: list[SectionData],
+    source_scope: str,
+    source_scope_confidence: float,
+    unseen_sections: list[str],
+) -> tuple[str, float]:
+    if source_scope != "full_notice":
+        return source_scope, source_scope_confidence
+    numbered_titles = [s.section_title.strip() for s in sections if re.match(r"^\\d+", s.section_title.strip())]
+    has_abrupt_tail = any(_section_context_signals(s).endswith(("and", "or", ",")) for s in sections)
+    has_numbering_gaps = bool(numbered_titles) and len(numbered_titles) < 4
+    parser_complete = len(sections) >= 5 and not has_abrupt_tail
+    if unseen_sections or has_numbering_gaps or not parser_complete:
+        downgraded = "partial_notice_excerpt" if unseen_sections else "uncertain_scope"
+        return downgraded, min(source_scope_confidence, 0.74)
+    return source_scope, source_scope_confidence
+
+
 def _issue_has_unseen_reference(issue_id: str, refs: list[CrossReference]) -> bool:
     topic_map = {
         "missing_legal_basis": "legal_basis",
@@ -2390,6 +2408,35 @@ def _build_final_disposition_map(
     return families
 
 
+def _state_invariant_validator(rows: list[Finding]) -> list[str]:
+    errors: list[str] = []
+    for row in rows:
+        violation = None
+        if row.classification == "diagnostic_internal_only" and row.publication_state == "publishable":
+            violation = "diagnostic_internal_only_publishable"
+        elif row.classification == "diagnostic_internal_only" and row.artifact_role in {"publishable_candidate", "publishable_finding"}:
+            violation = "diagnostic_internal_only_publishable_role"
+        elif row.artifact_role == "support_only" and row.publication_state == "publishable":
+            violation = "support_only_publishable"
+        elif row.publication_state == "blocked" and row.publish_flag == "yes":
+            violation = "blocked_publish_yes"
+        elif row.finding_level == "none" and row.artifact_role == "publishable_finding":
+            violation = "none_level_publishable_finding"
+        elif row.status == "gap" and row.classification == "diagnostic_internal_only":
+            violation = "diagnostic_internal_only_gap"
+        if not violation:
+            continue
+        row.publish_flag = "no"
+        row.publication_state = "blocked"
+        row.artifact_role = "support_only"
+        row.finding_level = "none"
+        if row.classification == "diagnostic_internal_only":
+            row.status = "not applicable"
+            row.severity = None
+        errors.append(f"state_invariant_violation:{violation}:{row.id}")
+    return errors
+
+
 def _final_publication_validator(
     db: Session,
     audit_id: str,
@@ -2397,10 +2444,31 @@ def _final_publication_validator(
     source_scope: str,
 ) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
-    core_ok = all(
-        disposition_map.get(k, {}).get("status") in {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
-        for k in ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
-    )
+    valid_final = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
+    core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
+    specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "special_category"]
+    unresolved_core = [f for f in core_families if disposition_map.get(f, {}).get("status") not in valid_final]
+    unresolved_specialist = [f for f in specialist_families if disposition_map.get(f, {}).get("status") not in valid_final]
+    if unresolved_core or unresolved_specialist:
+        for family in unresolved_core:
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"core_duty_unresolved:{family}",
+                "core duty is unresolved/blocked/suppressed",
+                "core_duty_publication_gate",
+                disposition_map.get(family, {}).get("reasoning", "missing family disposition"),
+            )
+        for family in unresolved_specialist:
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"specialist_family_unresolved:{family}",
+                "triggered specialist family has no final disposition",
+                "specialist_family_resolution_gate",
+                disposition_map.get(family, {}).get("reasoning", "missing family disposition"),
+            )
+    core_ok = not unresolved_core and not unresolved_specialist
     for row in rows:
         issue = _finding_issue_id(row)
         family = _issue_to_family(issue)
@@ -2425,8 +2493,11 @@ def _final_publication_validator(
             row.publish_flag = "no"
             row.publication_state = "blocked"
             row.artifact_role = "support_only"
+            row.finding_level = "none"
             if row.gap_note:
                 row.gap_note = f"{row.gap_note} [withheld by final publication validator]"
+    for message in _state_invariant_validator(rows):
+        _record_suppression_ledger(db, audit_id, message, "invariant violation", "state_invariant_validator", message)
     db.commit()
 
 
@@ -2695,6 +2766,12 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     audit_sections_total.inc(len(sections))
     cross_references = _extract_notice_cross_references(sections)
     source_scope, source_scope_confidence, unseen_sections = _source_scope_qualification(sections, cross_references)
+    source_scope, source_scope_confidence = _source_scope_proof_gate(
+        sections,
+        source_scope,
+        source_scope_confidence,
+        unseen_sections,
+    )
     document_mode = _infer_document_mode(sections)
     posture = _document_posture_agent(sections, document_mode)
     obligation_map = _build_document_obligation_map(sections)
@@ -3278,6 +3355,19 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         json.dumps(final_disposition_map, sort_keys=True),
     )
     _partner_review_pass(db, audit.id)
+    post_review_rows = db.query(Finding).filter(Finding.audit_id == audit.id).all()
+    invariant_errors = _state_invariant_validator(post_review_rows)
+    if invariant_errors:
+        for message in invariant_errors:
+            _record_suppression_ledger(
+                db,
+                audit.id,
+                message,
+                "post-review invariant rewrite",
+                "state_invariant_validator",
+                message,
+            )
+        db.commit()
     _snapshot_analysis_items(db, audit.id)
 
     audit.status = "complete"

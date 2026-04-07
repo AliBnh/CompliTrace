@@ -152,3 +152,9 @@ class ReviewItemOut(BaseModel):
     completeness_map: str | None = None
     gap_note: str | None = None
     remediation_note: str | None = None
+    review_group: str | None = None
+    duty: str | None = None
+    family: str | None = None
+    triggered: bool | None = None
+    final_disposition: str | None = None
+    reason: str | None = None

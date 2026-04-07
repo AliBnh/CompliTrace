@@ -24,6 +24,30 @@ from app.services.reports import generate_report_text
 
 
 router = APIRouter()
+GENERIC_NOT_ASSESSABLE_GAP = "Not assessable from provided excerpt; additional documentary context is required."
+GENERIC_NOT_ASSESSABLE_REMEDIATION = "Provide complete notice excerpts and rerun legal qualification."
+FAMILY_FALLBACK_COPY: dict[str, tuple[str, str]] = {
+    "missing_transfer_notice": (
+        "Transfer-related processing language is visible, but the reviewed material does not show whether third-country transfer safeguards or mechanisms are disclosed.",
+        "Provide the transfer/safeguards section or confirm whether adequacy, SCCs, or other transfer mechanisms are disclosed.",
+    ),
+    "profiling_disclosure_gap": (
+        "Profiling or behavioral-analysis signals are visible, but the reviewed material does not show whether profiling logic, significance, or effects are disclosed.",
+        "Provide profiling/automated-decision wording sufficient to assess Articles 13(2)(f), 14(2)(g), and where relevant Article 22.",
+    ),
+    "controller_processor_role_ambiguity": (
+        "Customer-data/service-allocation language is visible, but the reviewed material does not clearly allocate controller/processor roles.",
+        "Provide role-allocation or DPA wording showing when the company acts as controller, processor, or joint controller.",
+    ),
+    "article_14_indirect_collection_gap": (
+        "Indirect/source-of-data signals are visible, but the reviewed material does not show source-category disclosure sufficient for Article 14 assessment.",
+        "Provide source-of-data and indirect-collection notice language.",
+    ),
+    "missing_rights_notice": (
+        "The reviewed material does not show the full rights disclosure set.",
+        "Provide the rights section or confirm where rights are disclosed.",
+    ),
+}
 
 
 def _deserialize_json_list(raw: str | None) -> list[str] | None:
@@ -50,6 +74,17 @@ def _issue_from_finding_section(section_id: str) -> str | None:
     if section_id.startswith("ledger:"):
         return "completeness_or_suppression_ledger"
     return None
+
+
+def _apply_family_fallback(issue_type: str | None, gap_note: str | None, remediation_note: str | None) -> tuple[str | None, str | None]:
+    if not issue_type:
+        return gap_note, remediation_note
+    if (gap_note or "").strip() != GENERIC_NOT_ASSESSABLE_GAP and (remediation_note or "").strip() != GENERIC_NOT_ASSESSABLE_REMEDIATION:
+        return gap_note, remediation_note
+    replacement = FAMILY_FALLBACK_COPY.get(issue_type)
+    if not replacement:
+        return gap_note, remediation_note
+    return replacement
 
 
 @router.get("/health")
@@ -149,8 +184,8 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 source_scope_confidence=row.source_scope_confidence,
                 referenced_unseen_sections=_deserialize_json_list(row.referenced_unseen_sections),
                 assertion_level=row.assertion_level,
-                gap_note=row.gap_note,
-                remediation_note=row.remediation_note,
+                gap_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0],
+                remediation_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1],
                 citations=[
                     CitationOut(
                         chunk_id=c.chunk_id,
@@ -235,8 +270,8 @@ def get_analysis(
             finding_status=row.finding_status,
             finding_classification=row.finding_classification,
             finding_severity=row.finding_severity,
-            gap_note=row.gap_note,
-            remediation_note=row.remediation_note,
+            gap_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[0],
+            remediation_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[1],
             citations=[
                 AnalysisCitationOut(
                     chunk_id=c.chunk_id,
@@ -294,8 +329,8 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             publication_state=row.publication_state,
             suppression_reason=row.gap_note if row.publication_state in {"blocked", "internal_only"} else None,
             completeness_map=row.legal_requirement if row.legal_requirement and "completeness" in row.legal_requirement else None,
-            gap_note=row.gap_note,
-            remediation_note=row.remediation_note,
+            gap_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0],
+            remediation_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1],
         )
         for row in findings
     )
@@ -312,11 +347,58 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             publication_state=row.publication_state_candidate,
             suppression_reason=row.suppression_reason,
             completeness_map=row.retrieval_summary if row.analysis_type == "completeness_outcome" else None,
-            gap_note=row.gap_note,
-            remediation_note=row.remediation_note,
+            gap_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[0],
+            remediation_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[1],
         )
         for row in analysis_rows
     )
+    disposition_ledger = (
+        db.query(Finding)
+        .filter(Finding.audit_id == audit_id)
+        .filter(Finding.legal_requirement == "suppression_validator=final_disposition_map")
+        .order_by(Finding.id.desc())
+        .first()
+    )
+    if disposition_ledger and disposition_ledger.gap_reasoning:
+        try:
+            disposition = json.loads(disposition_ledger.gap_reasoning)
+        except json.JSONDecodeError:
+            disposition = {}
+        for duty in ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]:
+            item = disposition.get(duty, {})
+            out.append(
+                ReviewItemOut(
+                    item_kind="review_block",
+                    id=f"core:{duty}",
+                    section_id="review:core_duties",
+                    status=None,
+                    review_group="core_duties",
+                    duty=duty,
+                    final_disposition=item.get("status"),
+                    reason=item.get("reasoning"),
+                )
+            )
+        specialist_triggers = {
+            "transfer": ("transfer", "transfer"),
+            "profiling": ("profiling", "profiling"),
+            "role_ambiguity": ("role_ambiguity", "role_ambiguity"),
+            "article14_source": ("article14_source", "article14"),
+            "special_category": ("special_category", "special_category"),
+        }
+        for family, (lookup_key, label) in specialist_triggers.items():
+            item = disposition.get(lookup_key, {})
+            out.append(
+                ReviewItemOut(
+                    item_kind="review_block",
+                    id=f"family:{family}",
+                    section_id="review:specialist_families",
+                    review_group="specialist_families",
+                    family=label,
+                    triggered=item.get("status") != "satisfied",
+                    final_disposition=item.get("status"),
+                    reason=item.get("reasoning"),
+                )
+            )
     return out
 
 
