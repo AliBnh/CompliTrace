@@ -2030,40 +2030,41 @@ def _upsert_evidence_records(db: Session, audit_id: str) -> None:
         row[0]
         for row in db.query(EvidenceRecord.evidence_id).filter(EvidenceRecord.audit_id == audit_id).all()
     }
+    pending: set[str] = set()
+
+    def _enqueue(record: EvidenceRecord) -> None:
+        if record.evidence_id in existing or record.evidence_id in pending:
+            return
+        pending.add(record.evidence_id)
+        db.merge(record)
     findings = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     for row in findings:
         policy_evidence_id = f"evi:policy:{row.section_id}"
-        if policy_evidence_id not in existing:
-            db.add(
-                EvidenceRecord(
-                    evidence_id=policy_evidence_id,
-                    audit_id=audit_id,
-                    evidence_type="policy_section",
-                    source_ref=row.section_id,
-                    text_excerpt=(row.policy_evidence_excerpt or row.gap_note or "")[:1000],
-                )
+        _enqueue(
+            EvidenceRecord(
+                evidence_id=policy_evidence_id,
+                audit_id=audit_id,
+                evidence_type="policy_section",
+                source_ref=row.section_id,
+                text_excerpt=(row.policy_evidence_excerpt or row.gap_note or "")[:1000],
             )
-            existing.add(policy_evidence_id)
+        )
         derived_ids = [f"evi:ref:{ref}" for ref in _decode_json_list(row.document_evidence_refs)]
         if row.section_id.startswith("systemic:"):
             systemic_id = f"evi:derived:{row.section_id}:{row.id}"
-            if systemic_id not in existing:
-                db.add(
-                    EvidenceRecord(
-                        evidence_id=systemic_id,
-                        audit_id=audit_id,
-                        evidence_type="derived_systemic_evidence",
-                        source_ref=row.section_id,
-                        text_excerpt=(row.gap_reasoning or row.gap_note or "")[:1000],
-                        derived_from_evidence_ids=_serialize_json_list(derived_ids),
-                    )
+            _enqueue(
+                EvidenceRecord(
+                    evidence_id=systemic_id,
+                    audit_id=audit_id,
+                    evidence_type="derived_systemic_evidence",
+                    source_ref=row.section_id,
+                    text_excerpt=(row.gap_reasoning or row.gap_note or "")[:1000],
+                    derived_from_evidence_ids=_serialize_json_list(derived_ids),
                 )
-                existing.add(systemic_id)
+            )
         for cit in row.citations:
             chunk_evidence_id = f"evi:chunk:{cit.chunk_id}"
-            if chunk_evidence_id in existing:
-                continue
-            db.add(
+            _enqueue(
                 EvidenceRecord(
                     evidence_id=chunk_evidence_id,
                     audit_id=audit_id,
@@ -2073,7 +2074,6 @@ def _upsert_evidence_records(db: Session, audit_id: str) -> None:
                     derived_from_evidence_ids=_serialize_json_list([policy_evidence_id]),
                 )
             )
-            existing.add(chunk_evidence_id)
 
 
 def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligation_map: dict[str, bool]) -> tuple[list[str], bool]:

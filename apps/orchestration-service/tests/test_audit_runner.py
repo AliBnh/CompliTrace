@@ -157,6 +157,29 @@ def test_upsert_evidence_records_creates_policy_and_chunk_entries():
         assert "evi:chunk:gdpr-art-13-p-1-c" in ids
 
 
+def test_upsert_evidence_records_deduplicates_same_policy_section_id():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        f1 = Finding(audit_id=audit.id, section_id="systemic:missing_complaint_right", status="gap", severity="high", finding_type="systemic")
+        f2 = Finding(audit_id=audit.id, section_id="systemic:missing_complaint_right", status="gap", severity="high", finding_type="systemic")
+        db.add_all([f1, f2])
+        db.commit()
+
+        _upsert_evidence_records(db, audit.id)
+        db.commit()
+
+        policy_ids = [
+            r.evidence_id
+            for r in db.query(EvidenceRecord).filter(EvidenceRecord.audit_id == audit.id, EvidenceRecord.evidence_type == "policy_section").all()
+        ]
+        assert policy_ids.count("evi:policy:systemic:missing_complaint_right") == 1
+
+
 def test_substantive_finding_without_citations_is_downgraded():
     finding = LlmFinding(
         status="partial",
