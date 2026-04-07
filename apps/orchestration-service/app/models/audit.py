@@ -65,6 +65,10 @@ class Finding(Base):
     citation_summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     support_complete: Mapped[str | None] = mapped_column(String(8), nullable=True)
     omission_basis: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    source_scope: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_scope_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    referenced_unseen_sections: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assertion_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
     gap_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     remediation_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 

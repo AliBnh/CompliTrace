@@ -350,6 +350,13 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Report quality score (heuristic): {quality_score:.1f}/10", bullet=True),
         _TextBlock("Top Systemic Findings", font_size=13, top_gap=14),
     ]
+    scope_label = next((f.source_scope for f in systemic_findings if f.source_scope), None)
+    if scope_label == "partial_notice_excerpt":
+        blocks.append(_TextBlock("Scope note: This review is based on the provided excerpt rather than the full notice.", bullet=True))
+    elif scope_label == "full_notice":
+        blocks.append(_TextBlock("Scope note: This review covers the complete notice provided.", bullet=True))
+    elif scope_label:
+        blocks.append(_TextBlock("Scope note: Source scope is uncertain; findings are calibrated conservatively.", bullet=True))
 
     for finding in systemic_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
@@ -365,6 +372,8 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             blocks.append(_TextBlock(f"Secondary anchors: {', '.join(secondary_anchors)}", bullet=True))
         if finding.citation_summary_text:
             blocks.append(_TextBlock(f"Why flagged: {_sanitize_user_text(finding.citation_summary_text)}", bullet=True))
+        if finding.assertion_level:
+            blocks.append(_TextBlock(f"Assertion level: {finding.assertion_level}", bullet=True))
         if evidence_refs:
             blocks.append(_TextBlock(f"Evidence sections: {', '.join(evidence_refs[:4])}", bullet=True))
         if finding.gap_note:

@@ -169,6 +169,8 @@ export function FindingsPage() {
             <Detail label="Secondary anchors" value={selected.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
             <Detail label="Why flagged" value={selected.citation_summary_text ?? 'n/a'} />
             <Detail label="Evidence refs" value={selected.document_evidence_refs?.join(', ') ?? 'n/a'} />
+            <Detail label="Source scope" value={selected.source_scope ?? 'n/a'} />
+            <Detail label="Assertion level" value={selected.assertion_level ?? 'n/a'} />
             <Detail label="Legal requirement" value={selected.legal_requirement ?? 'n/a'} />
             <Detail label="Gap reasoning" value={selected.gap_reasoning ?? 'n/a'} />
             <Detail label="Severity rationale" value={selected.severity_rationale ?? 'n/a'} />

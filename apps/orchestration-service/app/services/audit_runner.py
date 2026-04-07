@@ -375,6 +375,13 @@ class LegalQualification(TypedDict):
     reason_rejected_articles_do_not_fit: str
 
 
+class CrossReference(TypedDict):
+    referenced_topic: str
+    referenced_section_label: str
+    reference_text: str
+    section_present_in_reviewed_source: str
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
 
@@ -768,6 +775,76 @@ def _contains_any(text: str, signals: Iterable[str]) -> bool:
 
 def _section_context_signals(section: SectionData) -> str:
     return _norm(f"{section.section_title} {section.content[:1200]}")
+
+
+def _extract_notice_cross_references(sections: list[SectionData]) -> list[CrossReference]:
+    visible_section_numbers: set[str] = set()
+    section_num_re = re.compile(r"\bsection\s+(\d+[a-z]?)\b", re.IGNORECASE)
+    for section in sections:
+        title = _norm(section.section_title)
+        visible_section_numbers.update(section_num_re.findall(title))
+        if re.match(r"^\d+[a-z]?(?:\.\d+)?", title):
+            visible_section_numbers.add(re.match(r"^\d+[a-z]?", title).group(0))  # type: ignore[union-attr]
+
+    references: list[CrossReference] = []
+    topic_tokens = {
+        "rights": {"rights", "access", "rectification", "erasure", "complaint"},
+        "retention": {"retention", "storage", "kept"},
+        "legal_basis": {"legal basis", "lawful basis"},
+        "controller_contact": {"controller", "contact", "details"},
+        "transfer": {"transfer", "third country", "outside eea"},
+    }
+    for section in sections:
+        content = section.content
+        for sentence in re.split(r"(?<=[.!?])\s+", content):
+            lowered = _norm(sentence)
+            if "section" not in lowered:
+                continue
+            for match in section_num_re.finditer(lowered):
+                sec = match.group(1)
+                topic = "general"
+                for topic_name, tokens in topic_tokens.items():
+                    if any(t in lowered for t in tokens):
+                        topic = topic_name
+                        break
+                references.append(
+                    CrossReference(
+                        referenced_topic=topic,
+                        referenced_section_label=f"Section {sec}",
+                        reference_text=sentence.strip()[:260],
+                        section_present_in_reviewed_source="yes" if sec in visible_section_numbers else "no",
+                    )
+                )
+    return references
+
+
+def _source_scope_qualification(sections: list[SectionData], references: list[CrossReference]) -> tuple[str, float, list[str]]:
+    unseen = [r["referenced_section_label"] for r in references if r["section_present_in_reviewed_source"] == "no"]
+    if unseen:
+        return "partial_notice_excerpt", 0.9, sorted(list(dict.fromkeys(unseen)))
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+    if "..." in corpus or any(_section_context_signals(s).endswith(("and", "or", ",")) for s in sections):
+        return "partial_notice_excerpt", 0.72, []
+    numbered_titles = [s.section_title.strip() for s in sections if re.match(r"^\d+", s.section_title.strip())]
+    if numbered_titles and len(numbered_titles) < 3:
+        return "uncertain_scope", 0.55, []
+    return "full_notice", 0.82, []
+
+
+def _issue_has_unseen_reference(issue_id: str, refs: list[CrossReference]) -> bool:
+    topic_map = {
+        "missing_legal_basis": "legal_basis",
+        "missing_retention_period": "retention",
+        "missing_rights_notice": "rights",
+        "missing_complaint_right": "rights",
+        "missing_controller_identity": "controller_contact",
+        "missing_transfer_notice": "transfer",
+    }
+    wanted = topic_map.get(issue_id, "general")
+    for ref in refs:
+        if ref["section_present_in_reviewed_source"] == "no" and (ref["referenced_topic"] in {wanted, "general"}):
+            return True
+    return False
 
 
 def _preferred_articles_for_section(section: SectionData, document_mode: str) -> set[int]:
@@ -1989,6 +2066,10 @@ def _build_systemic_support(
     audit_id: str,
     sections: list[SectionData],
     obligation_map: dict[str, bool],
+    source_scope: str,
+    source_scope_confidence: float,
+    unseen_sections: list[str],
+    cross_references: list[CrossReference],
 ) -> None:
     systemic_rows = db.query(Finding).filter(Finding.audit_id == audit_id).filter(Finding.finding_type == "systemic").all()
     if not systemic_rows:
@@ -2015,6 +2096,9 @@ def _build_systemic_support(
         row.citation_summary_text = summary
         row.omission_basis = "true" if omission_basis else "false"
         row.support_complete = "true" if support_valid else "false"
+        row.source_scope = source_scope
+        row.source_scope_confidence = source_scope_confidence
+        row.referenced_unseen_sections = _serialize_json_list(unseen_sections)
 
         existing_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
         if existing_count == 0:
@@ -2026,6 +2110,39 @@ def _build_systemic_support(
                 existing_count = copied
 
         publishable = bool(primary) and bool(refs) and bool(summary.strip()) and support_valid and existing_count > 0
+        unseen_reference_for_issue = _issue_has_unseen_reference(issue_id, cross_references)
+        excerpt_limited = source_scope in {"partial_notice_excerpt", "uncertain_scope"}
+        if excerpt_limited and unseen_reference_for_issue:
+            row.classification = "referenced_but_unseen"
+            row.assertion_level = "referenced_but_unseen"
+            row.status = "partial"
+            row.confidence_overall = min(row.confidence_overall or 0.65, 0.65)
+            row.confidence_synthesis = min(row.confidence_synthesis or 0.65, 0.65)
+            row.confidence_level = "medium"
+            row.missing_from_document = "unknown"
+            row.not_visible_in_excerpt = "yes"
+            row.gap_note = (
+                "The reviewed excerpt refers to a later section for this topic, but that section was not included in the material reviewed."
+            )
+            row.citation_summary_text = (
+                "Excerpt-limited assessment: topic is cross-referenced to unseen section(s); full-document compliance cannot be confirmed."
+            )
+        elif excerpt_limited:
+            row.assertion_level = "excerpt_limited_gap"
+            row.confidence_overall = min(row.confidence_overall or 0.65, 0.65)
+            row.confidence_synthesis = min(row.confidence_synthesis or 0.65, 0.65)
+            row.confidence_level = "medium"
+            row.missing_from_document = "unknown"
+            row.not_visible_in_excerpt = "yes"
+            if row.gap_note:
+                row.gap_note = f"The reviewed excerpt does not show: {row.gap_note}"
+            if row.classification == "systemic_violation":
+                row.classification = "probable_gap"
+        else:
+            row.assertion_level = "confirmed_document_gap"
+            row.missing_from_document = "yes"
+            row.not_visible_in_excerpt = "no"
+
         if not publishable:
             row.publish_flag = "no"
             row.finding_type = "supporting_evidence"
@@ -2036,7 +2153,8 @@ def _build_systemic_support(
         else:
             row.publish_flag = "yes"
             row.finding_type = "systemic"
-            row.classification = "systemic_violation"
+            if row.classification not in {"referenced_but_unseen", "probable_gap"}:
+                row.classification = "systemic_violation"
             row.support_complete = "true"
     db.commit()
 
@@ -2072,7 +2190,7 @@ def _has_issue_outcome(rows: list[Finding], issue_type: str) -> bool:
         issue = _finding_issue_id(row)
         if issue != issue_type:
             continue
-        if row.classification in {"systemic_violation", "diagnostic_internal_only", "not_assessable"}:
+        if row.classification in {"systemic_violation", "diagnostic_internal_only", "not_assessable", "referenced_but_unseen", "probable_gap"}:
             return True
     return False
 
@@ -2093,11 +2211,18 @@ def _enforce_core_and_specialist_completeness(
             r.section_id.startswith("systemic:")
             and _finding_issue_id(r) == issue_type
             and r.publish_flag == "yes"
-            and r.classification == "systemic_violation"
+            and r.classification in {"systemic_violation", "probable_gap", "referenced_but_unseen"}
+            for r in rows
+        )
+        referenced_unseen = any(
+            r.section_id.startswith("systemic:")
+            and _finding_issue_id(r) == issue_type
+            and r.publish_flag == "yes"
+            and r.classification == "referenced_but_unseen"
             for r in rows
         )
         if published_gap:
-            duty_disposition[duty] = "present_and_gap_found"
+            duty_disposition[duty] = "referenced_but_unseen" if referenced_unseen else "present_and_gap_found"
             continue
         if present is True:
             duty_disposition[duty] = "present_and_satisfied"
@@ -2256,6 +2381,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
     sections = ingestion.get_sections(audit.document_id)
     audit_sections_total.inc(len(sections))
+    cross_references = _extract_notice_cross_references(sections)
+    source_scope, source_scope_confidence, unseen_sections = _source_scope_qualification(sections, cross_references)
     document_mode = _infer_document_mode(sections)
     posture = _document_posture_agent(sections, document_mode)
     obligation_map = _build_document_obligation_map(sections)
@@ -2816,7 +2943,16 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     if document_mode == "privacy_notice":
         _add_notice_level_synthesis(db, audit.id, obligation_map)
     _add_systemic_issue_synthesis(db, audit.id)
-    _build_systemic_support(db, audit.id, sections, obligation_map)
+    _build_systemic_support(
+        db,
+        audit.id,
+        sections,
+        obligation_map,
+        source_scope,
+        source_scope_confidence,
+        unseen_sections,
+        cross_references,
+    )
     _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
     _partner_review_pass(db, audit.id)
 

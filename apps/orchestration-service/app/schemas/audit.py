@@ -46,6 +46,10 @@ class FindingOut(BaseModel):
     citation_summary_text: str | None = None
     support_complete: bool | None = None
     omission_basis: bool | None = None
+    source_scope: str | None = None
+    source_scope_confidence: float | None = None
+    referenced_unseen_sections: list[str] | None = None
+    assertion_level: str | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

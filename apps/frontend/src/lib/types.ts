@@ -58,6 +58,10 @@ export type FindingOut = {
   citation_summary_text?: string | null
   support_complete?: boolean | null
   omission_basis?: boolean | null
+  source_scope?: 'full_notice' | 'partial_notice_excerpt' | 'uncertain_scope' | null
+  source_scope_confidence?: number | null
+  referenced_unseen_sections?: string[] | null
+  assertion_level?: 'confirmed_document_gap' | 'excerpt_limited_gap' | 'referenced_but_unseen' | 'not_assessable' | null
   legal_requirement?: string | null
   gap_reasoning?: string | null
   severity_rationale?: string | null

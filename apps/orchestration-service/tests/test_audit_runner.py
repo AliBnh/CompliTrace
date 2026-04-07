@@ -45,6 +45,9 @@ from app.services.audit_runner import (
     _systemic_evidence_refs,
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
+    _extract_notice_cross_references,
+    _source_scope_qualification,
+    _issue_has_unseen_reference,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, Finding
@@ -379,6 +382,42 @@ def test_core_duty_completeness_records_suppression_ledger():
     ledger_rows = db.query(Finding).filter(Finding.section_id.like("ledger:%")).all()
     assert ledger_rows
     assert any("core_duty_completeness_gate" in (row.legal_requirement or "") for row in ledger_rows)
+
+
+def test_extract_cross_references_detects_unseen_section():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="Section 1 Scope",
+            content="Data subject rights are described in Section 10 of this notice.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    refs = _extract_notice_cross_references(sections)
+    assert refs
+    assert refs[0]["section_present_in_reviewed_source"] == "no"
+    assert refs[0]["referenced_topic"] == "rights"
+
+
+def test_source_scope_qualification_marks_partial_when_unseen_refs_exist():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="Section 1 Scope",
+            content="Retention periods are described in Section 9.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    refs = _extract_notice_cross_references(sections)
+    scope, confidence, unseen = _source_scope_qualification(sections, refs)
+    assert scope == "partial_notice_excerpt"
+    assert confidence >= 0.8
+    assert "Section 9" in unseen
+    assert _issue_has_unseen_reference("missing_retention_period", refs) is True
 
 
 def test_collection_mode_direct_from_form_language():

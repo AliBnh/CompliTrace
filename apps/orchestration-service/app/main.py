@@ -99,6 +99,10 @@ def _ensure_findings_columns() -> None:
             "citation_summary_text": "ALTER TABLE findings ADD COLUMN citation_summary_text TEXT",
             "support_complete": "ALTER TABLE findings ADD COLUMN support_complete VARCHAR(8)",
             "omission_basis": "ALTER TABLE findings ADD COLUMN omission_basis VARCHAR(8)",
+            "source_scope": "ALTER TABLE findings ADD COLUMN source_scope VARCHAR(32)",
+            "source_scope_confidence": "ALTER TABLE findings ADD COLUMN source_scope_confidence DOUBLE PRECISION",
+            "referenced_unseen_sections": "ALTER TABLE findings ADD COLUMN referenced_unseen_sections TEXT",
+            "assertion_level": "ALTER TABLE findings ADD COLUMN assertion_level VARCHAR(32)",
         }
         for column_name, ddl in column_ddls.items():
             if column_name not in columns:
