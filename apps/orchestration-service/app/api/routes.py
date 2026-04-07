@@ -44,6 +44,14 @@ def _deserialize_bool_flag(raw: str | None) -> bool | None:
     return raw.lower() == "true"
 
 
+def _issue_from_finding_section(section_id: str) -> str | None:
+    if section_id.startswith("systemic:"):
+        return section_id.split("systemic:", 1)[1]
+    if section_id.startswith("ledger:"):
+        return "completeness_or_suppression_ledger"
+    return None
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -249,14 +257,23 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
     findings = db.scalars(
         select(Finding)
         .where(Finding.audit_id == audit_id)
-        .where(Finding.publication_state == "publishable")
-        .where(Finding.finding_level.in_(["local", "systemic"]))
+        .where(
+            (Finding.publication_state == "publishable")
+            | (
+                (Finding.publication_state.in_(["blocked", "internal_only"]))
+                & (Finding.legal_requirement.is_not(None))
+            )
+        )
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     analysis_rows = db.scalars(
         select(AuditAnalysisItem)
         .where(AuditAnalysisItem.audit_id == audit_id)
-        .where(AuditAnalysisItem.analysis_type.in_(["completeness_outcome", "referenced_but_unseen", "not_assessable_core_duty"]))
+        .where(
+            AuditAnalysisItem.analysis_type.in_(
+                ["completeness_outcome", "referenced_but_unseen", "not_assessable_core_duty", "support_evidence", "excerpt_scope_fact"]
+            )
+        )
         .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
     ).all()
     if not findings and not analysis_rows:
@@ -269,11 +286,14 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             item_kind="finding",
             id=row.id,
             section_id=row.section_id,
+            issue_type=_issue_from_finding_section(row.section_id),
             status=row.status,
             classification=row.classification,
             artifact_role=row.artifact_role,
             finding_level=row.finding_level,
             publication_state=row.publication_state,
+            suppression_reason=row.gap_note if row.publication_state in {"blocked", "internal_only"} else None,
+            completeness_map=row.legal_requirement if row.legal_requirement and "completeness" in row.legal_requirement else None,
             gap_note=row.gap_note,
             remediation_note=row.remediation_note,
         )
@@ -284,11 +304,14 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             item_kind="analysis",
             id=row.id,
             section_id=row.section_id,
+            issue_type=row.issue_type,
             status=row.status_candidate,
             classification=row.classification_candidate,
             artifact_role=row.artifact_role,
             finding_level=row.finding_level_candidate,
             publication_state=row.publication_state_candidate,
+            suppression_reason=row.suppression_reason,
+            completeness_map=row.retrieval_summary if row.analysis_type == "completeness_outcome" else None,
             gap_note=row.gap_note,
             remediation_note=row.remediation_note,
         )

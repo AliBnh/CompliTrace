@@ -279,7 +279,10 @@ function ReviewDetail({ item }: { item: ReviewItemOut }) {
         {item.publication_state && <Pill value={item.publication_state} />}
       </div>
       <Detail label="Classification" value={item.classification ?? 'n/a'} />
+      <Detail label="Issue type" value={item.issue_type ?? 'n/a'} />
       <Detail label="Finding level" value={item.finding_level ?? 'n/a'} />
+      <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
+      <Detail label="Completeness map" value={item.completeness_map ?? 'n/a'} />
       <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
       <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
     </>

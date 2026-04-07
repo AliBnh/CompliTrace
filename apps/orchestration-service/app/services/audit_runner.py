@@ -576,17 +576,6 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
     for issue, signals, level in patterns:
         hits = sum(1 for s in signals if s in text)
         if hits == 0:
-            if issue.startswith("missing_") and _is_notice_disclosure_section(section):
-                candidates.append(
-                    CandidateIssue(
-                        candidate_issue_type=issue,
-                        evidence_text=section.content[:200],
-                        evidence_strength=0.45,
-                        local_or_document_level=level,
-                        possible_collection_mode=collection_mode,
-                        is_visible_gap=False,
-                    )
-                )
             continue
         candidates.append(
             CandidateIssue(
@@ -598,6 +587,46 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
                 is_visible_gap=hits > 0,
             )
         )
+    # Family-first fallback for notice disclosure sections: avoid defaulting to controller identity.
+    if not candidates and _is_notice_disclosure_section(section):
+        fallback_issue = "missing_legal_basis"
+        if any(t in text for t in {"profil", "automated", "score", "segmentation"}):
+            fallback_issue = "profiling_disclosure_gap"
+        elif any(t in text for t in {"transfer", "third country", "outside the eea"}):
+            fallback_issue = "missing_transfer_notice"
+        elif any(t in text for t in {"processor", "on behalf of"}):
+            fallback_issue = "controller_processor_role_ambiguity"
+        elif any(t in text for t in {"partner", "affiliate", "broker", "source", "indirect"}):
+            fallback_issue = "article_14_indirect_collection_gap"
+        elif any(t in text for t in {"retention", "storage period", "kept for"}):
+            fallback_issue = "missing_retention"
+        elif any(t in text for t in {"rights", "access", "erasure", "rectification", "objection"}):
+            fallback_issue = "missing_rights_information"
+        elif any(t in text for t in {"supervisory authority", "complaint"}):
+            fallback_issue = "missing_complaint_right"
+        candidates.append(
+            CandidateIssue(
+                candidate_issue_type=fallback_issue,
+                evidence_text=section.content[:220],
+                evidence_strength=0.42,
+                local_or_document_level="local",
+                possible_collection_mode=collection_mode,
+                is_visible_gap=False,
+            )
+        )
+    priority = [
+        "profiling_disclosure_gap",
+        "missing_transfer_notice",
+        "article_14_indirect_collection_gap",
+        "controller_processor_role_ambiguity",
+        "missing_legal_basis",
+        "missing_retention",
+        "missing_rights_information",
+        "missing_complaint_right",
+        "missing_controller_identity",
+    ]
+    rank = {name: idx for idx, name in enumerate(priority)}
+    candidates.sort(key=lambda c: (rank.get(c["candidate_issue_type"], 999), -(c["evidence_strength"] or 0.0)))
     return candidates[:6]
 
 
@@ -611,6 +640,7 @@ def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
         "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V support.", "Article 15 access right is not transfer notice anchor."),
         "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "21"], ["22"], "Profiling transparency starts with notice disclosure paragraphs.", "Article 22 is conditional on effects threshold."),
         "special_category_basis_unclear": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"], "Special-category processing requires Article 9 condition.", "Article 21 is not lawful condition for special-category processing."),
+        "article_14_indirect_collection_gap": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"], "Indirect collection must be disclosed under Article 14 obligations.", "Article 13 applies to direct collection context."),
         "controller_processor_role_ambiguity": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"], "Role clarity is transparency duty in notice context.", "Article 28 only applies where processor-contract obligations are in scope."),
     }
     primary, secondary, rejected, reason_fit, reason_reject = mapping.get(
@@ -822,13 +852,20 @@ def _source_scope_qualification(sections: list[SectionData], references: list[Cr
     unseen = [r["referenced_section_label"] for r in references if r["section_present_in_reviewed_source"] == "no"]
     if unseen:
         return "partial_notice_excerpt", 0.9, sorted(list(dict.fromkeys(unseen)))
+    # Any forward/cross reference introduces uncertainty that this excerpt is self-contained.
+    if references:
+        return "uncertain_scope", 0.64, []
     corpus = " ".join(_section_context_signals(s) for s in sections)
     if "..." in corpus or any(_section_context_signals(s).endswith(("and", "or", ",")) for s in sections):
         return "partial_notice_excerpt", 0.72, []
     numbered_titles = [s.section_title.strip() for s in sections if re.match(r"^\d+", s.section_title.strip())]
     if numbered_titles and len(numbered_titles) < 3:
         return "uncertain_scope", 0.55, []
-    return "full_notice", 0.82, []
+    parser_completeness_confidence = min(0.98, 0.45 + (len(sections) * 0.06))
+    # Full-notice is only allowed under strict completeness signals.
+    if parser_completeness_confidence >= 0.86:
+        return "full_notice", round(parser_completeness_confidence, 2), []
+    return "uncertain_scope", round(max(0.6, parser_completeness_confidence - 0.1), 2), []
 
 
 def _issue_has_unseen_reference(issue_id: str, refs: list[CrossReference]) -> bool:
@@ -2112,7 +2149,8 @@ def _build_systemic_support(
         publishable = bool(primary) and bool(refs) and bool(summary.strip()) and support_valid and existing_count > 0
         unseen_reference_for_issue = _issue_has_unseen_reference(issue_id, cross_references)
         excerpt_limited = source_scope in {"partial_notice_excerpt", "uncertain_scope"}
-        if excerpt_limited and unseen_reference_for_issue:
+        # Cross-reference contradiction gate: unseen references block confirmed-document assertions.
+        if unseen_reference_for_issue:
             row.classification = "referenced_but_unseen"
             row.assertion_level = "referenced_but_unseen"
             row.status = "partial"
@@ -2202,6 +2240,7 @@ def _enforce_core_and_specialist_completeness(
     obligation_map: dict[str, bool],
 ) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    valid_core_dispositions = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
     duty_disposition: dict[str, str] = {}
 
     for duty, issue_type in CORE_DUTY_TO_ISSUE.items():
@@ -2222,17 +2261,17 @@ def _enforce_core_and_specialist_completeness(
             for r in rows
         )
         if published_gap:
-            duty_disposition[duty] = "referenced_but_unseen" if referenced_unseen else "present_and_gap_found"
+            duty_disposition[duty] = "referenced_but_unseen" if referenced_unseen else "gap"
             continue
         if present is True:
-            duty_disposition[duty] = "present_and_satisfied"
+            duty_disposition[duty] = "satisfied"
             continue
         if present is False:
             reason = f"{obligation_key}=not_visible while no publishable systemic finding survived validators"
-            duty_disposition[duty] = f"not_assessable_with_reason:{reason}"
+            duty_disposition[duty] = "not_assessable"
             _record_suppression_ledger(db, audit_id, issue_type, reason, "core_duty_completeness_gate", reason)
             continue
-        duty_disposition[duty] = "not_assessable_with_reason:insufficient obligation-map signal"
+        duty_disposition[duty] = "not_assessable"
         _record_suppression_ledger(
             db,
             audit_id,
@@ -2242,12 +2281,14 @@ def _enforce_core_and_specialist_completeness(
             "duty has no boolean presence signal",
         )
 
-    unresolved = [duty for duty, result in duty_disposition.items() if not result]
+    unresolved = [duty for duty in CORE_DUTY_TO_ISSUE if duty_disposition.get(duty) not in valid_core_dispositions]
     if unresolved:
         for row in rows:
             if row.section_id.startswith("systemic:"):
                 row.publish_flag = "no"
                 row.classification = "diagnostic_internal_only"
+                row.publication_state = "blocked"
+                row.artifact_role = "support_only"
         _record_suppression_ledger(
             db,
             audit_id,

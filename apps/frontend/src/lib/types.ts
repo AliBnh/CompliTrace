@@ -101,11 +101,14 @@ export type ReviewItemOut = {
   item_kind: 'finding' | 'analysis'
   id: UUID
   section_id: string
+  issue_type?: string | null
   status?: string | null
   classification?: string | null
   artifact_role?: string | null
   finding_level?: string | null
   publication_state?: string | null
+  suppression_reason?: string | null
+  completeness_map?: string | null
   gap_note?: string | null
   remediation_note?: string | null
 }

@@ -142,10 +142,13 @@ class ReviewItemOut(BaseModel):
     item_kind: str
     id: str
     section_id: str
+    issue_type: str | None = None
     status: str | None = None
     classification: str | None = None
     artifact_role: str | None = None
     finding_level: str | None = None
     publication_state: str | None = None
+    suppression_reason: str | None = None
+    completeness_map: str | None = None
     gap_note: str | None = None
     remediation_note: str | None = None
