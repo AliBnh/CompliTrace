@@ -19,7 +19,11 @@ export function FindingsPage() {
   const [analysisItems, setAnalysisItems] = useState<AnalysisItemOut[]>([])
   const [reviewItems, setReviewItems] = useState<ReviewItemOut[]>([])
   const [sectionsById, setSectionsById] = useState<Record<string, SectionOut>>({})
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedByView, setSelectedByView] = useState<Record<'published' | 'review' | 'analysis', string | null>>({
+    published: null,
+    review: null,
+    analysis: null,
+  })
   const [viewMode, setViewMode] = useState<'published' | 'review' | 'analysis'>('published')
   const [status, setStatus] = useState<string>('pending')
   const [error, setError] = useState<string | null>(null)
@@ -59,7 +63,6 @@ export function FindingsPage() {
         setFindings(publishedRows)
         setReviewItems(reviewRows)
         setAnalysisItems(analysisRows)
-        setSelectedId((previous) => previous ?? publishedRows[0]?.id ?? reviewRows[0]?.id ?? analysisRows[0]?.id ?? null)
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load findings')
       }
@@ -86,35 +89,40 @@ export function FindingsPage() {
   }, [findings, sectionsById])
 
   const orderedReviewItems = useMemo(() => {
-    return [...reviewItems].sort((a, b) => a.id.localeCompare(b.id))
+    return [...reviewItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
   }, [reviewItems])
 
   const orderedAnalysisItems = useMemo(() => {
-    return [...analysisItems].sort((a, b) => a.id.localeCompare(b.id))
+    return [...analysisItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
   }, [analysisItems])
 
   const activeRows = viewMode === 'published' ? orderedFindings : viewMode === 'review' ? orderedReviewItems : orderedAnalysisItems
+  const selectedId = selectedByView[viewMode]
   const selectedPublished = viewMode === 'published' ? orderedFindings.find((f) => f.id === selectedId) ?? null : null
   const selectedReview = viewMode === 'review' ? orderedReviewItems.find((r) => r.id === selectedId) ?? null : null
   const selectedAnalysis = viewMode === 'analysis' ? orderedAnalysisItems.find((r) => r.id === selectedId) ?? null : null
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    for (const finding of orderedFindings) base[finding.status] += 1
+    for (const row of activeRows) {
+      const status = rowStatus(row)
+      if (status in base) base[status] += 1
+    }
     return base
-  }, [orderedFindings])
+  }, [activeRows])
 
   useEffect(() => {
-    setSelectedId((current) => {
-      if (!activeRows.length) return null
-      if (current && activeRows.some((row) => row.id === current)) return current
-      return activeRows[0].id
+    setSelectedByView((current) => {
+      const existing = current[viewMode]
+      if (!activeRows.length) return { ...current, [viewMode]: null }
+      if (existing && activeRows.some((row) => row.id === existing)) return current
+      return { ...current, [viewMode]: activeRows[0].id }
     })
   }, [viewMode, activeRows])
 
   if (!auditId) return <EmptyState message="No audit in progress. Trigger an audit from Sections page." />
 
   return (
-    <section className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
+    <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
       <div>
         <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -140,7 +148,7 @@ export function FindingsPage() {
           )}
           <div className="flex flex-wrap gap-2 text-xs">
             {Object.entries(counts).map(([label, count]) => (
-              <span key={label} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-slate-600">
+              <span key={label} className={`rounded-full border px-3 py-1 ${countChipClass(label as FindingOut['status'])}`}>
                 {label}: {count}
               </span>
             ))}
@@ -154,9 +162,9 @@ export function FindingsPage() {
 
         {error && <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
 
-        <div className="surface-card overflow-hidden">
+        <div className="surface-card overflow-hidden border border-slate-200/70 shadow-xl shadow-slate-300/30">
           <table className="w-full text-sm">
-            <thead className="bg-slate-100 text-left text-slate-600">
+            <thead className="bg-slate-100/90 text-left text-slate-600">
               <tr>
                 <th className="px-4 py-3">Section</th>
                 <th className="px-4 py-3">Status</th>
@@ -169,8 +177,8 @@ export function FindingsPage() {
                 return (
                   <tr
                     key={finding.id}
-                    onClick={() => setSelectedId(finding.id)}
-                    className={`cursor-pointer border-t border-slate-200 hover:bg-slate-50 ${selectedId === finding.id ? 'bg-cyan-50' : ''}`}
+                    onClick={() => setSelectedByView((current) => ({ ...current, [viewMode]: finding.id }))}
+                    className={`cursor-pointer border-t border-slate-200 hover:bg-slate-50 ${selectedId === finding.id ? 'bg-cyan-50' : 'bg-white'} transition-colors`}
                   >
                     <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
                     <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
@@ -183,7 +191,7 @@ export function FindingsPage() {
         </div>
       </div>
 
-      <aside className="surface-card p-5">
+      <aside className="surface-card sticky top-6 h-fit border border-slate-200/70 p-6 shadow-xl shadow-slate-300/30">
         {!selectedPublished && !selectedReview && !selectedAnalysis ? (
           <p className="text-slate-600">Select a finding to inspect full details.</p>
         ) : (
@@ -329,7 +337,20 @@ function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
 }
 
 function Pill({ value }: { value: string }) {
-  return <span className="rounded-full border border-slate-300 bg-slate-100 px-2 py-1 text-xs text-slate-700">{value}</span>
+  const token = value.toLowerCase()
+  let tone = 'border-slate-300 bg-slate-100 text-slate-700'
+  if (token.includes('support_only') || token.includes('internal_only')) tone = 'border-sky-300 bg-sky-50 text-sky-700'
+  if (token.includes('publishable') || token.includes('systemic')) tone = 'border-emerald-300 bg-emerald-50 text-emerald-700'
+  if (token.includes('candidate') || token.includes('probable')) tone = 'border-amber-300 bg-amber-50 text-amber-700'
+  if (token.includes('gap') || token.includes('blocked')) tone = 'border-rose-300 bg-rose-50 text-rose-700'
+  return <span className={`rounded-full border px-2 py-1 text-xs ${tone}`}>{value}</span>
+}
+
+function countChipClass(status: FindingOut['status']): string {
+  if (status === 'gap') return 'border-rose-300 bg-rose-50 text-rose-700'
+  if (status === 'partial' || status === 'needs review') return 'border-amber-300 bg-amber-50 text-amber-700'
+  if (status === 'compliant') return 'border-emerald-300 bg-emerald-50 text-emerald-700'
+  return 'border-slate-300 bg-slate-100 text-slate-700'
 }
 
 function EmptyState({ message }: { message: string }) {
