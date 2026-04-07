@@ -258,6 +258,12 @@ def _decode_json_list(raw: str | None) -> list[str]:
     return [str(item) for item in parsed]
 
 
+def _is_publishable_finding(row: Finding) -> bool:
+    if row.publication_state:
+        return row.publication_state == "publishable"
+    return row.publish_flag == "yes"
+
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -274,8 +280,16 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         .where(Finding.audit_id == audit_id)
         .order_by(Finding.section_id.asc())
     ).all()
-    systemic_findings = [f for f in findings if f.finding_type == "systemic" and f.publish_flag == "yes"]
-    publishable_findings = [f for f in findings if f.finding_type == "local" and f.publish_flag == "yes"]
+    systemic_findings = [
+        f
+        for f in findings
+        if _is_publishable_finding(f) and (f.finding_level == "systemic" or f.finding_type == "systemic")
+    ]
+    publishable_findings = [
+        f
+        for f in findings
+        if _is_publishable_finding(f) and (f.finding_level == "local" or f.finding_type == "local")
+    ]
     not_assessable_findings = [f for f in publishable_findings if f.classification == "not_assessable"]
     publishable_local_findings = [f for f in publishable_findings if f.classification != "not_assessable"]
 
@@ -430,7 +444,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
                 blocks.append(_TextBlock(f"Missing context to resolve: {finding.missing_fact_if_unresolved}", bullet=True))
             if finding.remediation_note:
                 blocks.append(_TextBlock(f"Next step: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
-    roadmap_items = [f for f in findings if f.publish_flag == "yes" and f.remediation_note]
+    roadmap_items = [f for f in findings if _is_publishable_finding(f) and f.remediation_note]
     if roadmap_items:
         blocks.append(_TextBlock("Prioritized Remediation Roadmap", font_size=13, top_gap=14))
         for finding in sorted(roadmap_items, key=lambda row: {"high": 0, "medium": 1, "low": 2}.get((row.severity or "low"), 3)):

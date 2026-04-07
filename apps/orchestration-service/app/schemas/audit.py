@@ -19,6 +19,9 @@ class FindingOut(BaseModel):
     classification: str | None = None
     finding_type: str | None = None
     publish_flag: str | None = None
+    artifact_role: str | None = None
+    finding_level: str | None = None
+    publication_state: str | None = None
     confidence: float | None = None
     confidence_evidence: float | None = None
     confidence_applicability: float | None = None
@@ -82,3 +85,34 @@ class ReportOut(BaseModel):
 class ReportTriggerOut(BaseModel):
     report_id: str
     status: str
+
+
+class AnalysisCitationOut(BaseModel):
+    chunk_id: str
+    article_number: str
+    paragraph_ref: str | None
+    article_title: str
+    excerpt: str
+
+
+class AnalysisItemOut(BaseModel):
+    id: str
+    section_id: str
+    analysis_type: str
+    analysis_outcome: str
+    candidate_issue: str | None = None
+    qualification_summary: str | None = None
+    evidence_sufficiency: str | None = None
+    applicability: str | None = None
+    contradiction_status: str | None = None
+    citation_fit: str | None = None
+    support_role: str | None = None
+    excerpt_scope_facts: str | None = None
+    suppression_reason: str | None = None
+    publishability_candidate: str
+    finding_status: str | None = None
+    finding_classification: str | None = None
+    finding_severity: str | None = None
+    gap_note: str | None = None
+    remediation_note: str | None = None
+    citations: list[AnalysisCitationOut]

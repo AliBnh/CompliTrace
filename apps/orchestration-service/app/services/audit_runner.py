@@ -11,7 +11,7 @@ from prometheus_client import Counter, Histogram
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.audit import Audit, Finding, FindingCitation
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, FindingCitation
 from app.services.clients import IngestionClient, KnowledgeClient, LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.services.llm import run_llm_classification
 
@@ -2285,6 +2285,10 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
     for row in rows:
         if row.finding_type is None:
             row.finding_type = "local"
+        if row.finding_type == "supporting_evidence":
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
         if row.publish_flag is None:
             row.publish_flag = "no" if row.status in {"not applicable", "needs review"} else "yes"
         if row.confidence_level is None:
@@ -2303,6 +2307,9 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             row.classification = "not_assessable"
             row.finding_type = "supporting_evidence"
             row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
             if row.gap_note:
                 row.gap_note = "Not assessable from provided excerpt; additional documentary context is required."
             row.remediation_note = "Provide complete notice excerpts and rerun legal qualification."
@@ -2311,6 +2318,9 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         if row.classification == "out_of_scope":
             row.publish_flag = "no"
             row.finding_type = "supporting_evidence"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
             continue
         if row.status not in {"gap", "partial"}:
             continue
@@ -2324,6 +2334,9 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             row.classification = "supporting_evidence"
             row.finding_type = "supporting_evidence"
             row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
             row.severity = None
             row.confidence = 0.7
             row.gap_note = f"Supporting evidence for systemic issue in section {seen_root_keys[key]}."
@@ -2345,15 +2358,28 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                 row.publish_flag = "yes" if support_ready else "no"
                 if not support_ready:
                     row.classification = "diagnostic_internal_only"
+                    row.artifact_role = "support_only"
+                    row.finding_level = "none"
+                    row.publication_state = "blocked"
+                else:
+                    row.artifact_role = "publishable_finding"
+                    row.finding_level = "systemic"
+                    row.publication_state = "publishable"
             else:
                 row.finding_type = "local"
                 row.publish_flag = "yes"
+                row.artifact_role = "publishable_finding"
+                row.finding_level = "local"
+                row.publication_state = "publishable"
             seen_root_keys[key] = row.section_id
         if key in CORE_NOTICE_SYSTEMIC_ISSUES and key in systemic_issue_keys and not row.section_id.startswith("systemic:"):
             row.status = "not applicable"
             row.classification = "supporting_evidence"
             row.finding_type = "supporting_evidence"
             row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
             row.severity = None
             row.confidence = max(row.confidence or 0.7, 0.7)
             row.gap_note = f"Supporting evidence for systemic notice-level issue '{key}'."
@@ -2363,6 +2389,73 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                 db.delete(row)
                 continue
             seen_supporting_pairs.add(pair)
+    db.commit()
+
+
+def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
+    db.query(AnalysisCitation).filter(
+        AnalysisCitation.analysis_item_id.in_(
+            db.query(AuditAnalysisItem.id).filter(AuditAnalysisItem.audit_id == audit_id)
+        )
+    ).delete(synchronize_session=False)
+    db.query(AuditAnalysisItem).filter(AuditAnalysisItem.audit_id == audit_id).delete(synchronize_session=False)
+
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    for row in rows:
+        publishable = row.publication_state == "publishable" if row.publication_state else row.publish_flag == "yes"
+        analysis = AuditAnalysisItem(
+            audit_id=audit_id,
+            section_id=row.section_id,
+            analysis_type=(
+                "support_evidence"
+                if row.finding_type == "supporting_evidence"
+                else "excerpt_scope_fact"
+                if row.classification == "referenced_but_unseen"
+                else "provisional_local"
+                if row.finding_type == "local"
+                else "candidate_issue"
+            ),
+            analysis_outcome=(
+                "filtered_out"
+                if row.classification == "out_of_scope"
+                else "contradiction_failed"
+                if row.classification == "diagnostic_internal_only"
+                else "excerpt_limited"
+                if row.classification == "referenced_but_unseen"
+                else "candidate_gap"
+                if row.status in {"gap", "partial"}
+                else "candidate_compliant"
+            ),
+            candidate_issue=_finding_issue_id(row),
+            qualification_summary=row.legal_requirement,
+            evidence_sufficiency="weak" if row.status == "needs review" else "sufficient",
+            applicability=row.applicability_status,
+            contradiction_status="failed" if row.classification == "diagnostic_internal_only" else "passed",
+            citation_fit="pass" if row.confidence_article_fit and row.confidence_article_fit >= 0.5 else "uncertain",
+            support_role=row.finding_type,
+            excerpt_scope_facts=row.referenced_unseen_sections,
+            suppression_reason=row.gap_note if not publishable else None,
+            publishability_candidate="yes" if publishable else "no",
+            finding_status=row.status,
+            finding_classification=row.classification,
+            finding_severity=row.severity,
+            gap_note=row.gap_note,
+            remediation_note=row.remediation_note,
+        )
+        db.add(analysis)
+        db.flush()
+        citations = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).all()
+        for citation in citations:
+            db.add(
+                AnalysisCitation(
+                    analysis_item_id=analysis.id,
+                    chunk_id=citation.chunk_id,
+                    article_number=citation.article_number,
+                    paragraph_ref=citation.paragraph_ref,
+                    article_title=citation.article_title,
+                    excerpt=citation.excerpt,
+                )
+            )
     db.commit()
 
 
@@ -2955,6 +3048,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     )
     _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
     _partner_review_pass(db, audit.id)
+    _snapshot_analysis_items(db, audit.id)
 
     audit.status = "complete"
     audit.completed_at = datetime.utcnow()

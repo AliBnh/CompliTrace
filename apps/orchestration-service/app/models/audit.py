@@ -44,6 +44,9 @@ class Finding(Base):
     confidence_overall: Mapped[float | None] = mapped_column(Float, nullable=True)
     finding_type: Mapped[str] = mapped_column(String(32), default="local")
     publish_flag: Mapped[str] = mapped_column(String(8), default="yes")
+    artifact_role: Mapped[str] = mapped_column(String(32), default="publishable_finding")
+    finding_level: Mapped[str] = mapped_column(String(16), default="local")
+    publication_state: Mapped[str] = mapped_column(String(16), default="publishable")
     missing_from_section: Mapped[str | None] = mapped_column(String(8), nullable=True)
     missing_from_document: Mapped[str | None] = mapped_column(String(8), nullable=True)
     not_visible_in_excerpt: Mapped[str | None] = mapped_column(String(8), nullable=True)
@@ -88,6 +91,47 @@ class FindingCitation(Base):
     excerpt: Mapped[str] = mapped_column(Text, default="")
 
     finding: Mapped[Finding] = relationship(back_populates="citations")
+
+
+class AuditAnalysisItem(Base):
+    __tablename__ = "audit_analysis_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    audit_id: Mapped[str] = mapped_column(String(36), ForeignKey("audits.id", ondelete="CASCADE"), index=True)
+    section_id: Mapped[str] = mapped_column(String(128), index=True)
+    analysis_type: Mapped[str] = mapped_column(String(64), default="provisional_local")
+    analysis_outcome: Mapped[str] = mapped_column(String(64), default="candidate_gap")
+    candidate_issue: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    qualification_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_sufficiency: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    applicability: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    contradiction_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    citation_fit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    support_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    excerpt_scope_facts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suppression_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publishability_candidate: Mapped[str] = mapped_column(String(16), default="unknown")
+    finding_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    finding_classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    finding_severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    gap_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remediation_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    citations: Mapped[list["AnalysisCitation"]] = relationship(back_populates="analysis_item", cascade="all, delete-orphan")
+
+
+class AnalysisCitation(Base):
+    __tablename__ = "analysis_citations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    analysis_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("audit_analysis_items.id", ondelete="CASCADE"), index=True)
+    chunk_id: Mapped[str] = mapped_column(String(128))
+    article_number: Mapped[str] = mapped_column(String(32))
+    paragraph_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    article_title: Mapped[str] = mapped_column(String(512), default="")
+    excerpt: Mapped[str] = mapped_column(Text, default="")
+
+    analysis_item: Mapped[AuditAnalysisItem] = relationship(back_populates="citations")
 
 
 class Report(Base):

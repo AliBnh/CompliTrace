@@ -7,9 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
-from app.models.audit import Audit, Finding, Report
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, Report
 from app.schemas.audit import (
     AuditCreate,
+    AnalysisCitationOut,
+    AnalysisItemOut,
     AuditOut,
     CitationOut,
     FindingOut,
@@ -79,7 +81,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
-        .where(Finding.publish_flag == "yes")
+        .where(Finding.publication_state == "publishable")
         .where(Finding.finding_type.in_(["local", "systemic"]))
         .where(Finding.classification.in_(["clear_non_compliance", "probable_gap", "not_assessable", "systemic_violation", "referenced_but_unseen"]))
         .order_by(Finding.section_id.asc(), Finding.id.asc())
@@ -104,6 +106,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 classification=row.classification,
                 finding_type=row.finding_type,
                 publish_flag=row.publish_flag,
+                artifact_role=row.artifact_role,
+                finding_level=row.finding_level,
+                publication_state=row.publication_state,
                 confidence=row.confidence,
                 confidence_evidence=row.confidence_evidence,
                 confidence_applicability=row.confidence_applicability,
@@ -150,6 +155,54 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
             )
         )
     return out
+
+
+@router.get("/audits/{audit_id}/analysis", response_model=list[AnalysisItemOut])
+def get_analysis(audit_id: str, db: Session = Depends(get_db)) -> list[AnalysisItemOut]:
+    rows = db.scalars(
+        select(AuditAnalysisItem)
+        .options(selectinload(AuditAnalysisItem.citations))
+        .where(AuditAnalysisItem.audit_id == audit_id)
+        .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
+    ).all()
+    if not rows:
+        audit = db.get(Audit, audit_id)
+        if not audit:
+            raise HTTPException(status_code=404, detail="Audit not found")
+    return [
+        AnalysisItemOut(
+            id=row.id,
+            section_id=row.section_id,
+            analysis_type=row.analysis_type,
+            analysis_outcome=row.analysis_outcome,
+            candidate_issue=row.candidate_issue,
+            qualification_summary=row.qualification_summary,
+            evidence_sufficiency=row.evidence_sufficiency,
+            applicability=row.applicability,
+            contradiction_status=row.contradiction_status,
+            citation_fit=row.citation_fit,
+            support_role=row.support_role,
+            excerpt_scope_facts=row.excerpt_scope_facts,
+            suppression_reason=row.suppression_reason,
+            publishability_candidate=row.publishability_candidate,
+            finding_status=row.finding_status,
+            finding_classification=row.finding_classification,
+            finding_severity=row.finding_severity,
+            gap_note=row.gap_note,
+            remediation_note=row.remediation_note,
+            citations=[
+                AnalysisCitationOut(
+                    chunk_id=c.chunk_id,
+                    article_number=c.article_number,
+                    paragraph_ref=c.paragraph_ref,
+                    article_title=c.article_title,
+                    excerpt=c.excerpt,
+                )
+                for c in row.citations
+            ],
+        )
+        for row in rows
+    ]
 
 
 @router.post("/audits/{audit_id}/report", response_model=ReportTriggerOut)
