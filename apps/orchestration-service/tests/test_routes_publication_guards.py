@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.routes import _sanitize_published_text, _sanitize_review_text, create_report, get_findings, get_review
+from app.api.routes import _sanitize_published_text, _sanitize_review_text, create_report, get_findings, get_review, get_review_grouped
 from app.db.base import Base
 from app.models.audit import Audit, Finding, FindingCitation
 
@@ -206,3 +206,32 @@ def test_get_review_includes_recipients_and_dpo_blocks_from_decision_map(db_sess
     families = {r.family for r in rows if r.item_kind == "review_block" and r.review_group == "specialist_families"}
     assert "recipients" in families
     assert "dpo_contact" in families
+
+
+def test_get_review_grouped_returns_expected_sections(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_legal_basis",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            publish_flag="yes",
+            publication_state="publishable",
+            finding_type="systemic",
+            artifact_role="publishable_finding",
+            finding_level="systemic",
+        )
+    )
+    db_session.commit()
+
+    grouped = get_review_grouped(audit.id, debug=False, db=db_session)
+    assert set(grouped.keys()) == {
+        "publication_blockers",
+        "core_duty_resolution",
+        "specialist_family_resolution",
+        "publishable_findings",
+        "internal_unresolved_items",
+        "diagnostics",
+    }

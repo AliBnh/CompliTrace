@@ -687,6 +687,48 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
     return out
 
 
+@router.get("/audits/{audit_id}/review/grouped")
+def get_review_grouped(audit_id: str, debug: bool = Query(default=False), db: Session = Depends(get_db)) -> dict[str, list[ReviewItemOut]]:
+    items = get_review(audit_id, debug=debug, db=db)
+    grouped: dict[str, list[ReviewItemOut]] = {
+        "publication_blockers": [],
+        "core_duty_resolution": [],
+        "specialist_family_resolution": [],
+        "publishable_findings": [],
+        "internal_unresolved_items": [],
+        "diagnostics": [],
+    }
+    for item in items:
+        if item.item_kind == "review_block" and item.review_group == "core_duties":
+            grouped["core_duty_resolution"].append(item)
+            if item.final_disposition not in {"satisfied", None}:
+                grouped["publication_blockers"].append(item)
+            continue
+        if item.item_kind == "review_block" and item.review_group == "specialist_families":
+            grouped["specialist_family_resolution"].append(item)
+            if item.final_disposition not in {"satisfied", None}:
+                grouped["publication_blockers"].append(item)
+            continue
+        if item.item_kind == "finding" and item.publication_state == "publishable":
+            grouped["publishable_findings"].append(item)
+            continue
+        if item.classification == "diagnostic_internal_only":
+            grouped["diagnostics"].append(item)
+            continue
+        if item.status in {"not applicable", "needs review"} or item.publication_state in {"blocked", "internal_only"}:
+            grouped["internal_unresolved_items"].append(item)
+            continue
+    if debug:
+        grouped["diagnostics"].extend(
+            [
+                item
+                for item in items
+                if item.item_kind in {"analysis", "finding"} and item not in grouped["diagnostics"]
+            ]
+        )
+    return grouped
+
+
 @router.post("/audits/{audit_id}/report", response_model=ReportTriggerOut)
 def create_report(audit_id: str, db: Session = Depends(get_db)) -> ReportTriggerOut:
     audit = db.get(Audit, audit_id)
