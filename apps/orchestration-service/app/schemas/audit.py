@@ -98,21 +98,54 @@ class AnalysisCitationOut(BaseModel):
 class AnalysisItemOut(BaseModel):
     id: str
     section_id: str
+    analysis_stage: str | None = None
     analysis_type: str
+    issue_type: str | None = None
+    status_candidate: str | None = None
+    classification_candidate: str | None = None
+    artifact_role: str | None = None
+    finding_level_candidate: str | None = None
+    publication_state_candidate: str | None = None
     analysis_outcome: str
     candidate_issue: str | None = None
+    policy_evidence_excerpt: str | None = None
+    legal_requirement_candidate: str | None = None
+    article_candidates: list[str] | None = None
+    retrieval_summary: str | None = None
     qualification_summary: str | None = None
     evidence_sufficiency: str | None = None
     applicability: str | None = None
+    citation_fit_status: str | None = None
+    applicability_status: str | None = None
     contradiction_status: str | None = None
     citation_fit: str | None = None
     support_role: str | None = None
+    source_scope: str | None = None
     excerpt_scope_facts: str | None = None
+    referenced_unseen_sections: list[str] | None = None
     suppression_reason: str | None = None
     publishability_candidate: str
+    confidence: float | None = None
+    confidence_evidence: float | None = None
+    confidence_applicability: float | None = None
+    confidence_article_fit: float | None = None
+    confidence_overall: float | None = None
     finding_status: str | None = None
     finding_classification: str | None = None
     finding_severity: str | None = None
     gap_note: str | None = None
     remediation_note: str | None = None
     citations: list[AnalysisCitationOut]
+
+
+class ReviewItemOut(BaseModel):
+    item_kind: str
+    id: str
+    section_id: str
+    status: str | None = None
+    classification: str | None = None
+    artifact_role: str | None = None
+    finding_level: str | None = None
+    publication_state: str | None = None
+    gap_note: str | None = None
+    remediation_note: str | None = None

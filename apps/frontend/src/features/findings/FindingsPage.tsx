@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
-import { getAudit, getFindings, getSections } from '../../lib/api'
-import type { FindingOut, SectionOut } from '../../lib/types'
+import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
+import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 const SYSTEMIC_LABELS: Record<string, string> = {
   missing_controller_identity: 'Missing controller identity disclosure',
@@ -16,8 +16,11 @@ const SYSTEMIC_LABELS: Record<string, string> = {
 export function FindingsPage() {
   const { auditId, documentId } = useAppState()
   const [findings, setFindings] = useState<FindingOut[]>([])
+  const [analysisItems, setAnalysisItems] = useState<AnalysisItemOut[]>([])
+  const [reviewItems, setReviewItems] = useState<ReviewItemOut[]>([])
   const [sectionsById, setSectionsById] = useState<Record<string, SectionOut>>({})
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<'published' | 'review' | 'analysis'>('published')
   const [status, setStatus] = useState<string>('pending')
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<number>(12)
@@ -47,10 +50,16 @@ export function FindingsPage() {
         } else if (audit.status === 'running' || audit.status === 'pending') {
           setProgress((previous) => Math.min(previous + Math.random() * 6 + 2, 92))
         }
-        const rows = await getFindings(currentAuditId)
+        const [publishedRows, reviewRows, analysisRows] = await Promise.all([
+          getFindings(currentAuditId),
+          getReview(currentAuditId),
+          getAnalysis(currentAuditId),
+        ])
         if (cancelled) return
-        setFindings(rows)
-        setSelectedId((previous) => previous ?? rows[0]?.id ?? null)
+        setFindings(publishedRows)
+        setReviewItems(reviewRows)
+        setAnalysisItems(analysisRows)
+        setSelectedId((previous) => previous ?? publishedRows[0]?.id ?? reviewRows[0]?.id ?? analysisRows[0]?.id ?? null)
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load findings')
       }
@@ -76,7 +85,17 @@ export function FindingsPage() {
     })
   }, [findings, sectionsById])
 
-  const selected = orderedFindings.find((f) => f.id === selectedId) ?? null
+  const orderedReviewItems = useMemo(() => {
+    return [...reviewItems].sort((a, b) => a.id.localeCompare(b.id))
+  }, [reviewItems])
+
+  const orderedAnalysisItems = useMemo(() => {
+    return [...analysisItems].sort((a, b) => a.id.localeCompare(b.id))
+  }, [analysisItems])
+
+  const selectedPublished = orderedFindings.find((f) => f.id === selectedId) ?? null
+  const selectedReview = orderedReviewItems.find((r) => r.id === selectedId) ?? null
+  const selectedAnalysis = orderedAnalysisItems.find((r) => r.id === selectedId) ?? null
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
     for (const finding of orderedFindings) base[finding.status] += 1
@@ -88,7 +107,7 @@ export function FindingsPage() {
   return (
     <section className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
       <div>
-        <header className="mb-4 flex items-center justify-between">
+        <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold">Findings</h1>
             <p className="text-sm text-slate-600">Audit status: <span className="font-medium">{status}</span></p>
@@ -117,6 +136,11 @@ export function FindingsPage() {
               </span>
             ))}
           </div>
+          <div className="flex gap-2 text-xs">
+            <button className={`rounded-full px-3 py-1 ${viewMode === 'published' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700'}`} onClick={() => setViewMode('published')}>Published</button>
+            <button className={`rounded-full px-3 py-1 ${viewMode === 'review' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700'}`} onClick={() => setViewMode('review')}>Review</button>
+            <button className={`rounded-full px-3 py-1 ${viewMode === 'analysis' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700'}`} onClick={() => setViewMode('analysis')}>Analysis</button>
+          </div>
         </header>
 
         {error && <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
@@ -131,7 +155,7 @@ export function FindingsPage() {
               </tr>
             </thead>
             <tbody>
-              {orderedFindings.map((finding) => {
+              {(viewMode === 'published' ? orderedFindings : viewMode === 'review' ? orderedReviewItems : orderedAnalysisItems).map((finding) => {
                 const sectionLabel = displaySectionTitle(finding, sectionsById)
                 return (
                   <tr
@@ -140,8 +164,8 @@ export function FindingsPage() {
                     className={`cursor-pointer border-t border-slate-200 hover:bg-slate-50 ${selectedId === finding.id ? 'bg-cyan-50' : ''}`}
                   >
                     <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
-                    <td className="px-4 py-3"><StatusBadge status={finding.status} /></td>
-                    <td className="px-4 py-3 text-slate-600">{finding.severity ?? 'n/a'}</td>
+                    <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
+                    <td className="px-4 py-3 text-slate-600">{rowSeverity(finding)}</td>
                   </tr>
                 )
               })}
@@ -151,41 +175,13 @@ export function FindingsPage() {
       </div>
 
       <aside className="surface-card p-5">
-        {!selected ? (
+        {!selectedPublished && !selectedReview && !selectedAnalysis ? (
           <p className="text-slate-600">Select a finding to inspect full details.</p>
         ) : (
           <div className="space-y-4">
-            <h2 className="text-lg font-semibold">{displaySectionTitle(selected, sectionsById)}</h2>
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusBadge status={selected.status} />
-              {selected.finding_type && <TypeBadge label={selected.finding_type === 'systemic' ? 'systemic' : 'section-level'} />}
-              {selected.assessment_type && <TypeBadge label={selected.assessment_type} />}
-              {selected.confidence_level && <TypeBadge label={`confidence: ${selected.confidence_level}`} />}
-            </div>
-            <Detail label="Section text" value={sectionsById[selected.section_id]?.content ?? 'Systemic synthesized finding (no direct section text).'} />
-            <Detail label="Gap note" value={selected.gap_note ?? 'n/a'} />
-            <Detail label="Remediation" value={selected.remediation_note ?? 'n/a'} />
-            <Detail label="Legal anchors" value={selected.primary_legal_anchor?.join(', ') ?? 'n/a'} />
-            <Detail label="Secondary anchors" value={selected.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
-            <Detail label="Why flagged" value={selected.citation_summary_text ?? 'n/a'} />
-            <Detail label="Evidence refs" value={selected.document_evidence_refs?.join(', ') ?? 'n/a'} />
-            <Detail label="Source scope" value={selected.source_scope ?? 'n/a'} />
-            <Detail label="Assertion level" value={selected.assertion_level ?? 'n/a'} />
-            <Detail label="Legal requirement" value={selected.legal_requirement ?? 'n/a'} />
-            <Detail label="Gap reasoning" value={selected.gap_reasoning ?? 'n/a'} />
-            <Detail label="Severity rationale" value={selected.severity_rationale ?? 'n/a'} />
-            <div>
-              <h3 className="text-sm font-semibold text-slate-700">GDPR evidence</h3>
-              <ul className="mt-2 space-y-2 text-sm text-slate-600">
-                {selected.citations.length === 0 ? <li>No citations.</li> : selected.citations.map((c, idx) => (
-                  <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <div className="font-medium">Article {c.article_number}: {c.article_title}</div>
-                    <div className="text-xs text-slate-400">Paragraph: {c.paragraph_ref ?? 'n/a'}</div>
-                    <p className="mt-2 text-slate-600">{c.excerpt}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
+            <pre className="overflow-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-100">
+              {JSON.stringify(selectedPublished ?? selectedReview ?? selectedAnalysis, null, 2)}
+            </pre>
           </div>
         )}
       </aside>
@@ -193,7 +189,7 @@ export function FindingsPage() {
   )
 }
 
-function displaySectionTitle(finding: FindingOut, sectionsById: Record<string, SectionOut>): string {
+function displaySectionTitle(finding: { section_id: string }, sectionsById: Record<string, SectionOut>): string {
   const section = sectionsById[finding.section_id]
   if (section) return section.section_title
   if (finding.section_id.startsWith('systemic:')) {
@@ -201,6 +197,17 @@ function displaySectionTitle(finding: FindingOut, sectionsById: Record<string, S
     return `Systemic: ${SYSTEMIC_LABELS[issueId] ?? humanize(issueId)}`
   }
   return finding.section_id
+}
+
+function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): FindingOut['status'] {
+  if ('status' in row && row.status) return row.status as FindingOut['status']
+  if ('status_candidate' in row && row.status_candidate) return row.status_candidate as FindingOut['status']
+  return 'not applicable'
+}
+
+function rowSeverity(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
+  if ('severity' in row) return row.severity ?? 'n/a'
+  return 'n/a'
 }
 
 function humanize(value: string): string {

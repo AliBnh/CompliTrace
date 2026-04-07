@@ -77,3 +77,35 @@ export type ReportOut = {
   pdf_path: string | null
   created_at: string
 }
+
+export type AnalysisCitationOut = CitationOut
+
+export type AnalysisItemOut = {
+  id: UUID
+  section_id: string
+  analysis_stage?: string | null
+  analysis_type: string
+  issue_type?: string | null
+  status_candidate?: string | null
+  classification_candidate?: string | null
+  artifact_role?: string | null
+  finding_level_candidate?: string | null
+  publication_state_candidate?: string | null
+  suppression_reason?: string | null
+  gap_note?: string | null
+  remediation_note?: string | null
+  citations: AnalysisCitationOut[]
+}
+
+export type ReviewItemOut = {
+  item_kind: 'finding' | 'analysis'
+  id: UUID
+  section_id: string
+  status?: string | null
+  classification?: string | null
+  artifact_role?: string | null
+  finding_level?: string | null
+  publication_state?: string | null
+  gap_note?: string | null
+  remediation_note?: string | null
+}

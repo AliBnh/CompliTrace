@@ -2406,6 +2406,7 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
         analysis = AuditAnalysisItem(
             audit_id=audit_id,
             section_id=row.section_id,
+            analysis_stage="post_reviewer_snapshot",
             analysis_type=(
                 "support_evidence"
                 if row.finding_type == "supporting_evidence"
@@ -2415,6 +2416,28 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
                 if row.finding_type == "local"
                 else "candidate_issue"
             ),
+            issue_type=_finding_issue_id(row),
+            status_candidate=(
+                "not_applicable"
+                if row.status == "not applicable"
+                else "needs_review"
+                if row.status == "needs review"
+                else "candidate_partial"
+                if row.status == "partial"
+                else "candidate_gap"
+                if row.status == "gap"
+                else "candidate_compliant"
+            ),
+            classification_candidate=row.classification,
+            artifact_role=(
+                "support_only"
+                if row.artifact_role == "support_only"
+                else "publishable_candidate"
+                if publishable
+                else "suppressed_local"
+            ),
+            finding_level_candidate=row.finding_level,
+            publication_state_candidate=row.publication_state,
             analysis_outcome=(
                 "filtered_out"
                 if row.classification == "out_of_scope"
@@ -2427,15 +2450,28 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
                 else "candidate_compliant"
             ),
             candidate_issue=_finding_issue_id(row),
+            policy_evidence_excerpt=row.policy_evidence_excerpt,
+            legal_requirement_candidate=row.legal_requirement,
+            article_candidates=row.primary_legal_anchor,
+            retrieval_summary=row.citation_summary_text,
             qualification_summary=row.legal_requirement,
             evidence_sufficiency="weak" if row.status == "needs review" else "sufficient",
             applicability=row.applicability_status,
+            citation_fit_status="pass" if row.confidence_article_fit and row.confidence_article_fit >= 0.5 else "uncertain",
+            applicability_status=row.applicability_status,
             contradiction_status="failed" if row.classification == "diagnostic_internal_only" else "passed",
             citation_fit="pass" if row.confidence_article_fit and row.confidence_article_fit >= 0.5 else "uncertain",
             support_role=row.finding_type,
+            source_scope=row.source_scope,
             excerpt_scope_facts=row.referenced_unseen_sections,
+            referenced_unseen_sections=row.referenced_unseen_sections,
             suppression_reason=row.gap_note if not publishable else None,
             publishability_candidate="yes" if publishable else "no",
+            confidence=row.confidence,
+            confidence_evidence=row.confidence_evidence,
+            confidence_applicability=row.confidence_applicability,
+            confidence_article_fit=row.confidence_article_fit,
+            confidence_overall=row.confidence_overall,
             finding_status=row.status,
             finding_classification=row.classification,
             finding_severity=row.severity,

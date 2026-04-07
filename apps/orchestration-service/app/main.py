@@ -60,6 +60,7 @@ app.include_router(router)
 def startup() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_findings_columns()
+    _ensure_analysis_columns()
 
 
 def _ensure_findings_columns() -> None:
@@ -120,6 +121,40 @@ def _ensure_findings_section_id_width(conn) -> None:
     except Exception:
         # SQLite and some ephemeral test DBs may not support this ALTER syntax.
         return
+
+
+def _ensure_analysis_columns() -> None:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "audit_analysis_items" not in inspector.get_table_names():
+            return
+        columns = {col["name"] for col in inspector.get_columns("audit_analysis_items")}
+        column_ddls = {
+            "analysis_stage": "ALTER TABLE audit_analysis_items ADD COLUMN analysis_stage VARCHAR(64) DEFAULT 'section_processing'",
+            "issue_type": "ALTER TABLE audit_analysis_items ADD COLUMN issue_type VARCHAR(128)",
+            "status_candidate": "ALTER TABLE audit_analysis_items ADD COLUMN status_candidate VARCHAR(32)",
+            "classification_candidate": "ALTER TABLE audit_analysis_items ADD COLUMN classification_candidate VARCHAR(32)",
+            "artifact_role": "ALTER TABLE audit_analysis_items ADD COLUMN artifact_role VARCHAR(32) DEFAULT 'analysis_candidate'",
+            "finding_level_candidate": "ALTER TABLE audit_analysis_items ADD COLUMN finding_level_candidate VARCHAR(16)",
+            "publication_state_candidate": "ALTER TABLE audit_analysis_items ADD COLUMN publication_state_candidate VARCHAR(16)",
+            "policy_evidence_excerpt": "ALTER TABLE audit_analysis_items ADD COLUMN policy_evidence_excerpt TEXT",
+            "legal_requirement_candidate": "ALTER TABLE audit_analysis_items ADD COLUMN legal_requirement_candidate TEXT",
+            "article_candidates": "ALTER TABLE audit_analysis_items ADD COLUMN article_candidates TEXT",
+            "retrieval_summary": "ALTER TABLE audit_analysis_items ADD COLUMN retrieval_summary TEXT",
+            "citation_fit_status": "ALTER TABLE audit_analysis_items ADD COLUMN citation_fit_status VARCHAR(32)",
+            "applicability_status": "ALTER TABLE audit_analysis_items ADD COLUMN applicability_status VARCHAR(64)",
+            "source_scope": "ALTER TABLE audit_analysis_items ADD COLUMN source_scope VARCHAR(32)",
+            "referenced_unseen_sections": "ALTER TABLE audit_analysis_items ADD COLUMN referenced_unseen_sections TEXT",
+            "confidence": "ALTER TABLE audit_analysis_items ADD COLUMN confidence DOUBLE PRECISION",
+            "confidence_evidence": "ALTER TABLE audit_analysis_items ADD COLUMN confidence_evidence DOUBLE PRECISION",
+            "confidence_applicability": "ALTER TABLE audit_analysis_items ADD COLUMN confidence_applicability DOUBLE PRECISION",
+            "confidence_article_fit": "ALTER TABLE audit_analysis_items ADD COLUMN confidence_article_fit DOUBLE PRECISION",
+            "confidence_overall": "ALTER TABLE audit_analysis_items ADD COLUMN confidence_overall DOUBLE PRECISION",
+            "created_at": "ALTER TABLE audit_analysis_items ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, ddl in column_ddls.items():
+            if column_name not in columns:
+                conn.execute(text(ddl))
 
 
 @app.get("/metrics")
