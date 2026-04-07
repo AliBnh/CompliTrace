@@ -62,6 +62,35 @@ def test_sanitize_published_text_strips_internal_markers():
 
 def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_session: Session):
     audit = _create_audit(db_session, status="complete")
+    projected_backing = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_transfer_notice",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="systemic",
+        publication_state="blocked",
+        confidence=0.81,
+        confidence_article_fit=0.77,
+        confidence_overall=0.8,
+        source_scope="full_notice",
+        source_scope_confidence=0.88,
+        assertion_level="probable_document_gap",
+        primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+        remediation_note="Add transfer safeguard mechanisms.",
+    )
+    db_session.add(projected_backing)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=projected_backing.id,
+            chunk_id="transfer-chunk-1",
+            article_number="13",
+            paragraph_ref="1(f)",
+            article_title="Transfer disclosure",
+            excerpt="Transfers may occur outside the EEA.",
+        )
+    )
     db_session.add(
         Finding(
             audit_id=audit.id,
@@ -77,6 +106,24 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
             finding_level="none",
         )
     )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:policy:sec-transfer",
+            audit_id=audit.id,
+            evidence_type="policy_section",
+            source_ref="sec-transfer",
+            text_excerpt="transfer evidence",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:transfer-chunk-1",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="transfer-chunk-1",
+            text_excerpt="Transfers may occur outside the EEA.",
+        )
+    )
     db_session.commit()
 
     findings = get_findings(audit.id, db_session)
@@ -84,6 +131,9 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
     assert len(findings) == 1
     assert findings[0].section_id == "systemic:missing_transfer_notice"
     assert findings[0].document_evidence_refs == ["evi:policy:sec-transfer"]
+    assert findings[0].confidence_overall == 0.8
+    assert findings[0].primary_legal_anchor == ["GDPR Article 13(1)(f)"]
+    assert [c.chunk_id for c in findings[0].citations] == ["transfer-chunk-1"]
 
 
 def test_get_findings_blocks_when_decision_map_disallows_publication(db_session: Session):

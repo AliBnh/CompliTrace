@@ -159,6 +159,8 @@ def _publication_allowed_from_map(decision_map: dict[str, dict[str, str | bool |
 def _project_published_findings_from_map(
     audit_id: str,
     decision_map: dict[str, dict[str, str | bool | list[str] | float]],
+    backing_rows: list[Finding] | None = None,
+    known_evidence_ids: set[str] | None = None,
 ) -> list[FindingOut]:
     family_to_issue = {
         "controller_identity_contact": "missing_controller_identity",
@@ -189,6 +191,11 @@ def _project_published_findings_from_map(
         "dpo_contact": "medium",
     }
     out: list[FindingOut] = []
+    row_by_issue: dict[str, Finding] = {}
+    for row in backing_rows or []:
+        issue = _issue_from_finding_section(row.section_id)
+        if issue and issue not in row_by_issue:
+            row_by_issue[issue] = row
     for family, issue in family_to_issue.items():
         item = decision_map.get(family, {}) or {}
         status = str(item.get("status") or "")
@@ -196,7 +203,8 @@ def _project_published_findings_from_map(
         if status not in {"gap", "referenced_but_unseen"} or publish_rec != "publish":
             continue
         reason = str(item.get("reasoning") or "")
-        evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
+        projected_evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
+        backing = row_by_issue.get(issue)
         out.append(
             FindingOut(
                 id=f"projected:{audit_id}:{family}",
@@ -209,10 +217,31 @@ def _project_published_findings_from_map(
                 artifact_role="publishable_finding",
                 finding_level="systemic",
                 publication_state="publishable",
+                confidence=backing.confidence if backing else 0.66,
+                confidence_article_fit=backing.confidence_article_fit if backing else 0.72,
+                confidence_overall=backing.confidence_overall if backing else 0.66,
+                source_scope=backing.source_scope if backing else "full_notice",
+                source_scope_confidence=backing.source_scope_confidence if backing else 0.75,
+                assertion_level=backing.assertion_level if backing else "probable_document_gap",
+                primary_legal_anchor=_deserialize_json_list(backing.primary_legal_anchor) if backing else ["GDPR Article 13(1)(a)"],
+                secondary_legal_anchors=_deserialize_json_list(backing.secondary_legal_anchors) if backing else None,
+                citation_summary_text=_sanitize_published_text(backing.citation_summary_text) if backing else None,
+                support_complete=_deserialize_bool_flag(backing.support_complete) if backing else None,
+                omission_basis=_deserialize_bool_flag(backing.omission_basis) if backing else None,
                 gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
-                remediation_note="Address the identified gap with explicit GDPR-compliant notice language.",
-                document_evidence_refs=evidence_ids or None,
-                citations=[],
+                remediation_note=_sanitize_published_text(backing.remediation_note) if backing and backing.remediation_note else "Address the identified gap with explicit GDPR-compliant notice language.",
+                document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
+                citations=[
+                    CitationOut(
+                        chunk_id=c.chunk_id,
+                        article_number=c.article_number,
+                        paragraph_ref=c.paragraph_ref,
+                        article_title=c.article_title,
+                        excerpt=_sanitize_published_text(c.excerpt) or "",
+                    )
+                    for c in (backing.citations if backing else [])
+                    if _is_real_evidence_ref(c.chunk_id) and (known_evidence_ids is None or f"evi:chunk:{c.chunk_id}" in known_evidence_ids)
+                ],
             )
         )
     return out
@@ -296,9 +325,13 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     if audit.status == "review_required":
         raise HTTPException(status_code=409, detail="Published findings blocked: audit requires review")
     decision_map = _load_final_decision_map(db, audit_id)
+    backing_rows = db.scalars(
+        select(Finding).options(selectinload(Finding.citations)).where(Finding.audit_id == audit_id).order_by(Finding.id.asc())
+    ).all()
+    known_evidence_ids = _known_evidence_ids(db, audit_id)
     if decision_map and not _publication_allowed_from_map(decision_map):
         raise HTTPException(status_code=409, detail="Published findings blocked: final decision map disallows publication")
-    projected = _project_published_findings_from_map(audit_id, decision_map) if decision_map else []
+    projected = _project_published_findings_from_map(audit_id, decision_map, backing_rows, known_evidence_ids) if decision_map else []
     if projected:
         blockers = _reconciliation_blockers(audit, decision_map, [], projected)
         if blockers:
@@ -323,7 +356,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
 
     out: list[FindingOut] = []
-    evidence_ids = _known_evidence_ids(db, audit_id)
+    evidence_ids = known_evidence_ids
     seen: set[str] = set()
     for row in rows:
         if row.id in seen:
