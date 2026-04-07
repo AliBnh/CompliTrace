@@ -93,14 +93,19 @@ export function FindingsPage() {
     return [...analysisItems].sort((a, b) => a.id.localeCompare(b.id))
   }, [analysisItems])
 
-  const selectedPublished = orderedFindings.find((f) => f.id === selectedId) ?? null
-  const selectedReview = orderedReviewItems.find((r) => r.id === selectedId) ?? null
-  const selectedAnalysis = orderedAnalysisItems.find((r) => r.id === selectedId) ?? null
+  const activeRows = viewMode === 'published' ? orderedFindings : viewMode === 'review' ? orderedReviewItems : orderedAnalysisItems
+  const selectedPublished = viewMode === 'published' ? orderedFindings.find((f) => f.id === selectedId) ?? null : null
+  const selectedReview = viewMode === 'review' ? orderedReviewItems.find((r) => r.id === selectedId) ?? null : null
+  const selectedAnalysis = viewMode === 'analysis' ? orderedAnalysisItems.find((r) => r.id === selectedId) ?? null : null
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
     for (const finding of orderedFindings) base[finding.status] += 1
     return base
   }, [orderedFindings])
+
+  useEffect(() => {
+    setSelectedId(activeRows[0]?.id ?? null)
+  }, [viewMode, activeRows])
 
   if (!auditId) return <EmptyState message="No audit in progress. Trigger an audit from Sections page." />
 
@@ -129,7 +134,7 @@ export function FindingsPage() {
               <span className="absolute text-sm font-semibold text-cyan-700">{Math.round(progress)}%</span>
             </div>
           )}
-          <div className="flex gap-2 text-xs">
+          <div className="flex flex-wrap gap-2 text-xs">
             {Object.entries(counts).map(([label, count]) => (
               <span key={label} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-slate-600">
                 {label}: {count}
@@ -155,7 +160,7 @@ export function FindingsPage() {
               </tr>
             </thead>
             <tbody>
-              {(viewMode === 'published' ? orderedFindings : viewMode === 'review' ? orderedReviewItems : orderedAnalysisItems).map((finding) => {
+              {activeRows.map((finding) => {
                 const sectionLabel = displaySectionTitle(finding, sectionsById)
                 return (
                   <tr
@@ -165,7 +170,7 @@ export function FindingsPage() {
                   >
                     <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
                     <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
-                    <td className="px-4 py-3 text-slate-600">{rowSeverity(finding)}</td>
+                    <td className="px-4 py-3 text-slate-600">{rowSeverityOrKind(finding)}</td>
                   </tr>
                 )
               })}
@@ -179,9 +184,9 @@ export function FindingsPage() {
           <p className="text-slate-600">Select a finding to inspect full details.</p>
         ) : (
           <div className="space-y-4">
-            <pre className="overflow-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-100">
-              {JSON.stringify(selectedPublished ?? selectedReview ?? selectedAnalysis, null, 2)}
-            </pre>
+            {selectedPublished && <PublishedDetail finding={selectedPublished} sectionText={sectionsById[selectedPublished.section_id]?.content ?? null} />}
+            {selectedReview && <ReviewDetail item={selectedReview} />}
+            {selectedAnalysis && <AnalysisDetail item={selectedAnalysis} />}
           </div>
         )}
       </aside>
@@ -205,8 +210,10 @@ function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): FindingOu
   return 'not applicable'
 }
 
-function rowSeverity(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
+function rowSeverityOrKind(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
   if ('severity' in row) return row.severity ?? 'n/a'
+  if ('item_kind' in row) return row.item_kind
+  if ('analysis_type' in row) return row.analysis_type
   return 'n/a'
 }
 
@@ -218,10 +225,6 @@ function humanize(value: string): string {
     .join(' ')
 }
 
-function TypeBadge({ label }: { label: string }) {
-  return <span className="rounded-full border border-slate-300 bg-slate-100 px-2 py-1 text-xs text-slate-700">{label}</span>
-}
-
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -229,6 +232,97 @@ function Detail({ label, value }: { label: string; value: string }) {
       <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{value}</p>
     </div>
   )
+}
+
+function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectionText: string | null }) {
+  return (
+    <>
+      <h2 className="text-lg font-semibold">Published finding details</h2>
+      <div className="flex flex-wrap gap-2">
+        <StatusBadge status={finding.status} />
+        {finding.finding_type && <Pill value={finding.finding_type} />}
+        {finding.classification && <Pill value={finding.classification} />}
+        {finding.confidence_level && <Pill value={`confidence ${finding.confidence_level}`} />}
+      </div>
+      <Detail label="Gap note" value={finding.gap_note ?? 'n/a'} />
+      <Detail label="Remediation" value={finding.remediation_note ?? 'n/a'} />
+      <Detail label="Legal anchors" value={finding.primary_legal_anchor?.join(', ') ?? 'n/a'} />
+      <Detail label="Secondary anchors" value={finding.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
+      <Detail label="Section text" value={sectionText ?? 'Systemic finding (document-level synthesis)'} />
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700">Citations</h3>
+        <ul className="mt-2 space-y-2 text-sm">
+          {finding.citations.length === 0 ? (
+            <li className="text-slate-500">No citations.</li>
+          ) : (
+            finding.citations.map((c, idx) => (
+              <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
+                <p className="mt-1 text-slate-600">{c.excerpt}</p>
+              </li>
+            ))
+          )}
+        </ul>
+      </div>
+    </>
+  )
+}
+
+function ReviewDetail({ item }: { item: ReviewItemOut }) {
+  return (
+    <>
+      <h2 className="text-lg font-semibold">Review item details</h2>
+      <div className="flex flex-wrap gap-2">
+        <Pill value={`source: ${item.item_kind}`} />
+        {item.status && <StatusBadge status={item.status as FindingOut['status']} />}
+        {item.artifact_role && <Pill value={item.artifact_role} />}
+        {item.publication_state && <Pill value={item.publication_state} />}
+      </div>
+      <Detail label="Classification" value={item.classification ?? 'n/a'} />
+      <Detail label="Finding level" value={item.finding_level ?? 'n/a'} />
+      <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
+      <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
+    </>
+  )
+}
+
+function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
+  return (
+    <>
+      <h2 className="text-lg font-semibold">Analysis artifact details</h2>
+      <div className="flex flex-wrap gap-2">
+        {item.status_candidate && <StatusBadge status={item.status_candidate as FindingOut['status']} />}
+        {item.analysis_stage && <Pill value={item.analysis_stage} />}
+        <Pill value={item.analysis_type} />
+        {item.artifact_role && <Pill value={item.artifact_role} />}
+        {item.publication_state_candidate && <Pill value={item.publication_state_candidate} />}
+      </div>
+      <Detail label="Issue type" value={item.issue_type ?? 'n/a'} />
+      <Detail label="Classification candidate" value={item.classification_candidate ?? 'n/a'} />
+      <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
+      <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
+      <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700">Analysis citations</h3>
+        <ul className="mt-2 space-y-2 text-sm">
+          {item.citations.length === 0 ? (
+            <li className="text-slate-500">No citations.</li>
+          ) : (
+            item.citations.map((c, idx) => (
+              <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
+                <p className="mt-1 text-slate-600">{c.excerpt}</p>
+              </li>
+            ))
+          )}
+        </ul>
+      </div>
+    </>
+  )
+}
+
+function Pill({ value }: { value: string }) {
+  return <span className="rounded-full border border-slate-300 bg-slate-100 px-2 py-1 text-xs text-slate-700">{value}</span>
 }
 
 function EmptyState({ message }: { message: string }) {
