@@ -173,6 +173,34 @@ SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
     "profiling_disclosure_gap": {"profil", "automated", "decision", "score", "segmentation"},
 }
 
+CORE_DUTY_TO_ISSUE: dict[str, str] = {
+    "controller_identity": "missing_controller_identity",
+    "controller_contact": "missing_controller_identity",
+    "legal_basis": "missing_legal_basis",
+    "retention": "missing_retention_period",
+    "rights": "missing_rights_notice",
+    "complaint_right": "missing_complaint_right",
+}
+
+CORE_DUTY_OBLIGATION_KEYS: dict[str, str] = {
+    "controller_identity": "controller_identity_present",
+    "controller_contact": "controller_contact_present",
+    "legal_basis": "legal_basis_present",
+    "retention": "retention_present",
+    "rights": "rights_present",
+    "complaint_right": "complaint_present",
+}
+
+SPECIALIST_TRIGGER_RULES: dict[str, tuple[set[str], str]] = {
+    "missing_transfer_notice": (THIRD_COUNTRY_TRANSFER_SIGNALS, "triggered_transfer_family"),
+    "profiling_disclosure_gap": ({"profil", "automated decision", "scoring", "segmentation"}, "triggered_profiling_family"),
+    "article_14_indirect_collection": (
+        {"from third parties", "obtained from third parties", "received from third parties", "from external sources"},
+        "triggered_article_14_indirect_collection",
+    ),
+    "controller_processor_role_ambiguity": ({"controller", "processor", "on behalf of"}, "triggered_role_ambiguity_family"),
+}
+
 DIRECT_COLLECTION_SIGNALS = {
     "you provide",
     "provided by you",
@@ -658,7 +686,8 @@ def _document_posture_agent(sections: list[SectionData], document_mode: str) -> 
 def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, bool]:
     corpus = " ".join(_norm(f"{s.section_title} {s.content}") for s in sections)
     return {
-        "controller_identity_present": any(t in corpus for t in {"controller", "company name", "contact details"}),
+        "controller_identity_present": any(t in corpus for t in {"controller", "legal entity", "company name"}),
+        "controller_contact_present": any(t in corpus for t in {"contact details", "privacy@", "email", "contact us", "address"}),
         "dpo_present": any(t in corpus for t in {"data protection officer", "dpo"}),
         "rights_present": any(t in corpus for t in {"right of access", "right to object", "rectification", "erasure"}),
         "retention_present": any(t in corpus for t in {"retention", "kept for", "storage period"}),
@@ -1853,9 +1882,18 @@ def _serialize_json_list(values: list[str]) -> str:
 
 def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligation_map: dict[str, bool]) -> tuple[list[str], bool]:
     section_signals = SYSTEMIC_SECTION_SIGNALS.get(issue_id, {"process", "collect", "personal data"})
+    ranked_sections = sorted(
+        sections,
+        key=lambda s: (
+            0 if _section_auditability_type(s) == "auditable_primary" else 1 if _section_auditability_type(s) == "auditable_secondary" else 2,
+            s.section_order,
+        ),
+    )
     matched_sections: list[str] = []
-    for section in sections:
+    for section in ranked_sections:
         haystack = _section_context_signals(section)
+        if _section_auditability_type(section) in {"administrative_section", "meta_section", "definition_section"}:
+            continue
         if any(signal in haystack for signal in section_signals):
             matched_sections.append(_section_ref(section))
         if len(matched_sections) >= 3:
@@ -1895,7 +1933,12 @@ def _coverage_to_support_valid(issue_id: str, refs: list[str], obligation_map: d
     if not has_processing_evidence:
         return False
     required_key = SYSTEMIC_REQUIRED_OBLIGATION_KEYS.get(issue_id)
-    if required_key and obligation_map.get(required_key) is not False:
+    if issue_id == "missing_controller_identity":
+        identity_missing = obligation_map.get("controller_identity_present") is False
+        contact_missing = obligation_map.get("controller_contact_present") is False
+        if not (identity_missing or contact_missing):
+            return False
+    elif required_key and obligation_map.get(required_key) is not False:
         return False
     return True
 
@@ -1994,6 +2037,115 @@ def _build_systemic_support(
             row.finding_type = "systemic"
             row.classification = "systemic_violation"
             row.support_complete = "true"
+    db.commit()
+
+
+def _record_suppression_ledger(
+    db: Session,
+    audit_id: str,
+    issue_type: str,
+    suppression_reason: str,
+    suppression_validator: str,
+    evidence: str,
+) -> None:
+    db.add(
+        Finding(
+            audit_id=audit_id,
+            section_id=f"ledger:{issue_type}",
+            status="not applicable",
+            severity=None,
+            classification="diagnostic_internal_only",
+            finding_type="supporting_evidence",
+            publish_flag="no",
+            gap_note=f"Suppressed {issue_type}: {suppression_reason}",
+            remediation_note=None,
+            legal_requirement=f"suppression_validator={suppression_validator}",
+            gap_reasoning=evidence,
+        )
+    )
+
+
+def _has_issue_outcome(rows: list[Finding], issue_type: str) -> bool:
+    for row in rows:
+        issue = _finding_issue_id(row)
+        if issue != issue_type:
+            continue
+        if row.classification in {"systemic_violation", "diagnostic_internal_only", "not_assessable"}:
+            return True
+    return False
+
+
+def _enforce_core_and_specialist_completeness(
+    db: Session,
+    audit_id: str,
+    sections: list[SectionData],
+    obligation_map: dict[str, bool],
+) -> None:
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    duty_disposition: dict[str, str] = {}
+
+    for duty, issue_type in CORE_DUTY_TO_ISSUE.items():
+        obligation_key = CORE_DUTY_OBLIGATION_KEYS[duty]
+        present = obligation_map.get(obligation_key)
+        published_gap = any(
+            r.section_id.startswith("systemic:")
+            and _finding_issue_id(r) == issue_type
+            and r.publish_flag == "yes"
+            and r.classification == "systemic_violation"
+            for r in rows
+        )
+        if published_gap:
+            duty_disposition[duty] = "present_and_gap_found"
+            continue
+        if present is True:
+            duty_disposition[duty] = "present_and_satisfied"
+            continue
+        if present is False:
+            reason = f"{obligation_key}=not_visible while no publishable systemic finding survived validators"
+            duty_disposition[duty] = f"not_assessable_with_reason:{reason}"
+            _record_suppression_ledger(db, audit_id, issue_type, reason, "core_duty_completeness_gate", reason)
+            continue
+        duty_disposition[duty] = "not_assessable_with_reason:insufficient obligation-map signal"
+        _record_suppression_ledger(
+            db,
+            audit_id,
+            issue_type,
+            "insufficient obligation-map signal",
+            "core_duty_completeness_gate",
+            "duty has no boolean presence signal",
+        )
+
+    unresolved = [duty for duty, result in duty_disposition.items() if not result]
+    if unresolved:
+        for row in rows:
+            if row.section_id.startswith("systemic:"):
+                row.publish_flag = "no"
+                row.classification = "diagnostic_internal_only"
+        _record_suppression_ledger(
+            db,
+            audit_id,
+            "core_duty_publication_block",
+            "one or more core duties had no final disposition",
+            "core_duty_completeness_gate",
+            ", ".join(unresolved),
+        )
+
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+    for issue_type, (signals, trigger_label) in SPECIALIST_TRIGGER_RULES.items():
+        triggered = any(signal in corpus for signal in signals)
+        if not triggered:
+            continue
+        if _has_issue_outcome(rows, issue_type):
+            continue
+        reason = f"{trigger_label} triggered but no final issue disposition recorded"
+        _record_suppression_ledger(
+            db,
+            audit_id,
+            issue_type,
+            reason,
+            "specialist_family_completeness_gate",
+            f"signals={sorted(list(signals))[:4]}",
+        )
     db.commit()
 
 
@@ -2663,6 +2815,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         _add_notice_level_synthesis(db, audit.id, obligation_map)
     _add_systemic_issue_synthesis(db, audit.id)
     _build_systemic_support(db, audit.id, sections, obligation_map)
+    _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
     _partner_review_pass(db, audit.id)
 
     audit.status = "complete"

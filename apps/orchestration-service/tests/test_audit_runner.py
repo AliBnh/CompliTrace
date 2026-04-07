@@ -44,8 +44,13 @@ from app.services.audit_runner import (
     _violates_forbidden_article_matrix,
     _systemic_evidence_refs,
     _coverage_to_support_valid,
+    _enforce_core_and_specialist_completeness,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
+from app.models.audit import Audit, Finding
+from app.db.base import Base
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 def test_not_applicable_admin_section():
@@ -325,6 +330,55 @@ def test_coverage_to_support_validator_requires_required_obligation_absence():
         {"legal_basis_present": True},
         ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
     )
+
+
+def test_core_duty_completeness_records_suppression_ledger():
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    db = SessionLocal()
+    audit = Audit(document_id="doc-1", status="running")
+    db.add(audit)
+    db.commit()
+
+    db.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_legal_basis",
+            status="gap",
+            severity="high",
+            classification="systemic_violation",
+            finding_type="systemic",
+            publish_flag="yes",
+            gap_note="Missing legal basis",
+            remediation_note="Add legal basis",
+        )
+    )
+    db.commit()
+
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="Policy Owner",
+            content="Administrative owner details only.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {
+        "controller_identity_present": False,
+        "controller_contact_present": False,
+        "legal_basis_present": False,
+        "retention_present": True,
+        "rights_present": True,
+        "complaint_present": True,
+    }
+    _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
+
+    ledger_rows = db.query(Finding).filter(Finding.section_id.like("ledger:%")).all()
+    assert ledger_rows
+    assert any("core_duty_completeness_gate" in (row.legal_requirement or "") for row in ledger_rows)
 
 
 def test_collection_mode_direct_from_form_language():
