@@ -2317,12 +2317,147 @@ def _enforce_core_and_specialist_completeness(
     db.commit()
 
 
+def _issue_to_family(issue: str | None) -> str | None:
+    mapping = {
+        "missing_controller_identity": "controller_identity_contact",
+        "missing_legal_basis": "legal_basis",
+        "missing_retention_period": "retention",
+        "missing_rights_notice": "rights_notice",
+        "missing_complaint_right": "complaint_right",
+        "missing_transfer_notice": "transfer",
+        "missing_transfer_disclosure": "transfer",
+        "profiling_disclosure_gap": "profiling",
+        "controller_processor_role_ambiguity": "role_ambiguity",
+        "article_14_indirect_collection_gap": "article14_source",
+        "special_category_basis_unclear": "special_category",
+    }
+    return mapping.get(issue or "")
+
+
+def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, str]:
+    matched = [r for r in rows if _finding_issue_id(r) == issue]
+    if any(r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap"} and r.publish_flag == "yes" for r in matched):
+        return "gap", "publishable gap/systemic violation present"
+    if any(r.classification == "referenced_but_unseen" for r in matched):
+        return "referenced_but_unseen", "cross-reference to unseen sections prevents full confirmation"
+    if any(r.classification == "not_assessable" for r in matched):
+        return "not_assessable", "insufficient material quality/coverage"
+    return "satisfied", "no unresolved issue artifact survived gates"
+
+
+def _build_final_disposition_map(
+    rows: list[Finding],
+    sections: list[SectionData],
+    obligation_map: dict[str, bool],
+) -> dict[str, dict[str, str]]:
+    families: dict[str, dict[str, str]] = {}
+    core_issue_by_family = {
+        "controller_identity_contact": "missing_controller_identity",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights_notice": "missing_rights_notice",
+        "complaint_right": "missing_complaint_right",
+    }
+    core_obligation_key_by_family = {
+        "controller_identity_contact": "controller_contact",
+        "legal_basis": "legal_basis",
+        "retention": "retention",
+        "rights_notice": "rights",
+        "complaint_right": "complaint",
+    }
+    for family, issue in core_issue_by_family.items():
+        status, reason = _final_disposition_for_issue(rows, issue)
+        if status == "satisfied":
+            obligation_key = core_obligation_key_by_family.get(family)
+            if obligation_key and obligation_map.get(obligation_key) is False:
+                status, reason = "not_assessable", f"{obligation_key}=not_visible and no publishable issue found"
+        families[family] = {"status": status, "reasoning": reason}
+
+    specialist_issue_by_family = {
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+        "article14_source": "article_14_indirect_collection_gap",
+        "special_category": "special_category_basis_unclear",
+    }
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+    for family, issue in specialist_issue_by_family.items():
+        triggered = any(signal in corpus for signal in SPECIALIST_TRIGGER_RULES.get(issue, ({family}, ""))[0])
+        status, reason = _final_disposition_for_issue(rows, issue)
+        if triggered and status == "satisfied":
+            status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
+        families[family] = {"status": status, "reasoning": reason}
+    return families
+
+
+def _final_publication_validator(
+    db: Session,
+    audit_id: str,
+    disposition_map: dict[str, dict[str, str]],
+    source_scope: str,
+) -> None:
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    core_ok = all(
+        disposition_map.get(k, {}).get("status") in {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
+        for k in ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
+    )
+    for row in rows:
+        issue = _finding_issue_id(row)
+        family = _issue_to_family(issue)
+        family_status = disposition_map.get(family or "", {}).get("status")
+        contradiction_pass = row.classification != "diagnostic_internal_only"
+        scope_supports_assertion = source_scope == "full_notice" and row.assertion_level == "confirmed_document_gap"
+        if source_scope != "full_notice" or (row.referenced_unseen_sections and row.referenced_unseen_sections not in {"[]", ""}):
+            if row.assertion_level == "confirmed_document_gap" or row.missing_from_document == "yes":
+                row.assertion_level = "excerpt_limited_gap" if row.classification != "referenced_but_unseen" else "referenced_but_unseen"
+                row.missing_from_document = "unknown"
+                scope_supports_assertion = False
+        should_publish = (
+            row.publish_flag == "yes"
+            and core_ok
+            and family_status in {"satisfied", "gap", "referenced_but_unseen", "not_assessable", None}
+            and contradiction_pass
+            and (scope_supports_assertion or row.assertion_level in {"referenced_but_unseen", "excerpt_limited_gap", "not_assessable"})
+            and bool(row.document_evidence_refs)
+            and bool(row.remediation_note)
+        )
+        if not should_publish:
+            row.publish_flag = "no"
+            row.publication_state = "blocked"
+            row.artifact_role = "support_only"
+            if row.gap_note:
+                row.gap_note = f"{row.gap_note} [withheld by final publication validator]"
+    db.commit()
+
+
 def _partner_review_pass(db: Session, audit_id: str) -> None:
     reviewer_pass_total.inc()
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     systemic_issue_keys = {row.section_id.split("systemic:", 1)[1] for row in rows if row.section_id.startswith("systemic:")}
     seen_root_keys: dict[str, str] = {}
     seen_supporting_pairs: set[tuple[str, str]] = set()
+    fallback_by_issue = {
+        "missing_transfer_notice": (
+            "Transfer-related language is visible, but the reviewed material does not show whether safeguards or mechanisms are disclosed. Provide the transfer/safeguards section.",
+            "State whether third-country transfers occur, what mechanism is relied upon, and how data subjects can obtain information on safeguards.",
+        ),
+        "profiling_disclosure_gap": (
+            "Behavioral/profiling indicators are visible, but the reviewed material does not show whether profiling logic, significance, or effects are disclosed. Provide profiling or automated-decision wording.",
+            "Explain whether profiling occurs and, if so, describe logic, significance, and envisaged consequences where required.",
+        ),
+        "controller_processor_role_ambiguity": (
+            "Customer-supplied data/service allocation language is visible, but the reviewed material does not clearly allocate controller/processor roles. Provide role-allocation or DPA wording.",
+            "Clarify when the company acts as controller, joint controller, or processor, especially for customer-supplied datasets and hosted service operations.",
+        ),
+        "missing_rights_notice": (
+            "The reviewed material does not show the full rights section. Provide the rights section or confirm whether it is included elsewhere in the notice.",
+            "Add or link a complete rights section covering access, rectification, erasure, restriction, objection, and portability.",
+        ),
+        "article_14_indirect_collection_gap": (
+            "Customer/partner-supplied data indicators are visible, but source-category wording for indirect collection is not fully shown. Provide Article 14 source wording.",
+            "Identify source categories for indirectly obtained data and provide required Article 14 information.",
+        ),
+    }
     for row in rows:
         if row.finding_type is None:
             row.finding_type = "local"
@@ -2344,6 +2479,14 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             )
         text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''}")
         if row.status == "needs review":
+            issue_id = _finding_issue_id(row)
+            fallback_gap, fallback_remediation = fallback_by_issue.get(
+                issue_id or "",
+                (
+                    "Not assessable from provided excerpt; additional documentary context is required.",
+                    "Provide complete notice excerpts and rerun legal qualification.",
+                ),
+            )
             row.status = "partial"
             row.classification = "not_assessable"
             row.finding_type = "supporting_evidence"
@@ -2351,9 +2494,8 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             row.artifact_role = "support_only"
             row.finding_level = "none"
             row.publication_state = "internal_only"
-            if row.gap_note:
-                row.gap_note = "Not assessable from provided excerpt; additional documentary context is required."
-            row.remediation_note = "Provide complete notice excerpts and rerun legal qualification."
+            row.gap_note = fallback_gap
+            row.remediation_note = fallback_remediation
             row.confidence = min(row.confidence or 0.45, 0.45) if row.classification == "not_assessable" else max(row.confidence or 0.6, 0.6)
             continue
         if row.classification == "out_of_scope":
@@ -3124,6 +3266,17 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         cross_references,
     )
     _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
+    rows_for_disposition = db.query(Finding).filter(Finding.audit_id == audit.id).all()
+    final_disposition_map = _build_final_disposition_map(rows_for_disposition, sections, obligation_map)
+    _final_publication_validator(db, audit.id, final_disposition_map, source_scope)
+    _record_suppression_ledger(
+        db,
+        audit.id,
+        "final_disposition_map",
+        "snapshot",
+        "final_disposition_map",
+        json.dumps(final_disposition_map, sort_keys=True),
+    )
     _partner_review_pass(db, audit.id)
     _snapshot_analysis_items(db, audit.id)
 
