@@ -103,6 +103,16 @@ def _ensure_findings_columns() -> None:
         for column_name, ddl in column_ddls.items():
             if column_name not in columns:
                 conn.execute(text(ddl))
+        _ensure_findings_section_id_width(conn)
+
+
+def _ensure_findings_section_id_width(conn) -> None:
+    # Legacy environments may still have VARCHAR(36), which truncates systemic/ledger section IDs.
+    try:
+        conn.execute(text("ALTER TABLE findings ALTER COLUMN section_id TYPE VARCHAR(128)"))
+    except Exception:
+        # SQLite and some ephemeral test DBs may not support this ALTER syntax.
+        return
 
 
 @app.get("/metrics")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 import json
+import hashlib
 from datetime import datetime
 from typing import Iterable, TypedDict
 
@@ -2048,10 +2049,11 @@ def _record_suppression_ledger(
     suppression_validator: str,
     evidence: str,
 ) -> None:
+    compact = hashlib.sha1(issue_type.encode("utf-8")).hexdigest()[:12]
     db.add(
         Finding(
             audit_id=audit_id,
-            section_id=f"ledger:{issue_type}",
+            section_id=f"ledger:{compact}",
             status="not applicable",
             severity=None,
             classification="diagnostic_internal_only",
