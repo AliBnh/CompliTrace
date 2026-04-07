@@ -205,6 +205,40 @@ def _project_published_findings_from_map(
     return out
 
 
+def _is_real_evidence_ref(value: str) -> bool:
+    token = (value or "").strip().lower()
+    return bool(token) and not token.startswith("systemic-anchor:")
+
+
+def _reconciliation_blockers(
+    audit: Audit,
+    decision_map: dict[str, dict[str, str | bool | list[str] | float]] | None,
+    published_rows: list[Finding],
+    projected_rows: list[FindingOut],
+) -> list[str]:
+    blockers: list[str] = []
+    if audit.status == "review_required" and (published_rows or projected_rows):
+        blockers.append("review_required audit must not expose published findings")
+    if not decision_map:
+        return blockers
+    core_families = ("controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right")
+    for family in core_families:
+        status = str((decision_map.get(family, {}) or {}).get("status") or "")
+        if status in {"unresolved_internal_error", "blocked"} and (published_rows or projected_rows):
+            blockers.append(f"core blocker present for {family} while published findings exist")
+    for family, item in decision_map.items():
+        if family.startswith("_") or not isinstance(item, dict):
+            continue
+        if str(item.get("publication_recommendation") or "") != "publish":
+            continue
+        if str(item.get("status") or "") not in {"gap", "referenced_but_unseen"}:
+            continue
+        has_projection = any(p.id.endswith(f":{family}") for p in projected_rows)
+        if not has_projection and not published_rows:
+            blockers.append(f"publish recommendation for {family} has no materialized finding")
+    return blockers
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -249,6 +283,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         raise HTTPException(status_code=409, detail="Published findings blocked: final decision map disallows publication")
     projected = _project_published_findings_from_map(audit_id, decision_map) if decision_map else []
     if projected:
+        blockers = _reconciliation_blockers(audit, decision_map, [], projected)
+        if blockers:
+            raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
         return projected
     rows = db.scalars(
         select(Finding)
@@ -260,7 +297,13 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
+        blockers = _reconciliation_blockers(audit, decision_map, [], [])
+        if blockers:
+            raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
         return []
+    blockers = _reconciliation_blockers(audit, decision_map, rows, [])
+    if blockers:
+        raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
 
     out: list[FindingOut] = []
     seen: set[str] = set()
@@ -326,6 +369,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                         excerpt=c.excerpt,
                     )
                     for c in row.citations
+                    if _is_real_evidence_ref(c.chunk_id)
                 ],
             )
         )
