@@ -2013,6 +2013,18 @@ def _serialize_json_list(values: list[str]) -> str:
     return json.dumps(unique, ensure_ascii=False)
 
 
+def _decode_json_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return [str(v) for v in parsed]
+    return []
+
+
 def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligation_map: dict[str, bool]) -> tuple[list[str], bool]:
     section_signals = SYSTEMIC_SECTION_SIGNALS.get(issue_id, {"process", "collect", "personal data"})
     ranked_sections = sorted(
