@@ -26,7 +26,11 @@ export function FindingsPage() {
   })
   const [viewMode, setViewMode] = useState<'published' | 'review' | 'analysis'>('published')
   const [status, setStatus] = useState<string>('pending')
-  const [error, setError] = useState<string | null>(null)
+  const [publishedError, setPublishedError] = useState<string | null>(null)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [sectionsError, setSectionsError] = useState<string | null>(null)
+  const [uiNotice, setUiNotice] = useState<string | null>(null)
   const [progress, setProgress] = useState<number>(12)
 
   useEffect(() => {
@@ -36,7 +40,7 @@ export function FindingsPage() {
         const mapping = Object.fromEntries(sections.map((s) => [s.id, s]))
         setSectionsById(mapping)
       })
-      .catch((e) => setError(e.message))
+      .catch((e) => setSectionsError(e.message))
   }, [documentId])
 
   useEffect(() => {
@@ -54,17 +58,36 @@ export function FindingsPage() {
         } else if (audit.status === 'running' || audit.status === 'pending') {
           setProgress((previous) => Math.min(previous + Math.random() * 6 + 2, 92))
         }
-        const [publishedRows, reviewRows, analysisRows] = await Promise.all([
+        const [publishedResult, reviewResult, analysisResult] = await Promise.allSettled([
           getFindings(currentAuditId),
           getReview(currentAuditId),
           getAnalysis(currentAuditId),
         ])
         if (cancelled) return
-        setFindings(publishedRows)
-        setReviewItems(reviewRows)
-        setAnalysisItems(analysisRows)
+        if (publishedResult.status === 'fulfilled') {
+          setFindings(publishedResult.value)
+          setPublishedError(null)
+        } else {
+          setFindings([])
+          const msg = normalizeUiError(publishedResult.reason, 'Unable to load Published findings.')
+          setPublishedError(msg)
+        }
+        if (reviewResult.status === 'fulfilled') {
+          setReviewItems(reviewResult.value)
+          setReviewError(null)
+        } else {
+          setReviewItems([])
+          setReviewError(normalizeUiError(reviewResult.reason, 'Unable to load Review findings.'))
+        }
+        if (analysisResult.status === 'fulfilled') {
+          setAnalysisItems(analysisResult.value)
+          setAnalysisError(null)
+        } else {
+          setAnalysisItems([])
+          setAnalysisError(normalizeUiError(analysisResult.reason, 'Unable to load Analysis findings.'))
+        }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load findings')
+        if (!cancelled) setPublishedError(e instanceof Error ? e.message : 'Failed to load findings')
       }
     }
 
@@ -109,6 +132,14 @@ export function FindingsPage() {
     }
     return base
   }, [activeRows])
+
+  useEffect(() => {
+    if (viewMode !== 'published') return
+    if (!publishedError?.toLowerCase().includes('blocked')) return
+    if (!orderedReviewItems.length) return
+    setViewMode('review')
+    setUiNotice('Published findings are blocked until review issues are resolved. Showing Review findings instead.')
+  }, [publishedError, orderedReviewItems.length, viewMode])
 
   useEffect(() => {
     setSelectedByView((current) => {
@@ -172,9 +203,20 @@ export function FindingsPage() {
               </div>
             ))}
           </div>
+          {publishedError && viewMode === 'published' && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              <div className="font-semibold">Publication blocked</div>
+              <div className="mt-1">Published findings are unavailable until review blockers are resolved.</div>
+              <button className="mt-2 rounded bg-amber-600 px-3 py-1 text-xs font-medium text-white" onClick={() => setViewMode('review')}>
+                View review findings
+              </button>
+            </div>
+          )}
         </header>
-
-        {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
+        {uiNotice && <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700">{uiNotice}</div>}
+        {sectionsError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{sectionsError}</div>}
+        {viewMode === 'review' && reviewError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{reviewError}</div>}
+        {viewMode === 'analysis' && analysisError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{analysisError}</div>}
 
         <div className="surface-card overflow-hidden">
           <table className="w-full text-sm">
@@ -241,6 +283,14 @@ function rowSeverityOrKind(row: FindingOut | ReviewItemOut | AnalysisItemOut): s
   if ('item_kind' in row) return row.item_kind
   if ('analysis_type' in row) return row.analysis_type
   return 'n/a'
+}
+
+function normalizeUiError(reason: unknown, fallback: string): string {
+  const raw = reason instanceof Error ? reason.message : String(reason ?? fallback)
+  if (raw.toLowerCase().includes('published findings blocked')) {
+    return 'Published findings are blocked until review issues are resolved.'
+  }
+  return fallback
 }
 
 function humanize(value: string): string {
