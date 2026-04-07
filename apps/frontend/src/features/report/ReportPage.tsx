@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 
+import { useAppState } from '../../app/state'
 import { createReport, getReport, getReview, reportDownloadUrl } from '../../lib/api'
 import type { ReportOut, ReviewItemOut } from '../../lib/types'
-import { useAppState } from '../../app/state'
 
 export function ReportPage() {
   const { auditId } = useAppState()
@@ -33,18 +33,11 @@ export function ReportPage() {
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
     for (const row of reviewRows) {
-      const status = normalizeStatus(row.status)
-      base[status] += 1
+      const mapped = normalizeStatus(row.status)
+      base[mapped] += 1
     }
     return base
   }, [reviewRows])
-  const cardStyles: Record<string, string> = {
-    compliant: 'from-emerald-50 to-emerald-100 border-emerald-200 text-emerald-900',
-    partial: 'from-amber-50 to-amber-100 border-amber-200 text-amber-900',
-    gap: 'from-rose-50 to-rose-100 border-rose-200 text-rose-900',
-    'needs review': 'from-violet-50 to-violet-100 border-violet-200 text-violet-900',
-    'not applicable': 'from-slate-50 to-slate-100 border-slate-200 text-slate-800',
-  }
 
   async function generate() {
     if (!auditId) return
@@ -61,39 +54,49 @@ export function ReportPage() {
   if (!auditId) return <div className="surface-card p-6 text-slate-600">Run an audit first.</div>
 
   return (
-    <section>
-      <h1 className="section-title">Report</h1>
-      <p className="section-subtitle">Executive summary and downloadable PDF artifact.</p>
+    <section className="space-y-5">
+      <header className="surface-card p-6">
+        <h1 className="section-title">Report center</h1>
+        <p className="section-subtitle">Generate an executive-ready PDF with current audit outcomes and evidence references.</p>
 
-      <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        {Object.entries(counts).map(([label, count]) => (
-          <article key={label} className={`rounded-2xl border bg-gradient-to-br p-4 shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md ${cardStyles[label]}`}>
-            <div className="text-xs uppercase tracking-wide opacity-75">{label}</div>
-            <div className="mt-2 text-2xl font-semibold">{count}</div>
-          </article>
-        ))}
-      </div>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {Object.entries(counts).map(([label, count]) => (
+            <article key={label} className={`metric-card ${metricTone(label)}`}>
+              <div className="text-xs uppercase tracking-wide opacity-75">{label}</div>
+              <div className="mt-2 text-2xl font-semibold">{count}</div>
+            </article>
+          ))}
+        </div>
+      </header>
 
-      {error && <div className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
+      <article className="surface-card p-6">
+        <h2 className="text-lg font-semibold text-slate-900">PDF generation</h2>
+        <p className="mt-1 text-sm text-slate-500">Use the latest review data to create a shareable compliance report.</p>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <button onClick={generate} disabled={status === 'generating'} className="btn-primary">
-          {status === 'generating' ? 'Generating...' : 'Generate PDF'}
-        </button>
-        {status === 'ready' && (
-          <a
-            href={reportDownloadUrl(auditId)}
-            target="_blank"
-            rel="noreferrer"
-            className="rounded-xl border border-emerald-300 bg-emerald-100 px-5 py-3 font-semibold text-emerald-700"
-          >
-            Download PDF
-          </a>
-        )}
-        {report?.created_at && <span className="text-sm text-slate-400">Last generated: {new Date(report.created_at).toLocaleString()}</span>}
-      </div>
+        {error && <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
+
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <button onClick={generate} disabled={status === 'generating'} className="btn-primary min-w-40">
+            {status === 'generating' ? 'Generating…' : 'Generate PDF'}
+          </button>
+          {status === 'ready' && (
+            <a href={reportDownloadUrl(auditId)} target="_blank" rel="noreferrer" className="btn-secondary">
+              Download PDF
+            </a>
+          )}
+          {report?.created_at && <span className="text-xs text-slate-500">Last generated: {new Date(report.created_at).toLocaleString()}</span>}
+        </div>
+      </article>
     </section>
   )
+}
+
+function metricTone(label: string): string {
+  if (label === 'compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (label === 'partial') return 'border-amber-200 bg-amber-50 text-amber-800'
+  if (label === 'gap') return 'border-rose-200 bg-rose-50 text-rose-800'
+  if (label === 'needs review') return 'border-violet-200 bg-violet-50 text-violet-800'
+  return 'border-slate-200 bg-slate-50 text-slate-700'
 }
 
 function normalizeStatus(status?: string | null): 'compliant' | 'partial' | 'gap' | 'needs review' | 'not applicable' {

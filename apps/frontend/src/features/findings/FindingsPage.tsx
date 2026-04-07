@@ -104,8 +104,8 @@ export function FindingsPage() {
   const counts = useMemo(() => {
     const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
     for (const row of activeRows) {
-      const status = normalizeStatus(rowStatus(row))
-      if (status in base) base[status] += 1
+      const mapped = normalizeStatus(rowStatus(row))
+      if (mapped in base) base[mapped] += 1
     }
     return base
   }, [activeRows])
@@ -122,53 +122,67 @@ export function FindingsPage() {
   if (!auditId) return <EmptyState message="No audit in progress. Trigger an audit from Sections page." />
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-      <div>
-        <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="section-title">Findings</h1>
-            <p className="section-subtitle">Audit status: <span className="font-medium text-slate-700">{status}</span></p>
-          </div>
-          {(status === 'running' || status === 'pending') && (
-            <div className="relative grid h-20 w-20 place-items-center">
-              <svg className="h-20 w-20 -rotate-90" viewBox="0 0 100 100" aria-label="Audit progress">
-                <circle cx="50" cy="50" r="42" strokeWidth="8" className="fill-none stroke-slate-200" />
-                <circle
-                  cx="50"
-                  cy="50"
-                  r="42"
-                  strokeWidth="8"
-                  strokeDasharray={264}
-                  strokeDashoffset={264 - (264 * progress) / 100}
-                  className="fill-none stroke-cyan-500 transition-all duration-700"
-                />
-              </svg>
-              <span className="absolute text-sm font-semibold text-cyan-700">{Math.round(progress)}%</span>
+    <section className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
+      <div className="space-y-4">
+        <header className="surface-card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="section-title">Findings workspace</h1>
+              <p className="section-subtitle">Audit status: <span className="font-medium text-slate-700 capitalize">{status}</span></p>
             </div>
-          )}
-          <div className="flex flex-wrap gap-2 text-xs">
-            {Object.entries(counts).map(([label, count]) => (
-              <span key={label} className={`rounded-full border px-3 py-1 ${countChipClass(label as FindingOut['status'])}`}>
-                {label}: {count}
-              </span>
+            <div className="flex items-center gap-3">
+              {(status === 'running' || status === 'pending') && (
+                <div className="relative h-14 w-14">
+                  <svg className="h-14 w-14 -rotate-90" viewBox="0 0 100 100" aria-label="Audit progress">
+                    <circle cx="50" cy="50" r="42" strokeWidth="9" className="fill-none stroke-slate-200" />
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="42"
+                      strokeWidth="9"
+                      strokeDasharray={264}
+                      strokeDashoffset={264 - (264 * progress) / 100}
+                      className="fill-none stroke-sky-500 transition-all duration-700"
+                    />
+                  </svg>
+                  <span className="absolute inset-0 grid place-items-center text-xs font-semibold text-sky-700">{Math.round(progress)}%</span>
+                </div>
+              )}
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">{activeRows.length} records</span>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {(['published', 'review', 'analysis'] as const).map((mode) => (
+              <button
+                key={mode}
+                className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${viewMode === mode ? 'bg-slate-900 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                onClick={() => setViewMode(mode)}
+              >
+                {mode}
+              </button>
             ))}
           </div>
-          <div className="flex gap-2 text-xs">
-            <button className={`rounded-full px-3 py-1 ${viewMode === 'published' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700'}`} onClick={() => setViewMode('published')}>Published</button>
-            <button className={`rounded-full px-3 py-1 ${viewMode === 'review' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700'}`} onClick={() => setViewMode('review')}>Review</button>
-            <button className={`rounded-full px-3 py-1 ${viewMode === 'analysis' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700'}`} onClick={() => setViewMode('analysis')}>Analysis</button>
+
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+            {Object.entries(counts).map(([label, count]) => (
+              <div key={label} className={`metric-card ${countChipClass(label as FindingOut['status'])}`}>
+                <div className="text-[11px] uppercase tracking-wide opacity-80">{label}</div>
+                <div className="mt-1 text-xl font-semibold">{count}</div>
+              </div>
+            ))}
           </div>
         </header>
 
-        {error && <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
+        {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
 
-        <div className="surface-card overflow-hidden border border-slate-200/70 shadow-xl shadow-slate-300/30">
+        <div className="surface-card overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-slate-100/90 text-left text-slate-600">
+            <thead className="bg-slate-100/80 text-left text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-4 py-3">Section</th>
                 <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Severity</th>
+                <th className="px-4 py-3">Severity / type</th>
               </tr>
             </thead>
             <tbody>
@@ -178,7 +192,7 @@ export function FindingsPage() {
                   <tr
                     key={finding.id}
                     onClick={() => setSelectedByView((current) => ({ ...current, [viewMode]: finding.id }))}
-                    className={`cursor-pointer border-t border-slate-200 hover:bg-slate-50 ${selectedId === finding.id ? 'bg-cyan-50' : 'bg-white'} transition-colors`}
+                    className={`cursor-pointer border-t border-slate-200/80 transition-colors hover:bg-sky-50/50 ${selectedId === finding.id ? 'bg-sky-50/80' : 'bg-white'}`}
                   >
                     <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
                     <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
@@ -191,9 +205,9 @@ export function FindingsPage() {
         </div>
       </div>
 
-      <aside className="surface-card sticky top-6 h-fit border border-slate-200/70 p-6 shadow-xl shadow-slate-300/30">
+      <aside className="surface-card sticky top-24 h-fit p-5">
         {!selectedPublished && !selectedReview && !selectedAnalysis ? (
-          <p className="text-slate-600">Select a finding to inspect full details.</p>
+          <p className="text-sm text-slate-600">Select a finding on the left to inspect legal context and remediation details.</p>
         ) : (
           <div className="space-y-4">
             {selectedPublished && <PublishedDetail finding={selectedPublished} sectionText={sectionsById[selectedPublished.section_id]?.content ?? null} />}
@@ -239,9 +253,9 @@ function humanize(value: string): string {
 
 function Detail({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <h3 className="text-sm font-semibold text-slate-700">{label}</h3>
-      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{value}</p>
+    <div className="detail-block">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</h3>
+      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{value}</p>
     </div>
   )
 }
@@ -249,7 +263,7 @@ function Detail({ label, value }: { label: string; value: string }) {
 function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectionText: string | null }) {
   return (
     <>
-      <h2 className="text-lg font-semibold">Published finding details</h2>
+      <h2 className="text-lg font-semibold text-slate-900">Published finding</h2>
       <div className="flex flex-wrap gap-2">
         <StatusBadge status={finding.status} />
         {finding.finding_type && <Pill value={finding.finding_type} />}
@@ -261,21 +275,7 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
       <Detail label="Legal anchors" value={finding.primary_legal_anchor?.join(', ') ?? 'n/a'} />
       <Detail label="Secondary anchors" value={finding.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
       <Detail label="Section text" value={sectionText ?? 'Systemic finding (document-level synthesis)'} />
-      <div>
-        <h3 className="text-sm font-semibold text-slate-700">Citations</h3>
-        <ul className="mt-2 space-y-2 text-sm">
-          {finding.citations.length === 0 ? (
-            <li className="text-slate-500">No citations.</li>
-          ) : (
-            finding.citations.map((c, idx) => (
-              <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
-                <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
-              </li>
-            ))
-          )}
-        </ul>
-      </div>
+      <CitationList title="Citations" items={finding.citations} />
     </>
   )
 }
@@ -283,7 +283,7 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
 function ReviewDetail({ item }: { item: ReviewItemOut }) {
   return (
     <>
-      <h2 className="text-lg font-semibold">Review item details</h2>
+      <h2 className="text-lg font-semibold text-slate-900">Review artifact</h2>
       <div className="flex flex-wrap gap-2">
         <Pill value={`source: ${item.item_kind}`} />
         {item.status && <StatusBadge status={item.status} />}
@@ -304,7 +304,7 @@ function ReviewDetail({ item }: { item: ReviewItemOut }) {
 function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
   return (
     <>
-      <h2 className="text-lg font-semibold">Analysis artifact details</h2>
+      <h2 className="text-lg font-semibold text-slate-900">Analysis artifact</h2>
       <div className="flex flex-wrap gap-2">
         {item.status_candidate && <StatusBadge status={item.status_candidate} />}
         {item.analysis_stage && <Pill value={item.analysis_stage} />}
@@ -317,40 +317,46 @@ function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
       <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
       <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
       <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
-      <div>
-        <h3 className="text-sm font-semibold text-slate-700">Analysis citations</h3>
-        <ul className="mt-2 space-y-2 text-sm">
-          {item.citations.length === 0 ? (
-            <li className="text-slate-500">No citations.</li>
-          ) : (
-            item.citations.map((c, idx) => (
-              <li key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
-                <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
-              </li>
-            ))
-          )}
-        </ul>
-      </div>
+      <CitationList title="Analysis citations" items={item.citations} />
     </>
+  )
+}
+
+function CitationList({ title, items }: { title: string; items: { chunk_id: string; article_number: string; article_title: string; excerpt: string }[] }) {
+  return (
+    <div>
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
+      <ul className="mt-2 space-y-2 text-sm">
+        {items.length === 0 ? (
+          <li className="detail-block text-slate-500">No citations.</li>
+        ) : (
+          items.map((c, idx) => (
+            <li key={`${c.chunk_id}-${idx}`} className="detail-block">
+              <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
+              <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
   )
 }
 
 function Pill({ value }: { value: string }) {
   const token = value.toLowerCase()
-  let tone = 'border-slate-300 bg-slate-100 text-slate-700'
-  if (token.includes('support_only') || token.includes('internal_only')) tone = 'border-sky-300 bg-sky-50 text-sky-700'
-  if (token.includes('publishable') || token.includes('systemic')) tone = 'border-emerald-300 bg-emerald-50 text-emerald-700'
-  if (token.includes('candidate') || token.includes('probable')) tone = 'border-amber-300 bg-amber-50 text-amber-700'
-  if (token.includes('gap') || token.includes('blocked')) tone = 'border-rose-300 bg-rose-50 text-rose-700'
-  return <span className={`rounded-full border px-2 py-1 text-xs ${tone}`}>{value}</span>
+  let tone = 'border-slate-200 bg-slate-100 text-slate-700'
+  if (token.includes('support_only') || token.includes('internal_only')) tone = 'border-sky-200 bg-sky-50 text-sky-700'
+  if (token.includes('publishable') || token.includes('systemic')) tone = 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  if (token.includes('candidate') || token.includes('probable')) tone = 'border-amber-200 bg-amber-50 text-amber-700'
+  if (token.includes('gap') || token.includes('blocked')) tone = 'border-rose-200 bg-rose-50 text-rose-700'
+  return <span className={`rounded-full border px-2.5 py-1 text-xs ${tone}`}>{value}</span>
 }
 
 function countChipClass(status: FindingOut['status']): string {
-  if (status === 'gap') return 'border-rose-300 bg-rose-50 text-rose-700'
-  if (status === 'partial' || status === 'needs review') return 'border-amber-300 bg-amber-50 text-amber-700'
-  if (status === 'compliant') return 'border-emerald-300 bg-emerald-50 text-emerald-700'
-  return 'border-slate-300 bg-slate-100 text-slate-700'
+  if (status === 'gap') return 'border-rose-200 bg-rose-50 text-rose-700'
+  if (status === 'partial' || status === 'needs review') return 'border-amber-200 bg-amber-50 text-amber-700'
+  if (status === 'compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  return 'border-slate-200 bg-slate-50 text-slate-700'
 }
 
 function normalizeStatus(status: string): FindingOut['status'] {

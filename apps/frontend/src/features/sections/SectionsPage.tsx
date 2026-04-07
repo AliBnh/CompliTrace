@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import { useAppState } from '../../app/state'
 import { createAudit, getSections } from '../../lib/api'
 import type { SectionOut } from '../../lib/types'
-import { useAppState } from '../../app/state'
 
 export function SectionsPage() {
   const { documentId, setAuditId } = useAppState()
@@ -25,6 +25,15 @@ export function SectionsPage() {
       .finally(() => setLoading(false))
   }, [documentId])
 
+  const extractionStats = useMemo(() => {
+    const contentChars = sections.reduce((sum, section) => sum + section.content.length, 0)
+    return {
+      sections: sections.length,
+      avgLength: sections.length ? Math.round(contentChars / sections.length) : 0,
+      withPageRef: sections.filter((item) => item.page_start != null || item.page_end != null).length,
+    }
+  }, [sections])
+
   async function startAudit() {
     if (!documentId) return
     setAuditLoading(true)
@@ -40,39 +49,44 @@ export function SectionsPage() {
     }
   }
 
-  if (!documentId) return <EmptyState message="No document uploaded yet. Start on Upload page." />
+  if (!documentId) return <EmptyState message="No document uploaded yet. Start on the Upload page." />
 
   return (
-    <section>
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="section-title">Sections Review</h1>
-          <p className="section-subtitle">Confirm section extraction before triggering the audit.</p>
+    <section className="space-y-5">
+      <header className="surface-card p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="section-title">Sections review</h1>
+            <p className="section-subtitle">Validate extracted policy structure before launching the GDPR audit.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            {auditLoading && <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-medium text-sky-700">Preparing audit…</span>}
+            <button onClick={startAudit} disabled={auditLoading || loading || sections.length === 0} className="btn-primary">
+              {auditLoading ? 'Starting…' : 'Start audit'}
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-4">
-          {auditLoading && (
-            <div className="relative grid h-16 w-16 place-items-center">
-              <div className="absolute h-16 w-16 rounded-full border-4 border-cyan-100" />
-              <div className="absolute h-16 w-16 animate-spin rounded-full border-4 border-transparent border-t-cyan-500 border-r-blue-500" />
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-cyan-700">Running</span>
-            </div>
-          )}
-          <button onClick={startAudit} disabled={auditLoading || loading || sections.length === 0} className="btn-primary">
-            {auditLoading ? 'Starting...' : 'Start Audit'}
-          </button>
-        </div>
-      </div>
 
-      {error && <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>}
+        <div className="mt-5 grid gap-3 sm:grid-cols-3">
+          <MetricCard label="Sections" value={String(extractionStats.sections)} />
+          <MetricCard label="Avg chars / section" value={String(extractionStats.avgLength)} />
+          <MetricCard label="With page reference" value={String(extractionStats.withPageRef)} />
+        </div>
+      </header>
+
+      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
+
       {loading ? (
-        <div className="text-slate-600">Loading sections...</div>
+        <div className="surface-card p-6 text-sm text-slate-500">Loading extracted sections…</div>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {sections.map((section) => (
-            <article key={section.id} className="surface-card p-5 animate-rise">
-              <div className="flex items-center justify-between gap-4">
-                <h2 className="font-semibold">{section.section_order}. {section.section_title || 'Untitled section'}</h2>
-                <span className="text-xs text-slate-400">{formatPageRange(section.page_start, section.page_end)}</span>
+            <article key={section.id} className="surface-card animate-rise p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-base font-semibold text-slate-900">
+                  {section.section_order}. {section.section_title || 'Untitled section'}
+                </h2>
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-600">{formatPageRange(section.page_start, section.page_end)}</span>
               </div>
               <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-600">{section.content}</p>
             </article>
@@ -80,6 +94,15 @@ export function SectionsPage() {
         </div>
       )}
     </section>
+  )
+}
+
+function MetricCard({ label, value }: { label: string; value: string }) {
+  return (
+    <article className="metric-card">
+      <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="mt-2 text-2xl font-semibold text-slate-900">{value}</p>
+    </article>
   )
 }
 

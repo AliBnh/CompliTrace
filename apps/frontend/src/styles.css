@@ -8,12 +8,13 @@
 
 body {
   margin: 0;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji';
   font-size: 100%;
+  line-height: 1.5;
   background:
-    radial-gradient(900px 380px at 12% -5%, rgba(186, 230, 253, 0.35) 0%, transparent 60%),
-    radial-gradient(900px 360px at 96% -8%, rgba(191, 219, 254, 0.28) 0%, transparent 60%),
-    linear-gradient(180deg, #f8fafc 0%, #f3f6fb 100%);
+    radial-gradient(1000px 520px at 10% -15%, rgba(186, 230, 253, 0.45) 0%, transparent 62%),
+    radial-gradient(920px 480px at 100% -18%, rgba(191, 219, 254, 0.4) 0%, transparent 65%),
+    linear-gradient(180deg, #f8fbff 0%, #f4f7fc 100%);
   color: #0f172a;
 }
 
@@ -34,15 +35,19 @@ body {
 
 @layer components {
   .btn-primary {
-    @apply rounded-xl bg-gradient-to-r from-sky-500 via-cyan-500 to-blue-600 px-5 py-3 font-semibold text-white shadow-lg shadow-cyan-200/50 transition duration-200 hover:-translate-y-0.5 hover:from-sky-600 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center justify-center rounded-xl border border-sky-500 bg-gradient-to-r from-sky-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-blue-200/60 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-45;
   }
 
   .btn-secondary {
-    @apply rounded-xl border border-slate-200 bg-white/95 px-5 py-3 font-semibold text-slate-700 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:bg-white hover:shadow-md;
+    @apply inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200;
   }
 
   .surface-card {
-    @apply rounded-2xl border border-slate-200/90 bg-white/95 shadow-md shadow-slate-200/60 transition duration-300 hover:-translate-y-0.5 hover:shadow-lg;
+    @apply rounded-2xl border border-slate-200/90 bg-white/95 shadow-[0_12px_36px_-20px_rgba(15,23,42,0.35)] transition-all duration-300;
+  }
+
+  .glass-panel {
+    @apply rounded-2xl border border-white/70 bg-white/75 backdrop-blur-xl;
   }
 
   .section-title {
@@ -53,8 +58,12 @@ body {
     @apply mt-1 text-sm text-slate-500;
   }
 
-  .glass-panel {
-    @apply rounded-2xl border border-slate-200/80 bg-white/90;
+  .metric-card {
+    @apply rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-[0_12px_28px_-22px_rgba(15,23,42,0.55)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_18px_36px_-22px_rgba(37,99,235,0.35)];
+  }
+
+  .detail-block {
+    @apply rounded-xl border border-slate-200/80 bg-slate-50/65 p-3;
   }
 
   .animate-rise {
