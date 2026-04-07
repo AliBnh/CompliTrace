@@ -45,6 +45,7 @@ from app.services.audit_runner import (
     _systemic_evidence_refs,
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
+    _build_final_disposition_map,
     _extract_notice_cross_references,
     _source_scope_qualification,
     _issue_has_unseen_reference,
@@ -89,6 +90,27 @@ def test_evidence_sufficient_true_case():
         RetrievalChunk(chunk_id="c3", article_number="17", article_title="", paragraph_ref=None, content="aux", score=0.30),
     ]
     assert _evidence_sufficient(chunks) is True
+
+
+def test_final_disposition_maps_controller_contact_gap_instead_of_unresolved_error():
+    sections = [
+        SectionData(
+            id="sec-1",
+            section_order=1,
+            section_title="Privacy notice",
+            content="We are ACME Corp and process personal data.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+
+    controller = disposition["controller_identity_contact"]
+    assert controller["status"] == "gap"
+    assert controller["issue_key"] == "missing_controller_contact"
+    assert controller["publication_recommendation"] == "publish"
 
 
 def test_substantive_finding_without_citations_is_downgraded():

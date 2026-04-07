@@ -2426,7 +2426,12 @@ def _build_final_disposition_map(
             if obligation_key and obligation_map.get(obligation_key) is False:
                 status, reason = "not_assessable", f"{obligation_key}=not_visible and no publishable issue found"
             elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
-                status, reason = "unresolved_internal_error", f"no explicit positive evidence record for {obligation_key}"
+                if family == "controller_identity_contact":
+                    status, reason = "gap", "controller identity may be visible but controller contact disclosure is missing or unclear"
+                    issue = "missing_controller_contact"
+                else:
+                    status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
+        severity = "high" if family in {"controller_identity_contact", "legal_basis"} else "medium"
         families[family] = {
             "status": status,
             "reasoning": reason,
@@ -2435,6 +2440,8 @@ def _build_final_disposition_map(
             "source_scope_dependency": "high",
             "positive_evidence_ids": _issue_evidence_ids(issue)[0],
             "negative_evidence_ids": _issue_evidence_ids(issue)[1],
+            "severity": severity,
+            "issue_key": issue,
         }
 
     specialist_issue_by_family = {
@@ -2476,6 +2483,8 @@ def _build_final_disposition_map(
             "source_scope_dependency": "high" if triggered else "low",
             "positive_evidence_ids": _issue_evidence_ids(issue)[0],
             "negative_evidence_ids": _issue_evidence_ids(issue)[1],
+            "severity": "high" if family in {"transfer", "profiling", "special_category"} else "medium",
+            "issue_key": issue,
         }
     core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
     specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "recipients", "special_category", "dpo_contact"]

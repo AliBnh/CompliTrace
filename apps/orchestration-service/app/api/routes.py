@@ -101,6 +101,19 @@ def _sanitize_published_text(text: str | None) -> str | None:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+def _sanitize_review_text(text: str | None, *, debug: bool) -> str | None:
+    if debug or not text:
+        return text
+    cleaned = _sanitize_published_text(text)
+    if not cleaned:
+        return cleaned
+    cleaned = cleaned.replace(
+        "Systemic finding withheld from publication pending complete legal/document support package",
+        "This issue was identified internally but is not yet finalized for publication because the current evidence package is incomplete.",
+    )
+    return cleaned
+
+
 def _normalize_internal_state(
     classification: str | None,
     status: str | None,
@@ -557,10 +570,14 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
                 row.finding_level,
                 row.publication_state,
             )[3],
-            suppression_reason=row.gap_note if row.publication_state in {"blocked", "internal_only"} else None,
+            suppression_reason=_sanitize_review_text(row.gap_note, debug=debug) if row.publication_state in {"blocked", "internal_only"} else None,
             completeness_map=row.legal_requirement if row.legal_requirement and "completeness" in row.legal_requirement else None,
-            gap_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0],
-            remediation_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1],
+            gap_note=_sanitize_review_text(
+                _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0], debug=debug
+            ),
+            remediation_note=_sanitize_review_text(
+                _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1], debug=debug
+            ),
         )
         for row in findings
     )
@@ -599,10 +616,10 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
                 row.finding_level_candidate,
                 row.publication_state_candidate,
             )[3],
-            suppression_reason=row.suppression_reason,
+            suppression_reason=_sanitize_review_text(row.suppression_reason, debug=debug),
             completeness_map=row.retrieval_summary if row.analysis_type == "completeness_outcome" else None,
-            gap_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[0],
-            remediation_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[1],
+            gap_note=_sanitize_review_text(_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[0], debug=debug),
+            remediation_note=_sanitize_review_text(_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[1], debug=debug),
         )
         for row in analysis_rows
     )
@@ -637,7 +654,7 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
                     duty=duty,
                     triggered=bool(item.get("triggered", True)),
                     final_disposition=final_status,
-                    reason=item.get("reasoning"),
+                    reason=_sanitize_review_text(item.get("reasoning"), debug=debug),
                     source_scope_dependency=str(item.get("source_scope_dependency") or "high"),
                     publication_recommendation=str(item.get("publication_recommendation") or "internal_only"),
                 )
@@ -647,7 +664,9 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
             "profiling": ("profiling", "profiling"),
             "role_ambiguity": ("role_ambiguity", "role_ambiguity"),
             "article14_source": ("article14_source", "article14"),
+            "recipients": ("recipients", "recipients"),
             "special_category": ("special_category", "special_category"),
+            "dpo_contact": ("dpo_contact", "dpo_contact"),
         }
         for family, (lookup_key, label) in specialist_triggers.items():
             item = disposition.get(lookup_key, {})
@@ -660,7 +679,7 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
                     family=label,
                     triggered=bool(item.get("triggered", item.get("status") != "satisfied")),
                     final_disposition=item.get("status"),
-                    reason=item.get("reasoning"),
+                    reason=_sanitize_review_text(item.get("reasoning"), debug=debug),
                     source_scope_dependency=str(item.get("source_scope_dependency") or "low"),
                     publication_recommendation=str(item.get("publication_recommendation") or "internal_only"),
                 )

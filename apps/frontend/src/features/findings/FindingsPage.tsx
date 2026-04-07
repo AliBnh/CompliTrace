@@ -112,7 +112,18 @@ export function FindingsPage() {
   }, [findings, sectionsById])
 
   const orderedReviewItems = useMemo(() => {
-    return [...reviewItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
+    return [...reviewItems]
+      .filter((item) => !item.section_id.startsWith('ledger:'))
+      .sort((a, b) => {
+        const rank = (row: ReviewItemOut) => {
+          if (row.item_kind === 'review_block' && row.review_group === 'core_duties') return 0
+          if (row.item_kind === 'review_block' && row.review_group === 'specialist_families') return 1
+          if (row.item_kind === 'finding') return 2
+          return 3
+        }
+        const r = rank(a) - rank(b)
+        return r !== 0 ? r : a.id.localeCompare(b.id)
+      })
   }, [reviewItems])
 
   const orderedAnalysisItems = useMemo(() => {
@@ -132,6 +143,10 @@ export function FindingsPage() {
     }
     return base
   }, [activeRows])
+  const publicationBlocked = !!publishedError?.toLowerCase().includes('blocked')
+  const blockerCount = useMemo(() => {
+    return reviewItems.filter((r) => r.item_kind === 'review_block' && r.final_disposition && !['satisfied'].includes(r.final_disposition)).length
+  }, [reviewItems])
 
   useEffect(() => {
     if (viewMode !== 'published') return
@@ -180,6 +195,11 @@ export function FindingsPage() {
                 </div>
               )}
               <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">{activeRows.length} records</span>
+              {publicationBlocked && (
+                <span className="rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">
+                  Published: Blocked {blockerCount > 0 ? `• Blockers ${blockerCount}` : ''}
+                </span>
+              )}
             </div>
           </div>
 

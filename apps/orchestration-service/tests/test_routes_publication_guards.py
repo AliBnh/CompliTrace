@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.routes import _sanitize_published_text, create_report, get_findings
+from app.api.routes import _sanitize_published_text, _sanitize_review_text, create_report, get_findings, get_review
 from app.db.base import Base
 from app.models.audit import Audit, Finding, FindingCitation
 
@@ -173,3 +173,36 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     assert [c.chunk_id for c in rows[0].citations] == ["sec:real-evidence-1"]
+
+
+def test_sanitize_review_text_strips_internal_markers_when_not_debug():
+    raw = "Systemic finding withheld from publication pending complete legal/document support package [withheld by final publication validator]"
+    cleaned = _sanitize_review_text(raw, debug=False)
+    assert cleaned is not None
+    assert "withheld by final publication validator" not in cleaned
+    assert "not yet finalized for publication" in cleaned
+
+
+def test_get_review_includes_recipients_and_dpo_blocks_from_decision_map(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"Recipients not clearly disclosed"},"dpo_contact":{"status":"not_assessable","publication_recommendation":"internal_only","reasoning":"DPO applicability uncertain"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_review(audit.id, debug=False, db=db_session)
+    families = {r.family for r in rows if r.item_kind == "review_block" and r.review_group == "specialist_families"}
+    assert "recipients" in families
+    assert "dpo_contact" in families
