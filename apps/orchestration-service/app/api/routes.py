@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
-from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, Report
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, EvidenceRecord, Finding, Report
 from app.schemas.audit import (
     AuditCreate,
     AnalysisCitationOut,
@@ -196,7 +196,7 @@ def _project_published_findings_from_map(
         if status not in {"gap", "referenced_but_unseen"} or publish_rec != "publish":
             continue
         reason = str(item.get("reasoning") or "")
-        evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str)]
+        evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
         out.append(
             FindingOut(
                 id=f"projected:{audit_id}:{family}",
@@ -221,6 +221,10 @@ def _project_published_findings_from_map(
 def _is_real_evidence_ref(value: str) -> bool:
     token = (value or "").strip().lower()
     return bool(token) and not token.startswith("systemic-anchor:")
+
+
+def _known_evidence_ids(db: Session, audit_id: str) -> set[str]:
+    return {row[0] for row in db.query(EvidenceRecord.evidence_id).filter(EvidenceRecord.audit_id == audit_id).all()}
 
 
 def _reconciliation_blockers(
@@ -319,6 +323,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
 
     out: list[FindingOut] = []
+    evidence_ids = _known_evidence_ids(db, audit_id)
     seen: set[str] = set()
     for row in rows:
         if row.id in seen:
@@ -359,7 +364,10 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 severity_rationale=_sanitize_published_text(row.severity_rationale),
                 primary_legal_anchor=_deserialize_json_list(row.primary_legal_anchor),
                 secondary_legal_anchors=_deserialize_json_list(row.secondary_legal_anchors),
-                document_evidence_refs=_deserialize_json_list(row.document_evidence_refs),
+                document_evidence_refs=[
+                    ref for ref in (_deserialize_json_list(row.document_evidence_refs) or []) if ref in evidence_ids
+                ]
+                or None,
                 citation_summary_text=_sanitize_published_text(row.citation_summary_text),
                 support_complete=_deserialize_bool_flag(row.support_complete),
                 omission_basis=_deserialize_bool_flag(row.omission_basis),
@@ -382,7 +390,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                         excerpt=c.excerpt,
                     )
                     for c in row.citations
-                    if _is_real_evidence_ref(c.chunk_id)
+                    if _is_real_evidence_ref(c.chunk_id) and f"evi:chunk:{c.chunk_id}" in evidence_ids
                 ],
             )
         )

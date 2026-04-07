@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes import _sanitize_published_text, _sanitize_review_text, create_report, get_findings, get_review, get_review_grouped
 from app.db.base import Base
-from app.models.audit import Audit, Finding, FindingCitation
+from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
 
 
 @pytest.fixture()
@@ -69,7 +69,7 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
             status="not applicable",
             severity=None,
             legal_requirement="suppression_validator=final_disposition_map",
-            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing","positive_evidence_ids":["sec:transfer"]}}',
+            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing","positive_evidence_ids":["evi:policy:sec-transfer"]}}',
             publish_flag="no",
             publication_state="internal_only",
             finding_type="supporting_evidence",
@@ -83,7 +83,7 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
 
     assert len(findings) == 1
     assert findings[0].section_id == "systemic:missing_transfer_notice"
-    assert findings[0].document_evidence_refs == ["sec:transfer"]
+    assert findings[0].document_evidence_refs == ["evi:policy:sec-transfer"]
 
 
 def test_get_findings_blocks_when_decision_map_disallows_publication(db_session: Session):
@@ -167,6 +167,15 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
                 excerpt="real",
             ),
         ]
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:sec:real-evidence-1",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="sec:real-evidence-1",
+            text_excerpt="real",
+        )
     )
     db_session.commit()
 
