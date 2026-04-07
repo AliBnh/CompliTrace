@@ -2379,6 +2379,19 @@ def _build_final_disposition_map(
     sections: list[SectionData],
     obligation_map: dict[str, bool],
 ) -> dict[str, dict[str, str | bool]]:
+    def _issue_evidence_ids(issue_id: str) -> tuple[list[str], list[str]]:
+        positive: set[str] = set()
+        negative: set[str] = set()
+        for r in rows:
+            if _finding_issue_id(r) != issue_id:
+                continue
+            refs = _decode_json_list(r.document_evidence_refs)
+            if r.classification in {"probable_gap", "clear_non_compliance", "systemic_violation", "referenced_but_unseen"}:
+                positive.update(refs)
+            if r.classification in {"not_assessable", "diagnostic_internal_only"}:
+                negative.update(refs)
+        return sorted(positive), sorted(negative)
+
     families: dict[str, dict[str, str]] = {}
     core_issue_by_family = {
         "controller_identity_contact": "missing_controller_identity",
@@ -2408,6 +2421,8 @@ def _build_final_disposition_map(
             "triggered": True,
             "publication_recommendation": "publish" if status in {"gap", "referenced_but_unseen"} else "internal_only",
             "source_scope_dependency": "high",
+            "positive_evidence_ids": _issue_evidence_ids(issue)[0],
+            "negative_evidence_ids": _issue_evidence_ids(issue)[1],
         }
 
     specialist_issue_by_family = {
@@ -2415,7 +2430,9 @@ def _build_final_disposition_map(
         "profiling": "profiling_disclosure_gap",
         "role_ambiguity": "controller_processor_role_ambiguity",
         "article14_source": "article_14_indirect_collection_gap",
+        "recipients": "recipients_disclosure_gap",
         "special_category": "special_category_basis_unclear",
+        "dpo_contact": "dpo_contact_gap",
     }
     corpus = " ".join(_section_context_signals(s) for s in sections)
     for family, issue in specialist_issue_by_family.items():
@@ -2445,7 +2462,28 @@ def _build_final_disposition_map(
             "triggered": triggered,
             "publication_recommendation": "publish" if status in {"gap", "referenced_but_unseen"} else "internal_only",
             "source_scope_dependency": "high" if triggered else "low",
+            "positive_evidence_ids": _issue_evidence_ids(issue)[0],
+            "negative_evidence_ids": _issue_evidence_ids(issue)[1],
         }
+    core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
+    specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "recipients", "special_category", "dpo_contact"]
+    unresolved_core = [f for f in core_families if families.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}]
+    unresolved_specialist = [f for f in specialist_families if families.get(f, {}).get("triggered") and families.get(f, {}).get("status") not in {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}]
+    publishable_recommendations = [
+        f for f in specialist_families + core_families if families.get(f, {}).get("publication_recommendation") == "publish"
+    ]
+    families["_controls"] = {
+        "audit_status": "review_required" if unresolved_core else "complete",
+        "publication_allowed": not unresolved_core,
+        "publication_blockers": unresolved_core,
+        "scope_confidence_cap": 0.75 if unresolved_core or unresolved_specialist else 1.0,
+        "review_required_reasons": unresolved_core + unresolved_specialist,
+    }
+    families["_coverage_matrix"] = {
+        "core_resolved": len(unresolved_core) == 0,
+        "specialist_resolved": len(unresolved_specialist) == 0,
+        "publish_recommendation_count": len(publishable_recommendations),
+    }
     return families
 
 
@@ -2488,7 +2526,7 @@ def _final_publication_validator(
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     valid_final = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
     core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
-    specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "special_category"]
+    specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "recipients", "special_category", "dpo_contact"]
     unresolved_core = [f for f in core_families if disposition_map.get(f, {}).get("status") not in valid_final]
     hard_block_core = [
         f for f in core_families if disposition_map.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}

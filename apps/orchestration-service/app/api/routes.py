@@ -113,6 +113,98 @@ def _normalize_internal_state(
     return "not_applicable", "support_only", "none", "internal_only"
 
 
+def _load_final_decision_map(db: Session, audit_id: str) -> dict[str, dict[str, str | bool | list[str] | float]] | None:
+    disposition_ledger = (
+        db.query(Finding)
+        .filter(Finding.audit_id == audit_id)
+        .filter(Finding.legal_requirement == "suppression_validator=final_disposition_map")
+        .order_by(Finding.id.desc())
+        .first()
+    )
+    if not disposition_ledger or not disposition_ledger.gap_reasoning:
+        return None
+    try:
+        parsed = json.loads(disposition_ledger.gap_reasoning)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _publication_allowed_from_map(decision_map: dict[str, dict[str, str | bool | list[str] | float]]) -> bool:
+    controls = decision_map.get("_controls", {})
+    publication_allowed = controls.get("publication_allowed")
+    if isinstance(publication_allowed, bool):
+        return publication_allowed
+    core_families = ("controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right")
+    for family in core_families:
+        status = str((decision_map.get(family, {}) or {}).get("status") or "")
+        if status in {"unresolved_internal_error", "blocked"}:
+            return False
+    return True
+
+
+def _project_published_findings_from_map(
+    audit_id: str,
+    decision_map: dict[str, dict[str, str | bool | list[str] | float]],
+) -> list[FindingOut]:
+    family_to_issue = {
+        "controller_identity_contact": "missing_controller_identity",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights_notice": "missing_rights_notice",
+        "complaint_right": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+        "article14_source": "article_14_indirect_collection_gap",
+        "recipients": "recipients_disclosure_gap",
+        "special_category": "special_category_basis_unclear",
+        "dpo_contact": "dpo_contact_gap",
+    }
+    severity_defaults = {
+        "controller_identity_contact": "high",
+        "legal_basis": "high",
+        "transfer": "high",
+        "profiling": "high",
+        "retention": "medium",
+        "rights_notice": "medium",
+        "complaint_right": "medium",
+        "role_ambiguity": "high",
+        "article14_source": "medium",
+        "recipients": "medium",
+        "special_category": "high",
+        "dpo_contact": "medium",
+    }
+    out: list[FindingOut] = []
+    for family, issue in family_to_issue.items():
+        item = decision_map.get(family, {}) or {}
+        status = str(item.get("status") or "")
+        publish_rec = str(item.get("publication_recommendation") or "internal_only")
+        if status not in {"gap", "referenced_but_unseen"} or publish_rec != "publish":
+            continue
+        reason = str(item.get("reasoning") or "")
+        evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str)]
+        out.append(
+            FindingOut(
+                id=f"projected:{audit_id}:{family}",
+                section_id=f"systemic:{issue}",
+                status="gap",
+                severity=severity_defaults.get(family, "medium"),
+                classification="probable_gap",
+                finding_type="systemic",
+                publish_flag="yes",
+                artifact_role="publishable_finding",
+                finding_level="systemic",
+                publication_state="publishable",
+                gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
+                remediation_note="Address the identified gap with explicit GDPR-compliant notice language.",
+                document_evidence_refs=evidence_ids or None,
+                citations=[],
+            )
+        )
+    return out
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -152,6 +244,12 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         raise HTTPException(status_code=404, detail="Audit not found")
     if audit.status == "review_required":
         raise HTTPException(status_code=409, detail="Published findings blocked: audit requires review")
+    decision_map = _load_final_decision_map(db, audit_id)
+    if decision_map and not _publication_allowed_from_map(decision_map):
+        raise HTTPException(status_code=409, detail="Published findings blocked: final decision map disallows publication")
+    projected = _project_published_findings_from_map(audit_id, decision_map) if decision_map else []
+    if projected:
+        return projected
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
