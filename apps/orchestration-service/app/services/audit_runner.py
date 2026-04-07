@@ -11,7 +11,7 @@ from prometheus_client import Counter, Histogram
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, FindingCitation
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, EvidenceRecord, Finding, FindingCitation
 from app.services.clients import IngestionClient, KnowledgeClient, LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.services.llm import run_llm_classification
 
@@ -2025,6 +2025,57 @@ def _decode_json_list(raw: str | None) -> list[str]:
     return []
 
 
+def _upsert_evidence_records(db: Session, audit_id: str) -> None:
+    existing = {
+        row[0]
+        for row in db.query(EvidenceRecord.evidence_id).filter(EvidenceRecord.audit_id == audit_id).all()
+    }
+    findings = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    for row in findings:
+        policy_evidence_id = f"evi:policy:{row.section_id}"
+        if policy_evidence_id not in existing:
+            db.add(
+                EvidenceRecord(
+                    evidence_id=policy_evidence_id,
+                    audit_id=audit_id,
+                    evidence_type="policy_section",
+                    source_ref=row.section_id,
+                    text_excerpt=(row.policy_evidence_excerpt or row.gap_note or "")[:1000],
+                )
+            )
+            existing.add(policy_evidence_id)
+        derived_ids = [f"evi:ref:{ref}" for ref in _decode_json_list(row.document_evidence_refs)]
+        if row.section_id.startswith("systemic:"):
+            systemic_id = f"evi:derived:{row.section_id}:{row.id}"
+            if systemic_id not in existing:
+                db.add(
+                    EvidenceRecord(
+                        evidence_id=systemic_id,
+                        audit_id=audit_id,
+                        evidence_type="derived_systemic_evidence",
+                        source_ref=row.section_id,
+                        text_excerpt=(row.gap_reasoning or row.gap_note or "")[:1000],
+                        derived_from_evidence_ids=_serialize_json_list(derived_ids),
+                    )
+                )
+                existing.add(systemic_id)
+        for cit in row.citations:
+            chunk_evidence_id = f"evi:chunk:{cit.chunk_id}"
+            if chunk_evidence_id in existing:
+                continue
+            db.add(
+                EvidenceRecord(
+                    evidence_id=chunk_evidence_id,
+                    audit_id=audit_id,
+                    evidence_type="retrieval_chunk",
+                    source_ref=cit.chunk_id,
+                    text_excerpt=(cit.excerpt or "")[:1000],
+                    derived_from_evidence_ids=_serialize_json_list([policy_evidence_id]),
+                )
+            )
+            existing.add(chunk_evidence_id)
+
+
 def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligation_map: dict[str, bool]) -> tuple[list[str], bool]:
     section_signals = SYSTEMIC_SECTION_SIGNALS.get(issue_id, {"process", "collect", "personal data"})
     ranked_sections = sorted(
@@ -3475,6 +3526,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         json.dumps(final_disposition_map, sort_keys=True),
     )
     _partner_review_pass(db, audit.id)
+    _upsert_evidence_records(db, audit.id)
     post_review_rows = db.query(Finding).filter(Finding.audit_id == audit.id).all()
     invariant_errors = _state_invariant_validator(post_review_rows)
     if invariant_errors:

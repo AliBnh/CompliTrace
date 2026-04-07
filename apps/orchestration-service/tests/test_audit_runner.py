@@ -46,12 +46,13 @@ from app.services.audit_runner import (
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
     _build_final_disposition_map,
+    _upsert_evidence_records,
     _extract_notice_cross_references,
     _source_scope_qualification,
     _issue_has_unseen_reference,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
-from app.models.audit import Audit, Finding
+from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
 from app.db.base import Base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -111,6 +112,49 @@ def test_final_disposition_maps_controller_contact_gap_instead_of_unresolved_err
     assert controller["status"] == "gap"
     assert controller["issue_key"] == "missing_controller_contact"
     assert controller["publication_recommendation"] == "publish"
+
+
+def test_upsert_evidence_records_creates_policy_and_chunk_entries():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="sec-1",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            publish_flag="yes",
+            publication_state="publishable",
+            finding_type="local",
+            policy_evidence_excerpt="Controller contact is missing",
+            document_evidence_refs='["sec:1"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(
+            FindingCitation(
+                finding_id=finding.id,
+                chunk_id="gdpr-art-13-p-1-c",
+                article_number="13",
+                paragraph_ref="1(c)",
+                article_title="Information to be provided",
+                excerpt="The controller shall provide contact details.",
+            )
+        )
+        db.commit()
+
+        _upsert_evidence_records(db, audit.id)
+        db.commit()
+
+        records = db.query(EvidenceRecord).filter(EvidenceRecord.audit_id == audit.id).all()
+        ids = {r.evidence_id for r in records}
+        assert f"evi:policy:{finding.section_id}" in ids
+        assert "evi:chunk:gdpr-art-13-p-1-c" in ids
 
 
 def test_substantive_finding_without_citations_is_downgraded():

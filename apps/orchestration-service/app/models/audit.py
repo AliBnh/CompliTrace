@@ -165,3 +165,15 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     audit: Mapped[Audit] = relationship(back_populates="reports")
+
+
+class EvidenceRecord(Base):
+    __tablename__ = "evidence_records"
+
+    evidence_id: Mapped[str] = mapped_column(String(191), primary_key=True)
+    audit_id: Mapped[str] = mapped_column(String(36), ForeignKey("audits.id", ondelete="CASCADE"), index=True)
+    evidence_type: Mapped[str] = mapped_column(String(48), index=True)
+    source_ref: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    text_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    derived_from_evidence_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
