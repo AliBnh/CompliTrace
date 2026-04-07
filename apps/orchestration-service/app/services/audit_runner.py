@@ -2421,6 +2421,22 @@ def _build_final_disposition_map(
     for family, issue in specialist_issue_by_family.items():
         triggered = any(signal in corpus for signal in SPECIALIST_TRIGGER_RULES.get(issue, ({family}, ""))[0])
         status, reason = _final_disposition_for_issue(rows, issue)
+        if triggered:
+            if family == "transfer":
+                has_transfer_statement = _contains_any(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS)
+                has_safeguards = _contains_any(corpus, {"scc", "standard contractual clauses", "binding corporate rules", "adequacy", "art 49"})
+                if has_transfer_statement and not has_safeguards:
+                    status, reason = "gap", "transfer is explicitly described but safeguards/mechanisms are not disclosed"
+            elif family == "profiling":
+                profiling_signals = {"score", "scoring", "segment", "segmentation", "churn", "model", "attribution", "health marker", "profil"}
+                profiling_disclosure = {"logic involved", "significance", "envisaged consequences", "article 22"}
+                if _contains_any(corpus, profiling_signals) and not _contains_any(corpus, profiling_disclosure):
+                    status, reason = "gap", "profiling outputs are visible but required transparency elements are not disclosed"
+            elif family == "role_ambiguity":
+                mixed_roles = _contains_any(corpus, {"independent controller", "acts as controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor", "processor"})
+                clear_allocation = _contains_any(corpus, {"when we act as controller", "when we act as processor", "role allocation"})
+                if mixed_roles and not clear_allocation:
+                    status, reason = "gap", "mixed controller/processor role signals are present without clear allocation wording"
         if triggered and status == "satisfied":
             status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
         families[family] = {
@@ -2468,11 +2484,15 @@ def _final_publication_validator(
     disposition_map: dict[str, dict[str, str | bool]],
     source_scope: str,
 ) -> None:
+    audit = db.get(Audit, audit_id)
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     valid_final = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
     core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
     specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "special_category"]
     unresolved_core = [f for f in core_families if disposition_map.get(f, {}).get("status") not in valid_final]
+    hard_block_core = [
+        f for f in core_families if disposition_map.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}
+    ]
     unresolved_specialist = [f for f in specialist_families if disposition_map.get(f, {}).get("status") not in valid_final]
     if unresolved_core or unresolved_specialist:
         for family in unresolved_core:
@@ -2493,7 +2513,19 @@ def _final_publication_validator(
                 "specialist_family_resolution_gate",
                 disposition_map.get(family, {}).get("reasoning", "missing family disposition"),
             )
-    core_ok = not unresolved_core and not unresolved_specialist
+    core_ok = not unresolved_core and not unresolved_specialist and not hard_block_core
+    if hard_block_core and audit is not None:
+        audit.status = "review_required"
+        db.add(audit)
+        for family in hard_block_core:
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"publication_blocker=unresolved_core_duty:{family}",
+                "publication hard-stopped by unresolved core duty",
+                "core_duty_publication_gate",
+                disposition_map.get(family, {}).get("reasoning", "unresolved core duty"),
+            )
     for row in rows:
         issue = _finding_issue_id(row)
         family = _issue_to_family(issue)
@@ -2505,6 +2537,10 @@ def _final_publication_validator(
                 row.assertion_level = "excerpt_limited_gap" if row.classification != "referenced_but_unseen" else "referenced_but_unseen"
                 row.missing_from_document = "unknown"
                 scope_supports_assertion = False
+        if hard_block_core or family_status == "not_assessable":
+            row.source_scope_confidence = min(row.source_scope_confidence or 0.75, 0.75)
+            if row.assertion_level == "confirmed_document_gap":
+                row.assertion_level = "probable_document_gap"
         should_publish = (
             row.publish_flag == "yes"
             and core_ok

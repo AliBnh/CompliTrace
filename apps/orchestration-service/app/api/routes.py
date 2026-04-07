@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -87,6 +88,31 @@ def _apply_family_fallback(issue_type: str | None, gap_note: str | None, remedia
     return replacement
 
 
+INTERNAL_MARKER_RE = re.compile(
+    r"(?:\s*\[withheld by final publication validator\]\s*|suppression_validator=\S+|state_invariant_violation:[^\s,;]+|post-review invariant rewrite|diagnostic_internal_only|\[[^\]]*internal[^\]]*\])",
+    flags=re.IGNORECASE,
+)
+
+
+def _sanitize_published_text(text: str | None) -> str | None:
+    if not text:
+        return text
+    cleaned = INTERNAL_MARKER_RE.sub(" ", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _normalize_internal_state(
+    classification: str | None,
+    status: str | None,
+    artifact_role: str | None,
+    finding_level: str | None,
+    publication_state: str | None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    if classification != "diagnostic_internal_only":
+        return status, artifact_role, finding_level, publication_state
+    return "not_applicable", "support_only", "none", "internal_only"
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -121,6 +147,11 @@ def get_audit(audit_id: str, db: Session = Depends(get_db)) -> AuditOut:
 
 @router.get("/audits/{audit_id}/findings", response_model=list[FindingOut])
 def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOut]:
+    audit = db.get(Audit, audit_id)
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    if audit.status == "review_required":
+        return []
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
@@ -131,9 +162,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
-        audit = db.get(Audit, audit_id)
-        if not audit:
-            raise HTTPException(status_code=404, detail="Audit not found")
+        return []
 
     out: list[FindingOut] = []
     seen: set[str] = set()
@@ -173,19 +202,23 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 gap_reasoning=row.gap_reasoning,
                 confidence_level=row.confidence_level,
                 assessment_type=row.assessment_type,
-                severity_rationale=row.severity_rationale,
+                severity_rationale=_sanitize_published_text(row.severity_rationale),
                 primary_legal_anchor=_deserialize_json_list(row.primary_legal_anchor),
                 secondary_legal_anchors=_deserialize_json_list(row.secondary_legal_anchors),
                 document_evidence_refs=_deserialize_json_list(row.document_evidence_refs),
-                citation_summary_text=row.citation_summary_text,
+                citation_summary_text=_sanitize_published_text(row.citation_summary_text),
                 support_complete=_deserialize_bool_flag(row.support_complete),
                 omission_basis=_deserialize_bool_flag(row.omission_basis),
                 source_scope=row.source_scope,
                 source_scope_confidence=row.source_scope_confidence,
                 referenced_unseen_sections=_deserialize_json_list(row.referenced_unseen_sections),
                 assertion_level=row.assertion_level,
-                gap_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0],
-                remediation_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1],
+                gap_note=_sanitize_published_text(
+                    _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0]
+                ),
+                remediation_note=_sanitize_published_text(
+                    _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1]
+                ),
                 citations=[
                     CitationOut(
                         chunk_id=c.chunk_id,
@@ -241,11 +274,35 @@ def get_analysis(
             analysis_stage=row.analysis_stage,
             analysis_type=row.analysis_type,
             issue_type=row.issue_type,
-            status_candidate=row.status_candidate,
+            status_candidate=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[0],
             classification_candidate=row.classification_candidate,
-            artifact_role=row.artifact_role,
-            finding_level_candidate=row.finding_level_candidate,
-            publication_state_candidate=row.publication_state_candidate,
+            artifact_role=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[1],
+            finding_level_candidate=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[2],
+            publication_state_candidate=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[3],
             analysis_outcome=row.analysis_outcome,
             candidate_issue=row.candidate_issue,
             policy_evidence_excerpt=row.policy_evidence_excerpt,
@@ -291,7 +348,7 @@ def get_analysis(
 
 
 @router.get("/audits/{audit_id}/review", response_model=list[ReviewItemOut])
-def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemOut]:
+def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = Depends(get_db)) -> list[ReviewItemOut]:
     findings = db.scalars(
         select(Finding)
         .where(Finding.audit_id == audit_id)
@@ -304,6 +361,8 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
         )
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
+    if not debug:
+        findings = [row for row in findings if not row.section_id.startswith("ledger:")]
     analysis_rows = db.scalars(
         select(AuditAnalysisItem)
         .where(AuditAnalysisItem.audit_id == audit_id)
@@ -314,6 +373,8 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
         )
         .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
     ).all()
+    if not debug:
+        analysis_rows = [row for row in analysis_rows if not row.section_id.startswith("ledger:")]
     if not findings and not analysis_rows:
         audit = db.get(Audit, audit_id)
         if not audit:
@@ -325,11 +386,35 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             id=row.id,
             section_id=row.section_id,
             issue_type=_issue_from_finding_section(row.section_id),
-            status=row.status,
+            status=_normalize_internal_state(
+                row.classification,
+                row.status,
+                row.artifact_role,
+                row.finding_level,
+                row.publication_state,
+            )[0],
             classification=row.classification,
-            artifact_role=row.artifact_role,
-            finding_level=row.finding_level,
-            publication_state=row.publication_state,
+            artifact_role=_normalize_internal_state(
+                row.classification,
+                row.status,
+                row.artifact_role,
+                row.finding_level,
+                row.publication_state,
+            )[1],
+            finding_level=_normalize_internal_state(
+                row.classification,
+                row.status,
+                row.artifact_role,
+                row.finding_level,
+                row.publication_state,
+            )[2],
+            publication_state=_normalize_internal_state(
+                row.classification,
+                row.status,
+                row.artifact_role,
+                row.finding_level,
+                row.publication_state,
+            )[3],
             suppression_reason=row.gap_note if row.publication_state in {"blocked", "internal_only"} else None,
             completeness_map=row.legal_requirement if row.legal_requirement and "completeness" in row.legal_requirement else None,
             gap_note=_apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0],
@@ -343,11 +428,35 @@ def get_review(audit_id: str, db: Session = Depends(get_db)) -> list[ReviewItemO
             id=row.id,
             section_id=row.section_id,
             issue_type=row.issue_type,
-            status=row.status_candidate,
+            status=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[0],
             classification=row.classification_candidate,
-            artifact_role=row.artifact_role,
-            finding_level=row.finding_level_candidate,
-            publication_state=row.publication_state_candidate,
+            artifact_role=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[1],
+            finding_level=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[2],
+            publication_state=_normalize_internal_state(
+                row.classification_candidate,
+                row.status_candidate,
+                row.artifact_role,
+                row.finding_level_candidate,
+                row.publication_state_candidate,
+            )[3],
             suppression_reason=row.suppression_reason,
             completeness_map=row.retrieval_summary if row.analysis_type == "completeness_outcome" else None,
             gap_note=_apply_family_fallback(row.issue_type, row.gap_note, row.remediation_note)[0],
