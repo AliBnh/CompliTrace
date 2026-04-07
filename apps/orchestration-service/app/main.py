@@ -93,6 +93,12 @@ def _ensure_findings_columns() -> None:
             "confidence_level": "ALTER TABLE findings ADD COLUMN confidence_level VARCHAR(32)",
             "assessment_type": "ALTER TABLE findings ADD COLUMN assessment_type VARCHAR(32)",
             "severity_rationale": "ALTER TABLE findings ADD COLUMN severity_rationale TEXT",
+            "primary_legal_anchor": "ALTER TABLE findings ADD COLUMN primary_legal_anchor TEXT",
+            "secondary_legal_anchors": "ALTER TABLE findings ADD COLUMN secondary_legal_anchors TEXT",
+            "document_evidence_refs": "ALTER TABLE findings ADD COLUMN document_evidence_refs TEXT",
+            "citation_summary_text": "ALTER TABLE findings ADD COLUMN citation_summary_text TEXT",
+            "support_complete": "ALTER TABLE findings ADD COLUMN support_complete VARCHAR(8)",
+            "omission_basis": "ALTER TABLE findings ADD COLUMN omission_basis VARCHAR(8)",
         }
         for column_name, ddl in column_ddls.items():
             if column_name not in columns:
