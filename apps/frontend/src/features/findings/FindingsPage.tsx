@@ -104,7 +104,11 @@ export function FindingsPage() {
   }, [orderedFindings])
 
   useEffect(() => {
-    setSelectedId(activeRows[0]?.id ?? null)
+    setSelectedId((current) => {
+      if (!activeRows.length) return null
+      if (current && activeRows.some((row) => row.id === current)) return current
+      return activeRows[0].id
+    })
   }, [viewMode, activeRows])
 
   if (!auditId) return <EmptyState message="No audit in progress. Trigger an audit from Sections page." />
