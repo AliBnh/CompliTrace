@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ingestion-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ingestion-service:8001"]
+
+  - job_name: knowledge-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["knowledge-service:8002"]
+
+  - job_name: orchestration-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["orchestration-service:8003"]
