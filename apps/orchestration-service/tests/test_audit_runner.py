@@ -199,6 +199,47 @@ def test_final_disposition_promotes_role_ambiguity_to_gap_when_mixed_roles_witho
     assert role["publication_recommendation"] == "publish"
 
 
+def test_final_disposition_profiling_tier_automated_decisioning_sets_high_severity_gap():
+    sections = [
+        SectionData(
+            id="sec-prof-auto",
+            section_order=1,
+            section_title="Automated decisions",
+            content=(
+                "We use profiling models and automated decision-making without human intervention "
+                "for eligibility decisions that may have legal effect."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+    profiling = disposition["profiling"]
+    assert profiling["triggered"] is True
+    assert profiling["status"] == "gap"
+    assert profiling["severity"] == "high"
+
+
+def test_final_disposition_profiling_only_without_required_disclosure_is_medium_gap():
+    sections = [
+        SectionData(
+            id="sec-prof-only",
+            section_order=1,
+            section_title="Personalization",
+            content="We use profiling and segmentation models to personalize marketing and audience scoring.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+    profiling = disposition["profiling"]
+    assert profiling["triggered"] is True
+    assert profiling["status"] == "gap"
+    assert profiling["severity"] == "medium"
+
+
 def test_substantive_finding_without_citations_is_downgraded():
     finding = LlmFinding(
         status="partial",

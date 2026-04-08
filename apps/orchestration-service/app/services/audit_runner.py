@@ -807,6 +807,33 @@ def _section_context_signals(section: SectionData) -> str:
     return _norm(f"{section.section_title} {section.content[:1200]}")
 
 
+def _profiling_tier_from_corpus(corpus: str) -> str | None:
+    profiling_signals = {"profile", "profiling", "score", "scoring", "segment", "segmentation", "model", "ranking"}
+    automated_decision_signals = {
+        "automated decision",
+        "automated decision-making",
+        "solely automated",
+        "without human intervention",
+        "algorithmic decision",
+    }
+    significant_effect_signals = {
+        "legal effect",
+        "similarly significant",
+        "credit denial",
+        "loan denial",
+        "employment decision",
+        "benefit denial",
+        "eligibility decision",
+    }
+    if not _contains_any(corpus, profiling_signals):
+        return None
+    if _contains_any(corpus, automated_decision_signals) and _contains_any(corpus, significant_effect_signals):
+        return "high_impact_automated_decisioning"
+    if _contains_any(corpus, automated_decision_signals):
+        return "automated_decisioning"
+    return "profiling_only"
+
+
 def _extract_notice_cross_references(sections: list[SectionData]) -> list[CrossReference]:
     visible_section_numbers: set[str] = set()
     section_num_re = re.compile(r"\bsection\s+(\d+[a-z]?)\b", re.IGNORECASE)
@@ -2508,6 +2535,7 @@ def _build_final_disposition_map(
     for family, issue in specialist_issue_by_family.items():
         triggered = any(signal in corpus for signal in SPECIALIST_TRIGGER_RULES.get(issue, ({family}, ""))[0])
         status, reason = _final_disposition_for_issue(rows, issue)
+        specialist_severity = "high" if family in {"transfer", "special_category"} else "medium"
         if triggered:
             if family == "transfer":
                 has_transfer_statement = _contains_any(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS)
@@ -2515,10 +2543,25 @@ def _build_final_disposition_map(
                 if has_transfer_statement and not has_safeguards:
                     status, reason = "gap", "transfer is explicitly described but safeguards/mechanisms are not disclosed"
             elif family == "profiling":
-                profiling_signals = {"score", "scoring", "segment", "segmentation", "churn", "model", "attribution", "health marker", "profil"}
-                profiling_disclosure = {"logic involved", "significance", "envisaged consequences", "article 22"}
-                if _contains_any(corpus, profiling_signals) and not _contains_any(corpus, profiling_disclosure):
-                    status, reason = "gap", "profiling outputs are visible but required transparency elements are not disclosed"
+                profiling_disclosure = {"logic involved", "significance", "envisaged consequences", "article 22", "right to obtain human intervention"}
+                tier = _profiling_tier_from_corpus(corpus)
+                if tier and not _contains_any(corpus, profiling_disclosure):
+                    status = "gap"
+                    if tier == "high_impact_automated_decisioning":
+                        reason = (
+                            "high-impact automated decision-making signals are visible (legal/similarly significant effects) "
+                            "but required Article 22 transparency and safeguards are not disclosed"
+                        )
+                        specialist_severity = "high"
+                    elif tier == "automated_decisioning":
+                        reason = (
+                            "automated decision-making signals are visible but required transparency details "
+                            "(logic, significance, effects, safeguards) are not disclosed"
+                        )
+                        specialist_severity = "high"
+                    else:
+                        reason = "profiling indicators are visible but required profiling transparency elements are not disclosed"
+                        specialist_severity = "medium"
             elif family == "role_ambiguity":
                 mixed_roles = (
                     (_contains_any(corpus, {"independent controller", "acts as controller", "controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor", "processor"}))
@@ -2546,7 +2589,7 @@ def _build_final_disposition_map(
             "source_scope_dependency": "high" if triggered else "low",
             "positive_evidence_ids": _issue_evidence_ids(issue)[0],
             "negative_evidence_ids": _issue_evidence_ids(issue)[1],
-            "severity": "high" if family in {"transfer", "profiling", "special_category"} else "medium",
+            "severity": specialist_severity,
             "issue_key": issue,
         }
     core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
