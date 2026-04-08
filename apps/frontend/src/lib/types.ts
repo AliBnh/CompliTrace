@@ -35,6 +35,9 @@ export type AuditOut = {
 
 export type CitationOut = {
   chunk_id: string
+  evidence_id?: string | null
+  source_type?: string | null
+  source_ref?: string | null
   article_number: string
   paragraph_ref: string | null
   article_title: string

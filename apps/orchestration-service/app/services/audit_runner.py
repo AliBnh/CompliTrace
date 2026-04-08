@@ -2074,6 +2074,7 @@ def _upsert_evidence_records(db: Session, audit_id: str) -> None:
                 evidence_type="policy_section",
                 source_ref=row.section_id,
                 text_excerpt=(row.policy_evidence_excerpt or row.gap_note or "")[:1000],
+                article_number=(_decode_json_list(row.primary_legal_anchor)[0][:32] if _decode_json_list(row.primary_legal_anchor) else None),
             )
         )
         derived_ids = [f"evi:ref:{ref}" for ref in _decode_json_list(row.document_evidence_refs)]
@@ -2087,6 +2088,7 @@ def _upsert_evidence_records(db: Session, audit_id: str) -> None:
                     source_ref=row.section_id,
                     text_excerpt=(row.gap_reasoning or row.gap_note or "")[:1000],
                     derived_from_evidence_ids=_serialize_json_list(derived_ids),
+                    article_number=(_decode_json_list(row.primary_legal_anchor)[0][:32] if _decode_json_list(row.primary_legal_anchor) else None),
                 )
             )
         for cit in row.citations:
@@ -2099,6 +2101,8 @@ def _upsert_evidence_records(db: Session, audit_id: str) -> None:
                     source_ref=cit.chunk_id,
                     text_excerpt=(cit.excerpt or "")[:1000],
                     derived_from_evidence_ids=_serialize_json_list([policy_evidence_id]),
+                    article_number=cit.article_number,
+                    paragraph_ref=cit.paragraph_ref,
                 )
             )
 
@@ -2714,7 +2718,24 @@ def _final_publication_validator(
             and (scope_supports_assertion or row.assertion_level in {"referenced_but_unseen", "excerpt_limited_gap", "not_assessable"})
             and bool(row.document_evidence_refs)
             and bool(row.remediation_note)
+            and bool(row.primary_legal_anchor)
+            and bool((row.citation_summary_text or "").strip())
+            and bool(row.source_scope)
+            and bool(row.assertion_level)
+            and row.confidence_overall is not None
+            and db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count() > 0
         )
+        issue_key = _finding_issue_id(row)
+        requires_strong_hydration = issue_key in {
+            "missing_legal_basis",
+            "missing_retention_period",
+            "missing_rights_notice",
+            "missing_complaint_right",
+            "missing_transfer_notice",
+            "profiling_disclosure_gap",
+        }
+        if requires_strong_hydration and (row.omission_basis is None or row.support_complete is None):
+            should_publish = False
         if not should_publish:
             row.publish_flag = "no"
             row.publication_state = "blocked"
@@ -2722,6 +2743,14 @@ def _final_publication_validator(
             row.finding_level = "none"
             if row.gap_note:
                 row.gap_note = f"{row.gap_note} [withheld by final publication validator]"
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"hydration_incomplete:{issue_key}",
+                "published finding hydration incomplete",
+                "published_hydration_validator",
+                f"missing_fields for finding_id={row.id}",
+            )
     for message in _state_invariant_validator(rows):
         _record_suppression_ledger(db, audit_id, message, "invariant violation", "state_invariant_validator", message)
     db.commit()

@@ -77,6 +77,10 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
         source_scope_confidence=0.88,
         assertion_level="probable_document_gap",
         primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+        citation_summary_text="transfer disclosure summary",
+        support_complete="true",
+        omission_basis="true",
+        document_evidence_refs='["evi:policy:sec-transfer"]',
         remediation_note="Add transfer safeguard mechanisms.",
     )
     db_session.add(projected_backing)
@@ -134,6 +138,8 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
     assert findings[0].confidence_overall == 0.8
     assert findings[0].primary_legal_anchor == ["GDPR Article 13(1)(f)"]
     assert [c.chunk_id for c in findings[0].citations] == ["transfer-chunk-1"]
+    assert findings[0].citations[0].evidence_id == "evi:chunk:transfer-chunk-1"
+    assert findings[0].citations[0].source_type == "retrieval_chunk"
 
 
 def test_get_findings_blocks_when_decision_map_disallows_publication(db_session: Session):
@@ -195,6 +201,13 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
         finding_type="local",
         publish_flag="yes",
         publication_state="publishable",
+        primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+        citation_summary_text="core summary",
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        confidence_overall=0.72,
+        remediation_note="Add missing disclosure language.",
+        document_evidence_refs='["evi:policy:sec-1"]',
     )
     db_session.add(finding)
     db_session.flush()
@@ -220,6 +233,15 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
     )
     db_session.add(
         EvidenceRecord(
+            evidence_id="evi:policy:sec-1",
+            audit_id=audit.id,
+            evidence_type="policy_section",
+            source_ref="sec-1",
+            text_excerpt="policy section",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
             evidence_id="evi:chunk:sec:real-evidence-1",
             audit_id=audit.id,
             evidence_type="retrieval_chunk",
@@ -232,6 +254,62 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     assert [c.chunk_id for c in rows[0].citations] == ["sec:real-evidence-1"]
+
+
+def test_get_findings_blocks_projection_when_hydration_incomplete_missing_citations(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_transfer_notice",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publication_state="blocked",
+            confidence=0.81,
+            confidence_article_fit=0.77,
+            confidence_overall=0.8,
+            source_scope="full_notice",
+            source_scope_confidence=0.88,
+            assertion_level="probable_document_gap",
+            primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+            citation_summary_text="transfer summary",
+            support_complete="true",
+            omission_basis="true",
+            remediation_note="State transfer safeguards.",
+            document_evidence_refs='["evi:policy:sec-transfer"]',
+        )
+    )
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing","positive_evidence_ids":["evi:policy:sec-transfer"]}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:policy:sec-transfer",
+            audit_id=audit.id,
+            evidence_type="policy_section",
+            source_ref="sec-transfer",
+            text_excerpt="transfer evidence",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        get_findings(audit.id, db_session)
+    assert exc.value.status_code == 409
 
 
 def test_sanitize_review_text_strips_internal_markers_when_not_debug():

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
-from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, EvidenceRecord, Finding, Report
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, EvidenceRecord, Finding, FindingCitation, Report
 from app.schemas.audit import (
     AuditCreate,
     AnalysisCitationOut,
@@ -161,6 +161,7 @@ def _project_published_findings_from_map(
     decision_map: dict[str, dict[str, str | bool | list[str] | float]],
     backing_rows: list[Finding] | None = None,
     known_evidence_ids: set[str] | None = None,
+    evidence_by_chunk: dict[str, EvidenceRecord] | None = None,
 ) -> list[FindingOut]:
     family_to_issue = {
         "controller_identity_contact": "missing_controller_identity",
@@ -191,6 +192,11 @@ def _project_published_findings_from_map(
         "dpo_contact": "medium",
     }
     out: list[FindingOut] = []
+    remediation_defaults = {
+        "missing_transfer_notice": "State whether personal data are transferred internationally and identify the safeguard or transfer mechanism relied upon, such as adequacy decisions or appropriate safeguards, and how data subjects can obtain further information.",
+        "profiling_disclosure_gap": "If profiling or comparable evaluation occurs, explain the logic involved and, where required, the significance and envisaged consequences for individuals.",
+        "controller_processor_role_ambiguity": "Clarify when the organization acts as controller, processor, or similar role across the different processing contexts described in the notice.",
+    }
     row_by_issue: dict[str, Finding] = {}
     for row in backing_rows or []:
         issue = _issue_from_finding_section(row.section_id)
@@ -205,8 +211,7 @@ def _project_published_findings_from_map(
         reason = str(item.get("reasoning") or "")
         projected_evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
         backing = row_by_issue.get(issue)
-        out.append(
-            FindingOut(
+        projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
                 section_id=f"systemic:{issue}",
                 status="gap",
@@ -229,21 +234,18 @@ def _project_published_findings_from_map(
                 support_complete=_deserialize_bool_flag(backing.support_complete) if backing else None,
                 omission_basis=_deserialize_bool_flag(backing.omission_basis) if backing else None,
                 gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
-                remediation_note=_sanitize_published_text(backing.remediation_note) if backing and backing.remediation_note else "Address the identified gap with explicit GDPR-compliant notice language.",
+                remediation_note=_sanitize_published_text(backing.remediation_note)
+                if backing and backing.remediation_note
+                else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language."),
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
                 citations=[
-                    CitationOut(
-                        chunk_id=c.chunk_id,
-                        article_number=c.article_number,
-                        paragraph_ref=c.paragraph_ref,
-                        article_title=c.article_title,
-                        excerpt=_sanitize_published_text(c.excerpt) or "",
-                    )
+                    _citation_out(c, (evidence_by_chunk or {}).get(c.chunk_id))
                     for c in (backing.citations if backing else [])
                     if _is_real_evidence_ref(c.chunk_id) and (known_evidence_ids is None or f"evi:chunk:{c.chunk_id}" in known_evidence_ids)
                 ],
-            )
         )
+        if not _hydration_missing(projected):
+            out.append(projected)
     return out
 
 
@@ -254,6 +256,57 @@ def _is_real_evidence_ref(value: str) -> bool:
 
 def _known_evidence_ids(db: Session, audit_id: str) -> set[str]:
     return {row[0] for row in db.query(EvidenceRecord.evidence_id).filter(EvidenceRecord.audit_id == audit_id).all()}
+
+
+def _evidence_by_chunk_ref(db: Session, audit_id: str) -> dict[str, EvidenceRecord]:
+    rows = (
+        db.query(EvidenceRecord)
+        .filter(EvidenceRecord.audit_id == audit_id)
+        .filter(EvidenceRecord.evidence_type == "retrieval_chunk")
+        .all()
+    )
+    out: dict[str, EvidenceRecord] = {}
+    for row in rows:
+        if row.source_ref and row.source_ref not in out:
+            out[row.source_ref] = row
+    return out
+
+
+def _citation_out(c: FindingCitation, evidence: EvidenceRecord | None) -> CitationOut:
+    return CitationOut(
+        chunk_id=c.chunk_id,
+        evidence_id=evidence.evidence_id if evidence else None,
+        source_type=evidence.evidence_type if evidence else "retrieval_chunk",
+        source_ref=evidence.source_ref if evidence else c.chunk_id,
+        article_number=c.article_number,
+        paragraph_ref=c.paragraph_ref,
+        article_title=c.article_title,
+        excerpt=_sanitize_published_text(c.excerpt) or "",
+    )
+
+
+def _hydration_missing(row: FindingOut) -> bool:
+    if not row.primary_legal_anchor:
+        return True
+    if not (row.citation_summary_text or "").strip():
+        return True
+    if not row.source_scope or not row.assertion_level:
+        return True
+    if row.confidence_overall is None:
+        return True
+    if not row.remediation_note:
+        return True
+    if len(row.citations) == 0:
+        return True
+    strong = {
+        "systemic:missing_legal_basis",
+        "systemic:missing_retention_period",
+        "systemic:missing_rights_notice",
+        "systemic:missing_complaint_right",
+        "systemic:missing_transfer_notice",
+        "systemic:profiling_disclosure_gap",
+    }
+    return row.section_id in strong and (row.omission_basis is None or row.support_complete is None)
 
 
 def _reconciliation_blockers(
@@ -329,9 +382,10 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         select(Finding).options(selectinload(Finding.citations)).where(Finding.audit_id == audit_id).order_by(Finding.id.asc())
     ).all()
     known_evidence_ids = _known_evidence_ids(db, audit_id)
+    evidence_by_chunk = _evidence_by_chunk_ref(db, audit_id)
     if decision_map and not _publication_allowed_from_map(decision_map):
         raise HTTPException(status_code=409, detail="Published findings blocked: final decision map disallows publication")
-    projected = _project_published_findings_from_map(audit_id, decision_map, backing_rows, known_evidence_ids) if decision_map else []
+    projected = _project_published_findings_from_map(audit_id, decision_map, backing_rows, known_evidence_ids, evidence_by_chunk) if decision_map else []
     if projected:
         blockers = _reconciliation_blockers(audit, decision_map, [], projected)
         if blockers:
@@ -415,19 +469,13 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                     _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1]
                 ),
                 citations=[
-                    CitationOut(
-                        chunk_id=c.chunk_id,
-                        article_number=c.article_number,
-                        paragraph_ref=c.paragraph_ref,
-                        article_title=c.article_title,
-                        excerpt=c.excerpt,
-                    )
+                    _citation_out(c, evidence_by_chunk.get(c.chunk_id))
                     for c in row.citations
                     if _is_real_evidence_ref(c.chunk_id) and f"evi:chunk:{c.chunk_id}" in evidence_ids
                 ],
             )
         )
-    return out
+    return [row for row in out if not _hydration_missing(row)]
 
 
 @router.get("/audits/{audit_id}/analysis", response_model=list[AnalysisItemOut])

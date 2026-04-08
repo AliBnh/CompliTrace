@@ -176,4 +176,6 @@ class EvidenceRecord(Base):
     source_ref: Mapped[str | None] = mapped_column(String(191), nullable=True)
     text_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     derived_from_evidence_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    paragraph_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

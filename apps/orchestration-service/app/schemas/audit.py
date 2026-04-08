@@ -5,6 +5,9 @@ from pydantic import BaseModel, ConfigDict
 
 class CitationOut(BaseModel):
     chunk_id: str
+    evidence_id: str | None = None
+    source_type: str | None = None
+    source_ref: str | None = None
     article_number: str
     paragraph_ref: str | None
     article_title: str
@@ -89,6 +92,9 @@ class ReportTriggerOut(BaseModel):
 
 class AnalysisCitationOut(BaseModel):
     chunk_id: str
+    evidence_id: str | None = None
+    source_type: str | None = None
+    source_ref: str | None = None
     article_number: str
     paragraph_ref: str | None
     article_title: str

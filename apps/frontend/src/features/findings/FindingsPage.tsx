@@ -364,6 +364,10 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
       <Detail label="Remediation" value={finding.remediation_note ?? 'n/a'} />
       <Detail label="Legal anchors" value={finding.primary_legal_anchor?.join(', ') ?? 'n/a'} />
       <Detail label="Secondary anchors" value={finding.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
+      <Detail label="Citation summary" value={finding.citation_summary_text ?? 'n/a'} />
+      <Detail label="Assertion level" value={finding.assertion_level ?? 'n/a'} />
+      <Detail label="Source scope" value={finding.source_scope ?? 'n/a'} />
+      <Detail label="Evidence refs" value={finding.document_evidence_refs?.join(', ') ?? 'n/a'} />
       <Detail label="Section text" value={sectionText ?? 'Systemic finding (document-level synthesis)'} />
       <CitationList title="Citations" items={finding.citations} />
     </>
@@ -423,6 +427,9 @@ function CitationList({ title, items }: { title: string; items: { chunk_id: stri
           items.map((c, idx) => (
             <li key={`${c.chunk_id}-${idx}`} className="detail-block">
               <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
+              {'evidence_id' in c && (c as { evidence_id?: string | null }).evidence_id && (
+                <div className="mt-1 text-xs text-slate-500">evidence: {(c as { evidence_id?: string | null }).evidence_id}</div>
+              )}
               <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
             </li>
           ))
