@@ -256,7 +256,7 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
     assert [c.chunk_id for c in rows[0].citations] == ["sec:real-evidence-1"]
 
 
-def test_get_findings_blocks_projection_when_hydration_incomplete_missing_citations(db_session: Session):
+def test_get_findings_returns_partial_publish_and_skips_hydration_incomplete_projection(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -307,9 +307,8 @@ def test_get_findings_blocks_projection_when_hydration_incomplete_missing_citati
     )
     db_session.commit()
 
-    with pytest.raises(HTTPException) as exc:
-        get_findings(audit.id, db_session)
-    assert exc.value.status_code == 409
+    rows = get_findings(audit.id, db_session)
+    assert rows == []
 
 
 def test_sanitize_review_text_strips_internal_markers_when_not_debug():

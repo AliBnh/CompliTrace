@@ -241,7 +241,9 @@ def _project_published_findings_from_map(
                 citations=[
                     _citation_out(c, (evidence_by_chunk or {}).get(c.chunk_id))
                     for c in (backing.citations if backing else [])
-                    if _is_real_evidence_ref(c.chunk_id) and (known_evidence_ids is None or f"evi:chunk:{c.chunk_id}" in known_evidence_ids)
+                    if _is_real_evidence_ref(c.chunk_id)
+                    and (known_evidence_ids is None or f"evi:chunk:{c.chunk_id}" in known_evidence_ids)
+                    and c.chunk_id in (evidence_by_chunk or {})
                 ],
         )
         if not _hydration_missing(projected):
@@ -272,12 +274,12 @@ def _evidence_by_chunk_ref(db: Session, audit_id: str) -> dict[str, EvidenceReco
     return out
 
 
-def _citation_out(c: FindingCitation, evidence: EvidenceRecord | None) -> CitationOut:
+def _citation_out(c: FindingCitation, evidence: EvidenceRecord) -> CitationOut:
     return CitationOut(
         chunk_id=c.chunk_id,
-        evidence_id=evidence.evidence_id if evidence else None,
-        source_type=evidence.evidence_type if evidence else "retrieval_chunk",
-        source_ref=evidence.source_ref if evidence else c.chunk_id,
+        evidence_id=evidence.evidence_id,
+        source_type=evidence.evidence_type,
+        source_ref=evidence.source_ref,
         article_number=c.article_number,
         paragraph_ref=c.paragraph_ref,
         article_title=c.article_title,
@@ -314,6 +316,7 @@ def _reconciliation_blockers(
     decision_map: dict[str, dict[str, str | bool | list[str] | float]] | None,
     published_rows: list[Finding],
     projected_rows: list[FindingOut],
+    ignored_families: set[str] | None = None,
 ) -> list[str]:
     blockers: list[str] = []
     if audit.status == "review_required" and (published_rows or projected_rows):
@@ -331,6 +334,8 @@ def _reconciliation_blockers(
         if str(item.get("publication_recommendation") or "") != "publish":
             continue
         if str(item.get("status") or "") not in {"gap", "referenced_but_unseen"}:
+            continue
+        if ignored_families and family in ignored_families:
             continue
         has_projection = any(p.id.endswith(f":{family}") for p in projected_rows)
         if not has_projection and not published_rows:
@@ -386,8 +391,35 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     if decision_map and not _publication_allowed_from_map(decision_map):
         raise HTTPException(status_code=409, detail="Published findings blocked: final decision map disallows publication")
     projected = _project_published_findings_from_map(audit_id, decision_map, backing_rows, known_evidence_ids, evidence_by_chunk) if decision_map else []
+    hydration_filtered_families: set[str] = set()
+    if decision_map:
+        projectable_families = {
+            "controller_identity_contact",
+            "legal_basis",
+            "retention",
+            "rights_notice",
+            "complaint_right",
+            "transfer",
+            "profiling",
+            "role_ambiguity",
+            "article14_source",
+            "recipients",
+            "special_category",
+            "dpo_contact",
+        }
+        expected_families = {
+            family
+            for family, item in decision_map.items()
+            if not family.startswith("_")
+            and isinstance(item, dict)
+            and str(item.get("publication_recommendation") or "") == "publish"
+            and str(item.get("status") or "") in {"gap", "referenced_but_unseen"}
+            and family in projectable_families
+        }
+        published_families = {p.id.rsplit(":", 1)[-1] for p in projected}
+        hydration_filtered_families = expected_families - published_families
     if projected:
-        blockers = _reconciliation_blockers(audit, decision_map, [], projected)
+        blockers = _reconciliation_blockers(audit, decision_map, [], projected, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
         return projected
@@ -401,7 +433,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
-        blockers = _reconciliation_blockers(audit, decision_map, [], [])
+        blockers = _reconciliation_blockers(audit, decision_map, [], [], hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
         return []
@@ -471,7 +503,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 citations=[
                     _citation_out(c, evidence_by_chunk.get(c.chunk_id))
                     for c in row.citations
-                    if _is_real_evidence_ref(c.chunk_id) and f"evi:chunk:{c.chunk_id}" in evidence_ids
+                    if _is_real_evidence_ref(c.chunk_id) and f"evi:chunk:{c.chunk_id}" in evidence_ids and c.chunk_id in evidence_by_chunk
                 ],
             )
         )

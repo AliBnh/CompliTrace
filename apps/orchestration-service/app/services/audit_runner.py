@@ -2710,20 +2710,33 @@ def _final_publication_validator(
             row.source_scope_confidence = min(row.source_scope_confidence or 0.75, 0.75)
             if row.assertion_level == "confirmed_document_gap":
                 row.assertion_level = "probable_document_gap"
+        citation_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        missing_requirements: list[str] = []
+        if not row.primary_legal_anchor:
+            missing_requirements.append("primary_legal_anchor")
+        if not (row.citation_summary_text or "").strip():
+            missing_requirements.append("citation_summary_text")
+        if not row.source_scope:
+            missing_requirements.append("source_scope")
+        if not row.assertion_level:
+            missing_requirements.append("assertion_level")
+        if row.confidence_overall is None:
+            missing_requirements.append("confidence_overall")
+        if not row.remediation_note:
+            missing_requirements.append("remediation_note")
+        if citation_count == 0:
+            missing_requirements.append("citations")
+        if not row.document_evidence_refs:
+            missing_requirements.append("document_evidence_refs")
+
         should_publish = (
             row.publish_flag == "yes"
             and core_ok
             and family_status in {"satisfied", "gap", "referenced_but_unseen", "not_assessable", None}
             and contradiction_pass
             and (scope_supports_assertion or row.assertion_level in {"referenced_but_unseen", "excerpt_limited_gap", "not_assessable"})
-            and bool(row.document_evidence_refs)
             and bool(row.remediation_note)
-            and bool(row.primary_legal_anchor)
-            and bool((row.citation_summary_text or "").strip())
-            and bool(row.source_scope)
-            and bool(row.assertion_level)
-            and row.confidence_overall is not None
-            and db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count() > 0
+            and not missing_requirements
         )
         issue_key = _finding_issue_id(row)
         requires_strong_hydration = issue_key in {
@@ -2735,6 +2748,10 @@ def _final_publication_validator(
             "profiling_disclosure_gap",
         }
         if requires_strong_hydration and (row.omission_basis is None or row.support_complete is None):
+            if row.omission_basis is None:
+                missing_requirements.append("omission_basis")
+            if row.support_complete is None:
+                missing_requirements.append("support_complete")
             should_publish = False
         if not should_publish:
             row.publish_flag = "no"
@@ -2749,7 +2766,12 @@ def _final_publication_validator(
                 f"hydration_incomplete:{issue_key}",
                 "published finding hydration incomplete",
                 "published_hydration_validator",
-                f"missing_fields for finding_id={row.id}",
+                (
+                    f"finding_id={row.id}; issue_key={issue_key}; "
+                    f"missing_fields={','.join(sorted(set(missing_requirements))) or 'unknown'}; "
+                    f"failure_type="
+                    f"{'evidence_linkage' if any(k in missing_requirements for k in ['document_evidence_refs', 'source_scope']) else 'citation_projection' if 'citations' in missing_requirements else 'source_ref'}"
+                ),
             )
     for message in _state_invariant_validator(rows):
         _record_suppression_ledger(db, audit_id, message, "invariant violation", "state_invariant_validator", message)
