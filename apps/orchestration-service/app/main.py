@@ -61,6 +61,7 @@ def startup() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_findings_columns()
     _ensure_analysis_columns()
+    _ensure_evidence_record_columns()
 
 
 def _ensure_findings_columns() -> None:
@@ -151,6 +152,21 @@ def _ensure_analysis_columns() -> None:
             "confidence_article_fit": "ALTER TABLE audit_analysis_items ADD COLUMN confidence_article_fit DOUBLE PRECISION",
             "confidence_overall": "ALTER TABLE audit_analysis_items ADD COLUMN confidence_overall DOUBLE PRECISION",
             "created_at": "ALTER TABLE audit_analysis_items ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, ddl in column_ddls.items():
+            if column_name not in columns:
+                conn.execute(text(ddl))
+
+
+def _ensure_evidence_record_columns() -> None:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "evidence_records" not in inspector.get_table_names():
+            return
+        columns = {col["name"] for col in inspector.get_columns("evidence_records")}
+        column_ddls = {
+            "article_number": "ALTER TABLE evidence_records ADD COLUMN article_number VARCHAR(32)",
+            "paragraph_ref": "ALTER TABLE evidence_records ADD COLUMN paragraph_ref VARCHAR(64)",
         }
         for column_name, ddl in column_ddls.items():
             if column_name not in columns:
