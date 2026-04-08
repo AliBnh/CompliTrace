@@ -162,6 +162,7 @@ def _project_published_findings_from_map(
     backing_rows: list[Finding] | None = None,
     known_evidence_ids: set[str] | None = None,
     evidence_by_chunk: dict[str, EvidenceRecord] | None = None,
+    evidence_by_id: dict[str, EvidenceRecord] | None = None,
 ) -> list[FindingOut]:
     family_to_issue = {
         "controller_identity_contact": "missing_controller_identity",
@@ -238,7 +239,8 @@ def _project_published_findings_from_map(
                 if backing and backing.remediation_note
                 else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language."),
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
-                citations=[
+                citations=(
+                    [
                     _citation_out(c, (evidence_by_chunk or {}).get(c.chunk_id))
                     for c in (backing.citations if backing else [])
                     if _is_real_evidence_ref(c.chunk_id)
@@ -248,7 +250,23 @@ def _project_published_findings_from_map(
                         or c.chunk_id in (evidence_by_chunk or {})
                     )
                     and c.chunk_id in (evidence_by_chunk or {})
-                ],
+                    ]
+                    or [
+                        CitationOut(
+                            chunk_id=(ev.source_ref or ev.evidence_id),
+                            evidence_id=ev.evidence_id,
+                            source_type=ev.evidence_type,
+                            source_ref=ev.source_ref,
+                            article_number=ev.article_number or "13",
+                            paragraph_ref=ev.paragraph_ref,
+                            article_title="Evidence record",
+                            excerpt=_sanitize_published_text(ev.text_excerpt) or "",
+                        )
+                        for ref in projected_evidence_ids
+                        for ev in [((evidence_by_id or {}).get(ref))]
+                        if ev is not None
+                    ]
+                ),
         )
         if not _hydration_missing(projected):
             out.append(projected)
@@ -298,6 +316,11 @@ def _evidence_by_chunk_ref(db: Session, audit_id: str) -> dict[str, EvidenceReco
             paragraph_ref=None,
         )
     return out
+
+
+def _evidence_by_id(db: Session, audit_id: str) -> dict[str, EvidenceRecord]:
+    rows = db.query(EvidenceRecord).filter(EvidenceRecord.audit_id == audit_id).all()
+    return {row.evidence_id: row for row in rows}
 
 
 def _citation_out(c: FindingCitation, evidence: EvidenceRecord) -> CitationOut:
@@ -406,9 +429,17 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     ).all()
     known_evidence_ids = _known_evidence_ids(db, audit_id)
     evidence_by_chunk = _evidence_by_chunk_ref(db, audit_id)
+    evidence_by_id = _evidence_by_id(db, audit_id)
     if decision_map and not _publication_allowed_from_map(decision_map):
         raise HTTPException(status_code=409, detail="Published findings blocked: final decision map disallows publication")
-    projected = _project_published_findings_from_map(audit_id, decision_map, backing_rows, known_evidence_ids, evidence_by_chunk) if decision_map else []
+    projected = _project_published_findings_from_map(
+        audit_id,
+        decision_map,
+        backing_rows,
+        known_evidence_ids,
+        evidence_by_chunk,
+        evidence_by_id,
+    ) if decision_map else []
     hydration_filtered_families: set[str] = set()
     if decision_map:
         projectable_families = {

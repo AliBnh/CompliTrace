@@ -256,7 +256,7 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
     assert [c.chunk_id for c in rows[0].citations] == ["sec:real-evidence-1"]
 
 
-def test_get_findings_returns_partial_publish_and_skips_hydration_incomplete_projection(db_session: Session):
+def test_get_findings_projects_from_evidence_refs_when_supporting_citations_are_absent(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -308,7 +308,9 @@ def test_get_findings_returns_partial_publish_and_skips_hydration_incomplete_pro
     db_session.commit()
 
     rows = get_findings(audit.id, db_session)
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0].section_id == "systemic:missing_transfer_notice"
+    assert rows[0].citations[0].evidence_id == "evi:policy:sec-transfer"
 
 
 def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
