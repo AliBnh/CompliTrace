@@ -311,6 +311,54 @@ def test_get_findings_returns_partial_publish_and_skips_hydration_incomplete_pro
     assert rows == []
 
 
+def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    finding = Finding(
+        audit_id=audit.id,
+        section_id="sec-legacy",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="local",
+        publish_flag="yes",
+        publication_state="publishable",
+        primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+        citation_summary_text="legacy summary",
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        confidence_overall=0.71,
+        remediation_note="Add missing legal basis disclosure.",
+        document_evidence_refs='["evi:policy:sec-legacy"]',
+    )
+    db_session.add(finding)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=finding.id,
+            chunk_id="legacy-chunk-1",
+            article_number="13",
+            paragraph_ref="1(c)",
+            article_title="Information to be provided",
+            excerpt="Legacy citation text",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:policy:sec-legacy",
+            audit_id=audit.id,
+            evidence_type="policy_section",
+            source_ref="sec-legacy",
+            text_excerpt="policy section",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert len(rows) == 1
+    assert rows[0].citations[0].evidence_id == "evi:chunk:legacy-chunk-1"
+    assert rows[0].citations[0].source_ref == "legacy-chunk-1"
+
+
 def test_sanitize_review_text_strips_internal_markers_when_not_debug():
     raw = "Systemic finding withheld from publication pending complete legal/document support package [withheld by final publication validator]"
     cleaned = _sanitize_review_text(raw, debug=False)

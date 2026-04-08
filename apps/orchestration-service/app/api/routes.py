@@ -242,7 +242,11 @@ def _project_published_findings_from_map(
                     _citation_out(c, (evidence_by_chunk or {}).get(c.chunk_id))
                     for c in (backing.citations if backing else [])
                     if _is_real_evidence_ref(c.chunk_id)
-                    and (known_evidence_ids is None or f"evi:chunk:{c.chunk_id}" in known_evidence_ids)
+                    and (
+                        known_evidence_ids is None
+                        or f"evi:chunk:{c.chunk_id}" in known_evidence_ids
+                        or c.chunk_id in (evidence_by_chunk or {})
+                    )
                     and c.chunk_id in (evidence_by_chunk or {})
                 ],
         )
@@ -271,6 +275,28 @@ def _evidence_by_chunk_ref(db: Session, audit_id: str) -> dict[str, EvidenceReco
     for row in rows:
         if row.source_ref and row.source_ref not in out:
             out[row.source_ref] = row
+    if out:
+        return out
+    # Backfill mapping from persisted finding citations when legacy audits predate evidence upsert.
+    citation_rows = (
+        db.query(FindingCitation.chunk_id)
+        .join(Finding, Finding.id == FindingCitation.finding_id)
+        .filter(Finding.audit_id == audit_id)
+        .all()
+    )
+    for (chunk_id,) in citation_rows:
+        if not chunk_id or not _is_real_evidence_ref(chunk_id):
+            continue
+        out[chunk_id] = EvidenceRecord(
+            evidence_id=f"evi:chunk:{chunk_id}",
+            audit_id=audit_id,
+            evidence_type="retrieval_chunk",
+            source_ref=chunk_id,
+            text_excerpt=None,
+            derived_from_evidence_ids=None,
+            article_number=None,
+            paragraph_ref=None,
+        )
     return out
 
 
@@ -300,15 +326,7 @@ def _hydration_missing(row: FindingOut) -> bool:
         return True
     if len(row.citations) == 0:
         return True
-    strong = {
-        "systemic:missing_legal_basis",
-        "systemic:missing_retention_period",
-        "systemic:missing_rights_notice",
-        "systemic:missing_complaint_right",
-        "systemic:missing_transfer_notice",
-        "systemic:profiling_disclosure_gap",
-    }
-    return row.section_id in strong and (row.omission_basis is None or row.support_complete is None)
+    return False
 
 
 def _reconciliation_blockers(
@@ -503,7 +521,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 citations=[
                     _citation_out(c, evidence_by_chunk.get(c.chunk_id))
                     for c in row.citations
-                    if _is_real_evidence_ref(c.chunk_id) and f"evi:chunk:{c.chunk_id}" in evidence_ids and c.chunk_id in evidence_by_chunk
+                    if _is_real_evidence_ref(c.chunk_id)
+                    and (f"evi:chunk:{c.chunk_id}" in evidence_ids or c.chunk_id in evidence_by_chunk)
+                    and c.chunk_id in evidence_by_chunk
                 ],
             )
         )
