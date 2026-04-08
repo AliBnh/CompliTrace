@@ -114,6 +114,10 @@ export function FindingsPage() {
   const orderedReviewItems = useMemo(() => {
     return [...reviewItems]
       .filter((item) => !item.section_id.startsWith('ledger:'))
+      .filter((item) => {
+        if (item.item_kind !== 'review_block') return true
+        return (item.final_disposition ?? '').toLowerCase() !== 'satisfied'
+      })
       .sort((a, b) => {
         const rank = (row: ReviewItemOut) => {
           if (row.item_kind === 'review_block' && row.review_group === 'core_duties') return 0
@@ -248,20 +252,30 @@ export function FindingsPage() {
               </tr>
             </thead>
             <tbody>
-              {activeRows.map((finding) => {
-                const sectionLabel = displaySectionTitle(finding, sectionsById)
-                return (
-                  <tr
-                    key={finding.id}
-                    onClick={() => setSelectedByView((current) => ({ ...current, [viewMode]: finding.id }))}
-                    className={`cursor-pointer border-t border-slate-200/80 transition-colors hover:bg-sky-50/50 ${selectedId === finding.id ? 'bg-sky-50/80' : 'bg-white'}`}
-                  >
-                    <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
-                    <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
-                    <td className="px-4 py-3 text-slate-600">{rowSeverityOrKind(finding)}</td>
-                  </tr>
-                )
-              })}
+              {activeRows.length === 0 ? (
+                <tr className="border-t border-slate-200/80 bg-white">
+                  <td className="px-4 py-6 text-sm text-slate-500" colSpan={3}>
+                    {viewMode === 'review'
+                      ? 'No unresolved review artifacts. Switch to Published or Analysis for detailed records.'
+                      : 'No records available for this view yet.'}
+                  </td>
+                </tr>
+              ) : (
+                activeRows.map((finding) => {
+                  const sectionLabel = displaySectionTitle(finding, sectionsById)
+                  return (
+                    <tr
+                      key={finding.id}
+                      onClick={() => setSelectedByView((current) => ({ ...current, [viewMode]: finding.id }))}
+                      className={`cursor-pointer border-t border-slate-200/80 transition-colors hover:bg-sky-50/50 ${selectedId === finding.id ? 'bg-sky-50/80' : 'bg-white'}`}
+                    >
+                      <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
+                      <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
+                      <td className="px-4 py-3 text-slate-600">{rowSeverityOrKind(finding)}</td>
+                    </tr>
+                  )
+                })
+              )}
             </tbody>
           </table>
         </div>
@@ -285,6 +299,9 @@ export function FindingsPage() {
 function displaySectionTitle(finding: { section_id: string }, sectionsById: Record<string, SectionOut>): string {
   const section = sectionsById[finding.section_id]
   if (section) return section.section_title
+  if (finding.section_id === 'review:core_duties') return 'Review block: Core duties'
+  if (finding.section_id === 'review:specialist_families') return 'Review block: Specialist families'
+  if (finding.section_id.startsWith('review:')) return `Review block: ${humanize(finding.section_id.replace('review:', ''))}`
   if (finding.section_id.startsWith('systemic:')) {
     const issueId = finding.section_id.split('systemic:')[1]
     return `Systemic: ${SYSTEMIC_LABELS[issueId] ?? humanize(issueId)}`
@@ -300,7 +317,10 @@ function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
 
 function rowSeverityOrKind(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
   if ('severity' in row) return row.severity ?? 'n/a'
-  if ('item_kind' in row) return row.item_kind
+  if ('item_kind' in row) {
+    const reviewLabel = row.issue_type ?? row.family ?? row.review_group ?? row.item_kind
+    return humanize(reviewLabel)
+  }
   if ('analysis_type' in row) return row.analysis_type
   return 'n/a'
 }
