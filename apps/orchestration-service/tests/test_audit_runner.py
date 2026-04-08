@@ -180,6 +180,25 @@ def test_upsert_evidence_records_deduplicates_same_policy_section_id():
         assert policy_ids.count("evi:policy:systemic:missing_complaint_right") == 1
 
 
+def test_final_disposition_promotes_role_ambiguity_to_gap_when_mixed_roles_without_allocation():
+    sections = [
+        SectionData(
+            id="sec-role",
+            section_order=1,
+            section_title="Roles",
+            content="We act as both controller and processor and may process data on behalf of customers.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+    role = disposition["role_ambiguity"]
+    assert role["triggered"] is True
+    assert role["status"] == "gap"
+    assert role["publication_recommendation"] == "publish"
+
+
 def test_substantive_finding_without_citations_is_downgraded():
     finding = LlmFinding(
         status="partial",

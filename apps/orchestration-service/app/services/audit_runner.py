@@ -2520,8 +2520,20 @@ def _build_final_disposition_map(
                 if _contains_any(corpus, profiling_signals) and not _contains_any(corpus, profiling_disclosure):
                     status, reason = "gap", "profiling outputs are visible but required transparency elements are not disclosed"
             elif family == "role_ambiguity":
-                mixed_roles = _contains_any(corpus, {"independent controller", "acts as controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor", "processor"})
-                clear_allocation = _contains_any(corpus, {"when we act as controller", "when we act as processor", "role allocation"})
+                mixed_roles = (
+                    (_contains_any(corpus, {"independent controller", "acts as controller", "controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor", "processor"}))
+                    or _contains_any(corpus, {"controller and processor", "both controller and processor"})
+                )
+                clear_allocation = _contains_any(
+                    corpus,
+                    {
+                        "when we act as controller",
+                        "when we act as processor",
+                        "role allocation",
+                        "in these contexts we are controller",
+                        "in these contexts we are processor",
+                    },
+                )
                 if mixed_roles and not clear_allocation:
                     status, reason = "gap", "mixed controller/processor role signals are present without clear allocation wording"
         if triggered and status == "satisfied":
