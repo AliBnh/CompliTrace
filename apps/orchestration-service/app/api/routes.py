@@ -28,6 +28,14 @@ router = APIRouter()
 GENERIC_NOT_ASSESSABLE_GAP = "Not assessable from provided excerpt; additional documentary context is required."
 GENERIC_NOT_ASSESSABLE_REMEDIATION = "Provide complete notice excerpts and rerun legal qualification."
 FAMILY_FALLBACK_COPY: dict[str, tuple[str, str]] = {
+    "missing_controller_identity": (
+        "Controller identity/contact details are not clearly visible in the reviewed excerpt.",
+        "Provide controller legal-entity identity and direct privacy contact details.",
+    ),
+    "missing_controller_contact": (
+        "Controller contact channel is not clearly visible in the reviewed excerpt.",
+        "Add a direct privacy contact route (email/webform/postal address) for data-subject requests.",
+    ),
     "missing_transfer_notice": (
         "Transfer-related processing language is visible, but the reviewed material does not show whether third-country transfer safeguards or mechanisms are disclosed.",
         "Provide the transfer/safeguards section or confirm whether adequacy, SCCs, or other transfer mechanisms are disclosed.",
@@ -43,6 +51,18 @@ FAMILY_FALLBACK_COPY: dict[str, tuple[str, str]] = {
     "article_14_indirect_collection_gap": (
         "Indirect/source-of-data signals are visible, but the reviewed material does not show source-category disclosure sufficient for Article 14 assessment.",
         "Provide source-of-data and indirect-collection notice language.",
+    ),
+    "recipients_disclosure_gap": (
+        "Third-party sharing signals are visible, but categories of recipients are not clearly disclosed in the reviewed material.",
+        "List recipient categories (e.g., processors, partners, payment/cloud providers) and disclosure contexts.",
+    ),
+    "purpose_specificity_gap": (
+        "Data-category language is visible, but category-to-purpose mapping is not clearly specific in the reviewed material.",
+        "Map each key data category to concrete processing purposes and, where relevant, lawful-basis context.",
+    ),
+    "special_category_basis_unclear": (
+        "Potential special-category/sensitive-data language is visible, but Article 9 condition/safeguard details are unclear in the reviewed material.",
+        "Clarify whether true Article 9 categories are processed and state the Article 9(2) condition plus safeguards.",
     ),
     "missing_rights_notice": (
         "The reviewed material does not show the full rights disclosure set.",
@@ -80,7 +100,22 @@ def _issue_from_finding_section(section_id: str) -> str | None:
 def _apply_family_fallback(issue_type: str | None, gap_note: str | None, remediation_note: str | None) -> tuple[str | None, str | None]:
     if not issue_type:
         return gap_note, remediation_note
-    if (gap_note or "").strip() != GENERIC_NOT_ASSESSABLE_GAP and (remediation_note or "").strip() != GENERIC_NOT_ASSESSABLE_REMEDIATION:
+    normalized_gap = (gap_note or "").strip().lower()
+    normalized_remediation = (remediation_note or "").strip().lower()
+    generic_patterns = {
+        GENERIC_NOT_ASSESSABLE_GAP.lower(),
+        "not assessable from excerpt",
+        "additional documentary context is required",
+        "manual review required",
+    }
+    generic_remediation_patterns = {
+        GENERIC_NOT_ASSESSABLE_REMEDIATION.lower(),
+        "provide complete notice excerpts",
+        "rerun legal qualification",
+    }
+    is_generic_gap = any(p in normalized_gap for p in generic_patterns)
+    is_generic_remediation = any(p in normalized_remediation for p in generic_remediation_patterns)
+    if not (is_generic_gap or is_generic_remediation):
         return gap_note, remediation_note
     replacement = FAMILY_FALLBACK_COPY.get(issue_type)
     if not replacement:
@@ -92,6 +127,10 @@ INTERNAL_MARKER_RE = re.compile(
     r"(?:\s*\[withheld by final publication validator\]\s*|suppression_validator=\S+|state_invariant_violation:[^\s,;]+|post-review invariant rewrite|diagnostic_internal_only|\[[^\]]*internal[^\]]*\])",
     flags=re.IGNORECASE,
 )
+INTERNAL_EVIDENCE_RE = re.compile(
+    r"(withheld|suppression|validator|internal[_\s-]?only|diagnostic[_\s-]?internal|state_invariant|publication gate)",
+    flags=re.IGNORECASE,
+)
 
 
 def _sanitize_published_text(text: str | None) -> str | None:
@@ -99,6 +138,23 @@ def _sanitize_published_text(text: str | None) -> str | None:
         return text
     cleaned = INTERNAL_MARKER_RE.sub(" ", text)
     return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _render_published_evidence_excerpt(
+    citation_excerpt: str | None,
+    evidence_excerpt: str | None,
+    *,
+    issue_hint: str | None = None,
+) -> str:
+    candidates = [_sanitize_published_text(citation_excerpt), _sanitize_published_text(evidence_excerpt)]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if INTERNAL_EVIDENCE_RE.search(candidate):
+            continue
+        return candidate
+    hint = (issue_hint or "this finding").replace("_", " ")
+    return f"Published evidence summary: policy text indicates section-local support for {hint}."
 
 
 def _sanitize_review_text(text: str | None, *, debug: bool) -> str | None:
@@ -284,7 +340,7 @@ def _project_published_findings_from_map(
                             article_number=ev.article_number or "13",
                             paragraph_ref=ev.paragraph_ref,
                             article_title="Evidence record",
-                            excerpt=_sanitize_published_text(ev.text_excerpt) or "",
+                            excerpt=_render_published_evidence_excerpt(None, ev.text_excerpt, issue_hint=issue),
                         )
                         for ref in projected_evidence_ids
                         for ev in [((evidence_by_id or {}).get(ref))]
@@ -467,7 +523,7 @@ def _citation_out(c: FindingCitation, evidence: EvidenceRecord) -> CitationOut:
         article_number=c.article_number,
         paragraph_ref=c.paragraph_ref,
         article_title=c.article_title,
-        excerpt=_sanitize_published_text(c.excerpt) or "",
+        excerpt=_render_published_evidence_excerpt(c.excerpt, evidence.text_excerpt, issue_hint=c.article_title),
     )
 
 

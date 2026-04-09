@@ -283,6 +283,45 @@ def test_final_disposition_purpose_mapping_family_non_silent_for_broad_categorie
     assert purpose["status"] in {"gap", "not_assessable"}
 
 
+def test_final_disposition_special_category_ambiguous_sensitive_language_not_overcalled():
+    sections = [
+        SectionData(
+            id="sec-sensitive",
+            section_order=1,
+            section_title="Sensitive data",
+            content="We may handle sensitive information under applicable law where appropriate.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    disposition = _build_final_disposition_map([], sections, {})
+    special = disposition["special_category"]
+    assert special["triggered"] is True
+    assert special["status"] == "not_assessable"
+    assert special["publication_recommendation"] == "internal_only"
+
+
+def test_final_disposition_special_category_true_art9_without_condition_is_gap():
+    sections = [
+        SectionData(
+            id="sec-art9",
+            section_order=1,
+            section_title="Health processing",
+            content=(
+                "As controller we collect health data and biometric data for service delivery. "
+                "This special category processing is performed for operations."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    disposition = _build_final_disposition_map([], sections, {})
+    special = disposition["special_category"]
+    assert special["triggered"] is True
+    assert special["status"] == "gap"
+    assert special["publication_recommendation"] == "publish"
+
+
 def test_substantive_finding_without_citations_is_downgraded():
     finding = LlmFinding(
         status="partial",

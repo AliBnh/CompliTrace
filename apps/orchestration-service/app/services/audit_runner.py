@@ -208,6 +208,10 @@ SPECIALIST_TRIGGER_RULES: dict[str, tuple[set[str], str]] = {
         {"purpose", "use of data", "we use", "we process", "category of personal data"},
         "triggered_purpose_mapping_family",
     ),
+    "special_category_basis_unclear": (
+        {"special category", "article 9", "health data", "biometric", "genetic", "sensitive information"},
+        "triggered_special_category_family",
+    ),
 }
 
 DIRECT_COLLECTION_SIGNALS = {
@@ -2035,6 +2039,14 @@ def _finding_issue_id(row: Finding) -> str | None:
     for issue in CLAIM_ARTICLE_RULES:
         if issue.replace("_", " ") in text:
             return issue
+    if "recipient" in text or "third party" in text or "vendor" in text:
+        return "recipients_disclosure_gap"
+    if "purpose" in text and "category" in text:
+        return "purpose_specificity_gap"
+    if "special category" in text or "article 9" in text or "sensitive data" in text:
+        return "special_category_basis_unclear"
+    if "controller" in text and "contact" in text:
+        return "missing_controller_contact"
     return None
 
 
@@ -2672,7 +2684,77 @@ def _build_final_disposition_map(
                     status, reason = "gap", "some category sections use broad/catch-all purposes without clear category-to-purpose mapping"
                 elif category_coverage == 0 and _contains_any(corpus, {"data category", "categories of personal data"}):
                     status, reason = "not_assessable", "purpose mapping family triggered but category-level purpose statements are not visible in reviewed excerpts"
-        if triggered and status == "satisfied":
+            elif family == "special_category":
+                text = corpus
+                true_art9_indicators = {
+                    "health data",
+                    "biometric data",
+                    "genetic data",
+                    "racial or ethnic origin",
+                    "political opinions",
+                    "religious beliefs",
+                    "trade union membership",
+                    "sexual orientation",
+                    "article 9",
+                    "special category",
+                }
+                ambiguous_sensitive_only = {
+                    "sensitive under applicable law",
+                    "sensitive information",
+                    "sensitive data",
+                    "where considered sensitive",
+                }
+                avoid_or_incidental = {
+                    "we do not routinely collect",
+                    "we avoid collecting",
+                    "not intended to collect",
+                    "incidental collection",
+                    "if unintentionally provided",
+                }
+                controller_context = _contains_any(
+                    text,
+                    {
+                        "we determine the purposes",
+                        "as controller",
+                        "independent controller",
+                        "we collect and use",
+                    },
+                )
+                has_true_art9 = _contains_any(text, true_art9_indicators)
+                has_ambiguous_sensitive = _contains_any(text, ambiguous_sensitive_only)
+                has_avoid_wording = _contains_any(text, avoid_or_incidental)
+                has_art9_condition = _contains_any(
+                    text,
+                    {
+                        "article 9(2)",
+                        "explicit consent",
+                        "substantial public interest",
+                        "employment law obligations",
+                        "vital interests",
+                        "legal claims",
+                        "public health",
+                    },
+                )
+                has_safeguards = _contains_any(
+                    text,
+                    {
+                        "appropriate safeguards",
+                        "data minimisation",
+                        "access controls",
+                        "retention limits",
+                        "privacy by design",
+                    },
+                )
+                if has_true_art9 and controller_context and not (has_art9_condition and has_safeguards):
+                    status, reason = "gap", "true Article 9-category processing appears contemplated in controller context without clear Art 9 condition/safeguards"
+                    specialist_severity = "high"
+                elif has_avoid_wording and not has_true_art9:
+                    status, reason = "satisfied", "policy states no routine special-category collection (incidental/avoidance posture)"
+                    specialist_severity = "low"
+                elif has_ambiguous_sensitive and not has_true_art9:
+                    status, reason = "not_assessable", "only ambiguous sensitive-language is present without clear Article 9-category processing"
+                    specialist_severity = "medium"
+        if triggered and status == "satisfied" and family != "special_category":
             status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
         families[family] = {
             "status": status,
@@ -2876,6 +2958,14 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
     seen_root_keys: dict[str, str] = {}
     seen_supporting_pairs: set[tuple[str, str]] = set()
     fallback_by_issue = {
+        "missing_controller_identity": (
+            "Controller identity/contact details are not clearly visible in the reviewed material. Provide controller identity and privacy contact wording.",
+            "Add controller legal-entity identity and a direct privacy contact channel for data-subject requests.",
+        ),
+        "missing_controller_contact": (
+            "Controller contact route is not clearly visible in the reviewed material.",
+            "Provide an explicit privacy contact route (email/webform/postal) for rights requests.",
+        ),
         "missing_transfer_notice": (
             "Transfer-related language is visible, but the reviewed material does not show whether safeguards or mechanisms are disclosed. Provide the transfer/safeguards section.",
             "State whether third-country transfers occur, what mechanism is relied upon, and how data subjects can obtain information on safeguards.",
@@ -2895,6 +2985,18 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         "article_14_indirect_collection_gap": (
             "Customer/partner-supplied data indicators are visible, but source-category wording for indirect collection is not fully shown. Provide Article 14 source wording.",
             "Identify source categories for indirectly obtained data and provide required Article 14 information.",
+        ),
+        "recipients_disclosure_gap": (
+            "Third-party sharing indicators are visible, but categories-of-recipients wording is not clearly shown. Provide recipients disclosure wording.",
+            "List recipient categories and disclosure contexts (processors/partners/payment/cloud providers) in notice language.",
+        ),
+        "purpose_specificity_gap": (
+            "Data-category wording is visible, but category-to-purpose mapping remains too broad in the reviewed material.",
+            "Map each major category of personal data to concrete processing purposes and legal-basis context where relevant.",
+        ),
+        "special_category_basis_unclear": (
+            "Special-category/sensitive-data indicators are visible, but Article 9 condition and safeguards are not clearly shown.",
+            "Clarify whether true Article 9 categories are processed and identify the Article 9(2) condition with safeguards.",
         ),
     }
     for row in rows:

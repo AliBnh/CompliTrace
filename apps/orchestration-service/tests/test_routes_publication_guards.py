@@ -7,7 +7,15 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.routes import _sanitize_published_text, _sanitize_review_text, create_report, get_findings, get_review, get_review_grouped
+from app.api.routes import (
+    _apply_family_fallback,
+    _sanitize_published_text,
+    _sanitize_review_text,
+    create_report,
+    get_findings,
+    get_review,
+    get_review_grouped,
+)
 from app.db.base import Base
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
 
@@ -498,6 +506,71 @@ def test_sanitize_review_text_strips_internal_markers_when_not_debug():
     assert cleaned is not None
     assert "withheld by final publication validator" not in cleaned
     assert "not yet finalized for publication" in cleaned
+
+
+def test_apply_family_fallback_rewrites_generic_unresolved_copy_for_purpose_mapping():
+    gap, remediation = _apply_family_fallback(
+        "purpose_specificity_gap",
+        "Not assessable from excerpt: additional documentary context is required.",
+        "Provide complete notice excerpts and rerun legal qualification.",
+    )
+    assert gap is not None and "category-to-purpose mapping" in gap
+    assert remediation is not None and "Map each key data category" in remediation
+
+
+def test_published_citation_excerpt_uses_clean_renderer_not_internal_phrase(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    finding = Finding(
+        audit_id=audit.id,
+        section_id="sec-1",
+        status="gap",
+        severity="medium",
+        classification="probable_gap",
+        finding_type="local",
+        publication_state="publishable",
+        publish_flag="yes",
+        confidence=0.7,
+        confidence_evidence=0.7,
+        confidence_applicability=0.7,
+        confidence_synthesis=0.7,
+        confidence_overall=0.7,
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        primary_legal_anchor='["GDPR Article 13(1)(a)"]',
+        citation_summary_text="summary",
+        gap_note="gap",
+        remediation_note="fix",
+    )
+    db_session.add(finding)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=finding.id,
+            chunk_id="chunk-internal",
+            article_number="13",
+            paragraph_ref="1(a)",
+            article_title="Controller",
+            excerpt="withheld by final publication validator",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:chunk-internal",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="chunk-internal",
+            text_excerpt="Controller contact details are listed in policy text.",
+            article_number="13",
+            paragraph_ref="1(a)",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert rows
+    excerpt = rows[0].citations[0].excerpt.lower()
+    assert "withheld" not in excerpt
+    assert "validator" not in excerpt
 
 
 def test_get_review_includes_recipients_and_dpo_blocks_from_decision_map(db_session: Session):
