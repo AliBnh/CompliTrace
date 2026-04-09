@@ -200,6 +200,14 @@ SPECIALIST_TRIGGER_RULES: dict[str, tuple[set[str], str]] = {
         "triggered_article_14_indirect_collection",
     ),
     "controller_processor_role_ambiguity": ({"controller", "processor", "on behalf of"}, "triggered_role_ambiguity_family"),
+    "recipients_disclosure_gap": (
+        {"third party", "third-party", "vendor", "partner", "reseller", "marketplace", "payment provider", "cloud provider"},
+        "triggered_recipients_family",
+    ),
+    "purpose_specificity_gap": (
+        {"purpose", "use of data", "we use", "we process", "category of personal data"},
+        "triggered_purpose_mapping_family",
+    ),
 }
 
 DIRECT_COLLECTION_SIGNALS = {
@@ -2534,6 +2542,7 @@ def _build_final_disposition_map(
         "recipients": "recipients_disclosure_gap",
         "special_category": "special_category_basis_unclear",
         "dpo_contact": "dpo_contact_gap",
+        "purpose_mapping": "purpose_specificity_gap",
     }
     corpus = " ".join(_section_context_signals(s) for s in sections)
     for family, issue in specialist_issue_by_family.items():
@@ -2599,6 +2608,70 @@ def _build_final_disposition_map(
                 )
                 if mixed_roles and not clear_allocation:
                     status, reason = "gap", "mixed controller/processor role signals are present without clear allocation wording"
+            elif family == "recipients":
+                third_party_mentions = _contains_any(
+                    corpus,
+                    {
+                        "third party",
+                        "third-party",
+                        "vendor",
+                        "partner",
+                        "reseller",
+                        "marketplace",
+                        "payment provider",
+                        "cloud provider",
+                    },
+                )
+                structured_recipients_disclosure = _contains_any(
+                    corpus,
+                    {
+                        "categories of recipients",
+                        "recipient categories",
+                        "we disclose to the following categories",
+                        "types of recipients",
+                        "recipients of personal data",
+                    },
+                )
+                if third_party_mentions and not structured_recipients_disclosure:
+                    status, reason = "gap", "third-party actors are named but structured categories-of-recipients disclosure is missing"
+            elif family == "purpose_mapping":
+                category_sections = [
+                    s
+                    for s in sections
+                    if re.search(r"\b2\.[1-7]\b", _norm(s.section_title)) or any(t in _norm(s.section_title) for t in {"data we collect", "personal data"})
+                ]
+                category_tokens = {"identifier", "contact", "usage", "behavioral", "device", "location", "payment", "profile", "special category"}
+                purpose_tokens = {"purpose", "we use", "to provide", "to improve", "to personalize", "to communicate", "to comply"}
+                catch_all_tokens = {
+                    "for business purposes",
+                    "as necessary",
+                    "including but not limited to",
+                    "for legitimate interests",
+                    "for operational purposes",
+                }
+                category_coverage = 0
+                mapped_coverage = 0
+                broad_only_sections = 0
+                for sec in category_sections:
+                    text = _norm(f"{sec.section_title} {sec.content}")
+                    has_category = any(t in text for t in category_tokens)
+                    has_purpose = any(t in text for t in purpose_tokens)
+                    has_only_broad = has_purpose and any(t in text for t in catch_all_tokens) and not _contains_any(
+                        text,
+                        {"specific", "for fraud prevention", "for account security", "for payment processing", "for support requests"},
+                    )
+                    if has_category:
+                        category_coverage += 1
+                    if has_category and has_purpose and not has_only_broad:
+                        mapped_coverage += 1
+                    if has_category and (not has_purpose or has_only_broad):
+                        broad_only_sections += 1
+                if category_coverage > 0 and mapped_coverage == 0:
+                    status, reason = "gap", "data categories are listed but category-specific purposes are not clearly mapped"
+                elif category_coverage > 0 and broad_only_sections > 0:
+                    status, reason = "gap", "some category sections use broad/catch-all purposes without clear category-to-purpose mapping"
+                elif category_coverage == 0 and _contains_any(corpus, {"data category", "categories of personal data"}):
+                    status, reason = "not_assessable", "purpose mapping family triggered but category-level purpose statements are not visible in reviewed excerpts"
         if triggered and status == "satisfied":
             status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
         families[family] = {
@@ -2614,6 +2687,7 @@ def _build_final_disposition_map(
         }
     core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
     specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "recipients", "special_category", "dpo_contact"]
+    specialist_families.append("purpose_mapping")
     unresolved_core = [f for f in core_families if families.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}]
     unresolved_specialist = [f for f in specialist_families if families.get(f, {}).get("triggered") and families.get(f, {}).get("status") not in {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}]
     publishable_recommendations = [
@@ -2674,6 +2748,7 @@ def _final_publication_validator(
     valid_final = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
     core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
     specialist_families = ["transfer", "profiling", "role_ambiguity", "article14_source", "recipients", "special_category", "dpo_contact"]
+    specialist_families.append("purpose_mapping")
     unresolved_core = [f for f in core_families if disposition_map.get(f, {}).get("status") not in valid_final]
     hard_block_core = [
         f for f in core_families if disposition_map.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}

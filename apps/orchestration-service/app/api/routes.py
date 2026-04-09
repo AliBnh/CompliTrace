@@ -177,6 +177,7 @@ def _project_published_findings_from_map(
         "recipients": "recipients_disclosure_gap",
         "special_category": "special_category_basis_unclear",
         "dpo_contact": "dpo_contact_gap",
+        "purpose_mapping": "purpose_specificity_gap",
     }
     severity_defaults = {
         "controller_identity_contact": "high",
@@ -191,6 +192,7 @@ def _project_published_findings_from_map(
         "recipients": "medium",
         "special_category": "high",
         "dpo_contact": "medium",
+        "purpose_mapping": "medium",
     }
     out: list[FindingOut] = []
     remediation_defaults = {
@@ -294,6 +296,116 @@ def _project_published_findings_from_map(
         if not _hydration_missing(projected):
             out.append(projected)
     return out
+
+
+def _issue_family(issue: str | None) -> str | None:
+    mapping = {
+        "missing_transfer_notice": "transfer",
+        "profiling_disclosure_gap": "profiling",
+        "controller_processor_role_ambiguity": "role_ambiguity",
+        "special_category_basis_unclear": "special_category",
+        "recipients_disclosure_gap": "recipients",
+        "purpose_specificity_gap": "purpose_mapping",
+    }
+    return mapping.get(issue or "")
+
+
+def _section_level_reasoning(row: Finding) -> str:
+    section = row.section_id
+    obligation = row.obligation_under_review or "transparency disclosure duty"
+    fact = _sanitize_published_text(row.policy_evidence_excerpt) or _sanitize_published_text(row.gap_note) or "Section-local evidence indicates a visibility gap."
+    legal_application = _sanitize_published_text(row.legal_requirement) or "Apply Articles 12-14 transparency obligations to this section context."
+    conclusion = _sanitize_published_text(row.gap_note) or "Section-level disclosure is insufficient."
+    remediation = _sanitize_published_text(row.remediation_note) or "Add section-specific compliant wording and cross-references."
+    return (
+        f"section={section}; obligation={obligation}; fact={fact}; "
+        f"legal_application={legal_application}; conclusion={conclusion}; remediation={remediation}"
+    )
+
+
+def _project_section_level_findings(
+    backing_rows: list[Finding],
+    known_evidence_ids: set[str],
+    evidence_by_chunk: dict[str, EvidenceRecord],
+) -> list[FindingOut]:
+    out: list[FindingOut] = []
+    seen_families: set[str] = set()
+    for row in backing_rows:
+        issue = _issue_from_finding_section(row.section_id)
+        if issue is None:
+            text = f"{(row.gap_note or '').lower()} {(row.remediation_note or '').lower()}"
+            if "transfer" in text:
+                issue = "missing_transfer_notice"
+            elif "profil" in text or "automated decision" in text:
+                issue = "profiling_disclosure_gap"
+            elif "controller" in text and "processor" in text:
+                issue = "controller_processor_role_ambiguity"
+            elif "recipient" in text or "third party" in text:
+                issue = "recipients_disclosure_gap"
+            elif "purpose" in text and "category" in text:
+                issue = "purpose_specificity_gap"
+            elif "special category" in text:
+                issue = "special_category_basis_unclear"
+        family = _issue_family(issue)
+        if family not in {"transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping"}:
+            continue
+        if row.section_id.startswith("systemic:") or row.section_id.startswith("ledger:"):
+            continue
+        if row.publication_state != "publishable" or row.publish_flag != "yes":
+            continue
+        if row.status not in {"gap", "partial"}:
+            continue
+        if not row.citations:
+            continue
+        if family in seen_families:
+            continue
+        seen_families.add(family)
+        citations = [
+            _citation_out(c, evidence_by_chunk.get(c.chunk_id))
+            for c in row.citations
+            if _is_real_evidence_ref(c.chunk_id) and (f"evi:chunk:{c.chunk_id}" in known_evidence_ids or c.chunk_id in evidence_by_chunk)
+        ]
+        if not citations:
+            continue
+        out.append(
+            _fill_required_published_fields(
+                FindingOut(
+                    id=row.id,
+                    section_id=row.section_id,
+                    status=row.status,
+                    severity=row.severity,
+                    classification=row.classification,
+                    finding_type=row.finding_type,
+                    publish_flag=row.publish_flag,
+                    artifact_role=row.artifact_role,
+                    finding_level="section",
+                    publication_state=row.publication_state,
+                    confidence=row.confidence,
+                    confidence_evidence=row.confidence_evidence,
+                    confidence_applicability=row.confidence_applicability,
+                    confidence_article_fit=row.confidence_article_fit,
+                    confidence_synthesis=row.confidence_synthesis,
+                    confidence_overall=row.confidence_overall if row.confidence_overall is not None else row.confidence,
+                    obligation_under_review=row.obligation_under_review,
+                    legal_requirement=_sanitize_published_text(row.legal_requirement),
+                    gap_reasoning=_section_level_reasoning(row),
+                    severity_rationale=_sanitize_published_text(row.severity_rationale),
+                    primary_legal_anchor=_deserialize_json_list(row.primary_legal_anchor)
+                    or [f"GDPR Article {citations[0].article_number}"],
+                    secondary_legal_anchors=_deserialize_json_list(row.secondary_legal_anchors),
+                    source_scope=row.source_scope,
+                    source_scope_confidence=row.source_scope_confidence,
+                    assertion_level=row.assertion_level,
+                    document_evidence_refs=[ref for ref in (_deserialize_json_list(row.document_evidence_refs) or []) if ref in known_evidence_ids] or None,
+                    citation_summary_text=_sanitize_published_text(row.citation_summary_text)
+                    or f"Section-local evidence supports {family} publication path.",
+                    gap_note=_sanitize_published_text(row.gap_note),
+                    remediation_note=_sanitize_published_text(row.remediation_note),
+                    citations=citations,
+                )
+            )
+        )
+    return [row for row in out if not _hydration_missing(row)]
 
 
 def _is_real_evidence_ref(value: str) -> bool:
@@ -408,6 +520,12 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.source_scope = "full_notice"
     if row.assertion_level is None:
         row.assertion_level = "probable_document_gap"
+    if row.confidence_overall is None:
+        row.confidence_overall = row.confidence if row.confidence is not None else 0.66
+    if not row.primary_legal_anchor:
+        row.primary_legal_anchor = [f"GDPR Article {row.citations[0].article_number}"] if row.citations else ["GDPR Article 13"]
+    if not (row.citation_summary_text or "").strip():
+        row.citation_summary_text = "Evidence-linked publication record."
     return row
 
 
@@ -514,6 +632,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
             "recipients",
             "special_category",
             "dpo_contact",
+            "purpose_mapping",
         }
         expected_families = {
             family
@@ -527,10 +646,12 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         published_families = {p.id.rsplit(":", 1)[-1] for p in projected}
         hydration_filtered_families = expected_families - published_families
     if projected:
-        blockers = _reconciliation_blockers(audit, decision_map, [], projected, hydration_filtered_families)
+        section_level = _project_section_level_findings(backing_rows, known_evidence_ids, evidence_by_chunk)
+        combined = projected + [row for row in section_level if row.id not in {p.id for p in projected}]
+        blockers = _reconciliation_blockers(audit, decision_map, [], combined, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        return projected
+        return combined
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
@@ -585,7 +706,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 missing_fact_if_unresolved=row.missing_fact_if_unresolved,
                 policy_evidence_excerpt=row.policy_evidence_excerpt,
                 legal_requirement=row.legal_requirement,
-                gap_reasoning=row.gap_reasoning,
+                gap_reasoning=_section_level_reasoning(row) if not row.section_id.startswith("systemic:") else row.gap_reasoning,
                 confidence_level=row.confidence_level,
                 assessment_type=row.assessment_type,
                 severity_rationale=_sanitize_published_text(row.severity_rationale),
@@ -898,6 +1019,7 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
             "recipients": ("recipients", "recipients"),
             "special_category": ("special_category", "special_category"),
             "dpo_contact": ("dpo_contact", "dpo_contact"),
+            "purpose_mapping": ("purpose_mapping", "purpose_mapping"),
         }
         for family, (lookup_key, label) in specialist_triggers.items():
             item = disposition.get(lookup_key, {})

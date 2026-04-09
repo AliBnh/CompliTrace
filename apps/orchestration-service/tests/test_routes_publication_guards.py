@@ -525,6 +525,101 @@ def test_get_review_includes_recipients_and_dpo_blocks_from_decision_map(db_sess
     assert "dpo_contact" in families
 
 
+def test_get_review_includes_purpose_mapping_block_from_decision_map(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"Category-to-purpose mapping is too broad"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_review(audit.id, debug=False, db=db_session)
+    families = {r.family for r in rows if r.item_kind == "review_block" and r.review_group == "specialist_families"}
+    assert "purpose_mapping" in families
+
+
+def test_projected_findings_include_section_level_high_signal_findings(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    local_transfer = Finding(
+        audit_id=audit.id,
+        section_id="1.3 Territorial Reach",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="local",
+        publication_state="publishable",
+        publish_flag="yes",
+        confidence=0.78,
+        confidence_evidence=0.76,
+        confidence_applicability=0.74,
+        confidence_synthesis=0.72,
+        source_scope="full_notice",
+        source_scope_confidence=0.8,
+        assertion_level="probable_document_gap",
+        obligation_under_review="transfer",
+        policy_evidence_excerpt="We transfer personal data outside the EEA.",
+        legal_requirement="Article 13(1)(f)/14(1)(f) transfer disclosure obligations.",
+        gap_reasoning="Section transfer wording omits mechanism.",
+        gap_note="Transfer context is visible but safeguards are not disclosed.",
+        remediation_note="Disclose SCC/adequacy mechanism.",
+    )
+    db_session.add(local_transfer)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=local_transfer.id,
+            chunk_id="transfer-local-chunk",
+            article_number="13",
+            paragraph_ref="1(f)",
+            article_title="Transfer disclosure",
+            excerpt="Transfer disclosure excerpt.",
+        )
+    )
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:transfer-local-chunk",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="transfer-local-chunk",
+            text_excerpt="chunk evidence",
+            article_number="13",
+            paragraph_ref="1(f)",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    by_section = {r.section_id: r for r in rows}
+    assert "1.3 Territorial Reach" in by_section
+    assert "section=1.3 Territorial Reach;" in (by_section["1.3 Territorial Reach"].gap_reasoning or "")
+
+
 def test_get_review_grouped_returns_expected_sections(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(

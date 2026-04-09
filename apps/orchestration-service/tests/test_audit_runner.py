@@ -240,6 +240,49 @@ def test_final_disposition_profiling_only_without_required_disclosure_is_medium_
     assert profiling["severity"] == "medium"
 
 
+def test_final_disposition_recipients_family_gaps_when_third_parties_without_structured_categories():
+    sections = [
+        SectionData(
+            id="sec-rec",
+            section_order=1,
+            section_title="Sharing and disclosures",
+            content=(
+                "We share personal data with vendors, partners, marketplaces, payment providers and cloud providers "
+                "to operate services."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+    recipients = disposition["recipients"]
+    assert recipients["triggered"] is True
+    assert recipients["status"] == "gap"
+    assert recipients["publication_recommendation"] == "publish"
+
+
+def test_final_disposition_purpose_mapping_family_non_silent_for_broad_categories():
+    sections = [
+        SectionData(
+            id="sec-2-4",
+            section_order=4,
+            section_title="2.4 Usage, Behavioral, and Product Interaction Data",
+            content=(
+                "Categories of personal data include usage logs, behavioral data, and interaction telemetry. "
+                "We use this data for business purposes and as necessary to improve services."
+            ),
+            page_start=2,
+            page_end=3,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+    purpose = disposition["purpose_mapping"]
+    assert purpose["triggered"] is True
+    assert purpose["status"] in {"gap", "not_assessable"}
+
+
 def test_substantive_finding_without_citations_is_downgraded():
     finding = LlmFinding(
         status="partial",
