@@ -416,6 +416,82 @@ def test_projected_findings_keep_non_null_citation_linkage_when_chunk_evidence_r
     assert rows[0].citations[0].source_ref == "rights-legacy-chunk"
 
 
+def test_specialist_review_publish_blocks_project_to_published_with_rich_hydration(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add_all(
+        [
+            Finding(
+                audit_id=audit.id,
+                section_id="systemic:missing_transfer_notice",
+                status="gap",
+                severity="high",
+                classification="probable_gap",
+                finding_type="systemic",
+                publication_state="blocked",
+                primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+                document_evidence_refs='["evi:policy:transfer"]',
+            ),
+            Finding(
+                audit_id=audit.id,
+                section_id="systemic:profiling_disclosure_gap",
+                status="gap",
+                severity="high",
+                classification="probable_gap",
+                finding_type="systemic",
+                publication_state="blocked",
+                primary_legal_anchor='["GDPR Article 13(2)(f)"]',
+                document_evidence_refs='["evi:policy:profiling"]',
+            ),
+            Finding(
+                audit_id=audit.id,
+                section_id="systemic:controller_processor_role_ambiguity",
+                status="gap",
+                severity="medium",
+                classification="probable_gap",
+                finding_type="systemic",
+                publication_state="blocked",
+                primary_legal_anchor='["GDPR Article 13(1)(a)"]',
+                document_evidence_refs='["evi:policy:roles"]',
+            ),
+            Finding(
+                audit_id=audit.id,
+                section_id="ledger:final-disposition",
+                status="not applicable",
+                severity=None,
+                legal_requirement="suppression_validator=final_disposition_map",
+                gap_reasoning=(
+                    '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing","positive_evidence_ids":["evi:policy:transfer"]},'
+                    '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing","positive_evidence_ids":["evi:policy:profiling"]},'
+                    '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role allocation missing","positive_evidence_ids":["evi:policy:roles"]}}'
+                ),
+                publish_flag="no",
+                publication_state="internal_only",
+                finding_type="supporting_evidence",
+                artifact_role="support_only",
+                finding_level="none",
+            ),
+            EvidenceRecord(evidence_id="evi:policy:transfer", audit_id=audit.id, evidence_type="policy_section", source_ref="transfer", text_excerpt="transfer evidence"),
+            EvidenceRecord(evidence_id="evi:policy:profiling", audit_id=audit.id, evidence_type="policy_section", source_ref="profiling", text_excerpt="profiling evidence"),
+            EvidenceRecord(evidence_id="evi:policy:roles", audit_id=audit.id, evidence_type="policy_section", source_ref="roles", text_excerpt="roles evidence"),
+        ]
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    issues = {r.section_id for r in rows}
+    assert "systemic:missing_transfer_notice" in issues
+    assert "systemic:profiling_disclosure_gap" in issues
+    assert "systemic:controller_processor_role_ambiguity" in issues
+    for row in rows:
+        assert row.confidence_evidence is not None
+        assert row.confidence_applicability is not None
+        assert row.confidence_synthesis is not None
+        assert row.severity_rationale is not None
+        assert row.gap_reasoning is not None
+        assert row.citations
+        assert all(c.evidence_id is not None and c.source_type is not None and c.source_ref is not None for c in row.citations)
+
+
 def test_sanitize_review_text_strips_internal_markers_when_not_debug():
     raw = "Systemic finding withheld from publication pending complete legal/document support package [withheld by final publication validator]"
     cleaned = _sanitize_review_text(raw, debug=False)

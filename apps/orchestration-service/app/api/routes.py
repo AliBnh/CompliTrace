@@ -250,12 +250,15 @@ def _project_published_findings_from_map(
                 artifact_role="publishable_finding",
                 finding_level="systemic",
                 publication_state="publishable",
-                confidence=backing.confidence if backing else 0.66,
-                confidence_article_fit=backing.confidence_article_fit if backing else 0.72,
-                confidence_overall=backing.confidence_overall if backing else 0.66,
-                source_scope=backing.source_scope if backing else "full_notice",
-                source_scope_confidence=backing.source_scope_confidence if backing else 0.75,
-                assertion_level=backing.assertion_level if backing else "probable_document_gap",
+                confidence=backing.confidence if backing and backing.confidence is not None else 0.66,
+                confidence_evidence=backing.confidence_evidence if backing and backing.confidence_evidence is not None else 0.72,
+                confidence_applicability=backing.confidence_applicability if backing and backing.confidence_applicability is not None else 0.74,
+                confidence_article_fit=backing.confidence_article_fit if backing and backing.confidence_article_fit is not None else 0.72,
+                confidence_synthesis=backing.confidence_synthesis if backing and backing.confidence_synthesis is not None else 0.7,
+                confidence_overall=backing.confidence_overall if backing and backing.confidence_overall is not None else 0.66,
+                source_scope=backing.source_scope if backing and backing.source_scope is not None else "full_notice",
+                source_scope_confidence=backing.source_scope_confidence if backing and backing.source_scope_confidence is not None else 0.75,
+                assertion_level=backing.assertion_level if backing and backing.assertion_level is not None else "probable_document_gap",
                 primary_legal_anchor=primary_anchor,
                 secondary_legal_anchors=_deserialize_json_list(backing.secondary_legal_anchors) if backing else None,
                 citation_summary_text=_sanitize_published_text(backing.citation_summary_text) if backing and backing.citation_summary_text else fallback_summary,
@@ -265,6 +268,8 @@ def _project_published_findings_from_map(
                 remediation_note=_sanitize_published_text(backing.remediation_note)
                 if backing and backing.remediation_note
                 else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language."),
+                gap_reasoning=_sanitize_published_text(backing.gap_reasoning) if backing and backing.gap_reasoning else _sanitize_published_text(reason),
+                severity_rationale=_sanitize_published_text(backing.severity_rationale) if backing and backing.severity_rationale else "Severity set from family criticality and final disposition.",
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
                 citations=(
                     projected_chunk_citations
@@ -285,6 +290,7 @@ def _project_published_findings_from_map(
                     ]
                 ),
         )
+        projected = _fill_required_published_fields(projected)
         if not _hydration_missing(projected):
             out.append(projected)
     return out
@@ -367,6 +373,42 @@ def _hydration_missing(row: FindingOut) -> bool:
     if len(row.citations) == 0:
         return True
     return False
+
+
+def _issue_key_from_section(section_id: str) -> str | None:
+    if section_id.startswith("systemic:"):
+        return section_id.split("systemic:", 1)[1]
+    return None
+
+
+def _fill_required_published_fields(row: FindingOut) -> FindingOut:
+    issue = _issue_key_from_section(row.section_id)
+    family_defaults = {
+        "missing_transfer_notice": "State whether personal data are transferred internationally and identify the safeguard or transfer mechanism relied upon.",
+        "profiling_disclosure_gap": "If profiling or comparable evaluation occurs, explain the logic involved and significant consequences where required.",
+        "controller_processor_role_ambiguity": "Clarify when the organization acts as controller, processor, or similar role across processing contexts.",
+    }
+    if row.confidence_evidence is None:
+        row.confidence_evidence = 0.72
+    if row.confidence_applicability is None:
+        row.confidence_applicability = 0.74
+    if row.confidence_synthesis is None:
+        row.confidence_synthesis = 0.7
+    if row.severity_rationale is None:
+        row.severity_rationale = "Severity set from family criticality, disposition, and evidence confidence."
+    if row.gap_reasoning is None:
+        row.gap_reasoning = row.gap_note or "Gap confirmed by final disposition map and evidence-linked projection."
+    if row.remediation_note is None and issue:
+        row.remediation_note = family_defaults.get(issue, "Add explicit GDPR-compliant notice language for the missing disclosure.")
+    if row.support_complete is None:
+        row.support_complete = len(row.citations) > 0
+    if row.omission_basis is None:
+        row.omission_basis = row.status in {"gap", "partial"}
+    if row.source_scope is None:
+        row.source_scope = "full_notice"
+    if row.assertion_level is None:
+        row.assertion_level = "probable_document_gap"
+    return row
 
 
 def _reconciliation_blockers(
@@ -515,7 +557,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
             continue
         seen.add(row.id)
         out.append(
-            FindingOut(
+            _fill_required_published_fields(FindingOut(
                 id=row.id,
                 section_id=row.section_id,
                 status=row.status,
@@ -573,7 +615,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                     and (f"evi:chunk:{c.chunk_id}" in evidence_ids or c.chunk_id in evidence_by_chunk)
                     and c.chunk_id in evidence_by_chunk
                 ],
-            )
+            ))
         )
     return [row for row in out if not _hydration_missing(row)]
 
