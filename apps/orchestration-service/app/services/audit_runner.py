@@ -2567,9 +2567,25 @@ def _build_final_disposition_map(
                         reason = "profiling indicators are visible but required profiling transparency elements are not disclosed"
                         specialist_severity = "medium"
             elif family == "role_ambiguity":
+                own_operations_signals = {
+                    "our own purposes",
+                    "independent business purposes",
+                    "we determine the purposes",
+                    "service improvement",
+                    "product development",
+                    "fraud prevention",
+                }
+                on_behalf_signals = {
+                    "on behalf of",
+                    "under customer instructions",
+                    "instructions from customers",
+                    "processor",
+                    "customer data",
+                }
                 mixed_roles = (
                     (_contains_any(corpus, {"independent controller", "acts as controller", "controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor", "processor"}))
                     or _contains_any(corpus, {"controller and processor", "both controller and processor"})
+                    or (_contains_any(corpus, own_operations_signals) and _contains_any(corpus, on_behalf_signals))
                 )
                 clear_allocation = _contains_any(
                     corpus,

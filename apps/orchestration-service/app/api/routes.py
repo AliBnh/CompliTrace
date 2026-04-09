@@ -212,6 +212,33 @@ def _project_published_findings_from_map(
         reason = str(item.get("reasoning") or "")
         projected_evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
         backing = row_by_issue.get(issue)
+        if backing is not None:
+            projected_evidence_ids.extend(_deserialize_json_list(backing.document_evidence_refs) or [])
+            projected_evidence_ids.append(f"evi:policy:{backing.section_id}")
+        projected_evidence_ids = list(dict.fromkeys(e for e in projected_evidence_ids if isinstance(e, str) and e.startswith("evi:")))
+        primary_anchor = _deserialize_json_list(backing.primary_legal_anchor) if backing and backing.primary_legal_anchor else ["GDPR Article 13(1)(a)"]
+        fallback_summary = (
+            f"Evidence-linked projection for {issue}: "
+            + (", ".join(projected_evidence_ids[:4]) if projected_evidence_ids else "no explicit evidence refs from final map")
+        )
+        projected_chunk_citations = [
+            _citation_out(
+                c,
+                (evidence_by_chunk or {}).get(c.chunk_id)
+                or EvidenceRecord(
+                    evidence_id=f"evi:chunk:{c.chunk_id}",
+                    audit_id=audit_id,
+                    evidence_type="retrieval_chunk",
+                    source_ref=c.chunk_id,
+                    text_excerpt=c.excerpt,
+                    derived_from_evidence_ids=None,
+                    article_number=c.article_number,
+                    paragraph_ref=c.paragraph_ref,
+                ),
+            )
+            for c in (backing.citations if backing else [])
+            if _is_real_evidence_ref(c.chunk_id)
+        ]
         projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
                 section_id=f"systemic:{issue}",
@@ -229,9 +256,9 @@ def _project_published_findings_from_map(
                 source_scope=backing.source_scope if backing else "full_notice",
                 source_scope_confidence=backing.source_scope_confidence if backing else 0.75,
                 assertion_level=backing.assertion_level if backing else "probable_document_gap",
-                primary_legal_anchor=_deserialize_json_list(backing.primary_legal_anchor) if backing else ["GDPR Article 13(1)(a)"],
+                primary_legal_anchor=primary_anchor,
                 secondary_legal_anchors=_deserialize_json_list(backing.secondary_legal_anchors) if backing else None,
-                citation_summary_text=_sanitize_published_text(backing.citation_summary_text) if backing else None,
+                citation_summary_text=_sanitize_published_text(backing.citation_summary_text) if backing and backing.citation_summary_text else fallback_summary,
                 support_complete=_deserialize_bool_flag(backing.support_complete) if backing else None,
                 omission_basis=_deserialize_bool_flag(backing.omission_basis) if backing else None,
                 gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
@@ -240,17 +267,7 @@ def _project_published_findings_from_map(
                 else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language."),
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
                 citations=(
-                    [
-                    _citation_out(c, (evidence_by_chunk or {}).get(c.chunk_id))
-                    for c in (backing.citations if backing else [])
-                    if _is_real_evidence_ref(c.chunk_id)
-                    and (
-                        known_evidence_ids is None
-                        or f"evi:chunk:{c.chunk_id}" in known_evidence_ids
-                        or c.chunk_id in (evidence_by_chunk or {})
-                    )
-                    and c.chunk_id in (evidence_by_chunk or {})
-                    ]
+                    projected_chunk_citations
                     or [
                         CitationOut(
                             chunk_id=(ev.source_ref or ev.evidence_id),

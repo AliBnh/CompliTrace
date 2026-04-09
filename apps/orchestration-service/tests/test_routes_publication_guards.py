@@ -361,6 +361,61 @@ def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_ro
     assert rows[0].citations[0].source_ref == "legacy-chunk-1"
 
 
+def test_projected_findings_keep_non_null_citation_linkage_when_chunk_evidence_rows_missing(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    projected_backing = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_rights_notice",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="systemic",
+        publication_state="blocked",
+        confidence=0.8,
+        confidence_article_fit=0.77,
+        confidence_overall=0.79,
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        primary_legal_anchor='["GDPR Article 13(2)(b)"]',
+        citation_summary_text="rights missing",
+        remediation_note="Add rights transparency details.",
+    )
+    db_session.add(projected_backing)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=projected_backing.id,
+            chunk_id="rights-legacy-chunk",
+            article_number="13",
+            paragraph_ref="2(b)",
+            article_title="Rights",
+            excerpt="Data subject rights text.",
+        )
+    )
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"rights_notice":{"status":"gap","publication_recommendation":"publish","reasoning":"rights disclosure missing"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert len(rows) == 1
+    assert rows[0].citations[0].evidence_id == "evi:chunk:rights-legacy-chunk"
+    assert rows[0].citations[0].source_type == "retrieval_chunk"
+    assert rows[0].citations[0].source_ref == "rights-legacy-chunk"
+
+
 def test_sanitize_review_text_strips_internal_markers_when_not_debug():
     raw = "Systemic finding withheld from publication pending complete legal/document support package [withheld by final publication validator]"
     cleaned = _sanitize_review_text(raw, debug=False)
