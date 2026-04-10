@@ -131,6 +131,23 @@ INTERNAL_EVIDENCE_RE = re.compile(
     r"(withheld|suppression|validator|internal[_\s-]?only|diagnostic[_\s-]?internal|state_invariant|publication gate)",
     flags=re.IGNORECASE,
 )
+INTERNAL_REASONING_RE = re.compile(
+    r"(obligation map|suppression|validator|internal engine|state invariant|publication gate|hydration validator)",
+    flags=re.IGNORECASE,
+)
+
+FAMILY_ANCHOR_TEMPLATES: dict[str, list[str]] = {
+    "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
+    "missing_controller_identity": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
+    "missing_legal_basis": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)"],
+    "missing_transfer_notice": ["GDPR Article 13(1)(f)", "GDPR Article 14(1)(f)", "GDPR Article 44", "GDPR Article 46"],
+    "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)"],
+    "recipients_disclosure_gap": ["GDPR Article 13(1)(e)", "GDPR Article 14(1)(e)"],
+    "purpose_specificity_gap": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)", "GDPR Article 5(1)(b)"],
+    "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
+    "missing_rights_notice": ["GDPR Article 13(2)(b)", "GDPR Article 14(2)(c)"],
+    "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)"],
+}
 
 
 def _sanitize_published_text(text: str | None) -> str | None:
@@ -155,6 +172,42 @@ def _render_published_evidence_excerpt(
         return candidate
     hint = (issue_hint or "this finding").replace("_", " ")
     return f"Published evidence summary: policy text indicates section-local support for {hint}."
+
+
+def _sanitize_external_reasoning(text: str | None) -> str | None:
+    cleaned = _sanitize_published_text(text)
+    if not cleaned:
+        return cleaned
+    cleaned = INTERNAL_REASONING_RE.sub("section-linked evidence review", cleaned)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _infer_issue_from_text(issue: str | None, gap_note: str | None, remediation_note: str | None) -> str | None:
+    if issue:
+        return issue
+    text = ((gap_note or "") + " " + (remediation_note or "")).lower()
+    if "controller" in text and "contact" in text:
+        return "missing_controller_contact"
+    if "transfer" in text:
+        return "missing_transfer_notice"
+    if "profil" in text:
+        return "profiling_disclosure_gap"
+    if "recipient" in text or "third party" in text:
+        return "recipients_disclosure_gap"
+    if "purpose" in text and "category" in text:
+        return "purpose_specificity_gap"
+    return issue
+
+
+def _anchors_for_issue(issue: str | None, anchors: list[str] | None) -> list[str]:
+    preferred = FAMILY_ANCHOR_TEMPLATES.get(issue or "", [])
+    if not preferred:
+        return anchors or ["GDPR Article 13(1)(a)"]
+    if not anchors:
+        return preferred
+    norm = " ".join(a.lower() for a in anchors)
+    matching = [a for a in preferred if a.lower().replace("gdpr ", "") in norm or a.lower() in norm]
+    return matching or preferred
 
 
 def _sanitize_review_text(text: str | None, *, debug: bool) -> str | None:
@@ -221,7 +274,7 @@ def _project_published_findings_from_map(
     evidence_by_id: dict[str, EvidenceRecord] | None = None,
 ) -> list[FindingOut]:
     family_to_issue = {
-        "controller_identity_contact": "missing_controller_identity",
+        "controller_identity_contact": "missing_controller_contact",
         "legal_basis": "missing_legal_basis",
         "retention": "missing_retention_period",
         "rights_notice": "missing_rights_notice",
@@ -269,14 +322,18 @@ def _project_published_findings_from_map(
         publish_rec = str(item.get("publication_recommendation") or "internal_only")
         if status not in {"gap", "referenced_but_unseen"} or publish_rec != "publish":
             continue
-        reason = str(item.get("reasoning") or "")
+        reason = _sanitize_external_reasoning(str(item.get("reasoning") or "")) or ""
         projected_evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
         backing = row_by_issue.get(issue)
         if backing is not None:
             projected_evidence_ids.extend(_deserialize_json_list(backing.document_evidence_refs) or [])
             projected_evidence_ids.append(f"evi:policy:{backing.section_id}")
         projected_evidence_ids = list(dict.fromkeys(e for e in projected_evidence_ids if isinstance(e, str) and e.startswith("evi:")))
-        primary_anchor = _deserialize_json_list(backing.primary_legal_anchor) if backing and backing.primary_legal_anchor else ["GDPR Article 13(1)(a)"]
+        inferred_issue = _infer_issue_from_text(issue, backing.gap_note if backing else reason, backing.remediation_note if backing else None)
+        primary_anchor = _anchors_for_issue(
+            inferred_issue,
+            _deserialize_json_list(backing.primary_legal_anchor) if backing and backing.primary_legal_anchor else None,
+        )
         fallback_summary = (
             f"Evidence-linked projection for {issue}: "
             + (", ".join(projected_evidence_ids[:4]) if projected_evidence_ids else "no explicit evidence refs from final map")
@@ -338,7 +395,7 @@ def _project_published_findings_from_map(
                 section_id=f"systemic:{issue}",
                 status="gap",
                 severity=severity_defaults.get(family, "medium"),
-                classification=_published_legal_conclusion("gap", issue, "probable_gap"),
+                classification=_published_legal_conclusion("gap", inferred_issue, "probable_gap"),
                 finding_type="systemic",
                 publish_flag="yes",
                 artifact_role="publishable_finding",
@@ -359,16 +416,16 @@ def _project_published_findings_from_map(
                 support_complete=_deserialize_bool_flag(backing.support_complete) if backing else None,
                 omission_basis=_deserialize_bool_flag(backing.omission_basis) if backing else None,
                 legal_requirement=legal_requirement_text
-                or f"Family rule anchor for {issue}: {', '.join(primary_anchor)}.",
+                or f"Rule: {', '.join(primary_anchor)}.",
                 gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
                 remediation_note=rem_note,
                 gap_reasoning=_build_richer_gap_reasoning(
                     section_id=f"systemic:{issue}",
-                    issue=issue,
-                    fact=backing.policy_evidence_excerpt if backing else reason,
+                    issue=inferred_issue,
+                    fact=(backing.policy_evidence_excerpt if backing else None) or reason,
                     rule=legal_requirement_text or ", ".join(primary_anchor),
                     remediation=rem_note,
-                    conclusion=_sanitize_published_text(reason),
+                    conclusion=_sanitize_external_reasoning(reason),
                 ),
                 severity_rationale=_sanitize_published_text(backing.severity_rationale) if backing and backing.severity_rationale else "Severity set from family criticality and final disposition.",
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
@@ -395,10 +452,10 @@ def _issue_family(issue: str | None) -> str | None:
 def _section_level_reasoning(row: Finding) -> str:
     section = row.section_id
     obligation = row.obligation_under_review or "transparency disclosure duty"
-    fact = _sanitize_published_text(row.policy_evidence_excerpt) or _sanitize_published_text(row.gap_note) or "Section-local evidence indicates a visibility gap."
-    rule = _sanitize_published_text(row.legal_requirement) or "Apply GDPR transparency duties (Articles 12-14 and family-specific anchors)."
+    fact = _sanitize_external_reasoning(row.policy_evidence_excerpt) or _sanitize_external_reasoning(row.gap_note) or "Section-local evidence indicates a visibility gap."
+    rule = _sanitize_external_reasoning(row.legal_requirement) or "Apply GDPR transparency duties (Articles 12-14 and family-specific anchors)."
     legal_application = "Section-specific language is evaluated against the cited rule to determine whether disclosure is complete and explicit."
-    conclusion = _sanitize_published_text(row.gap_note) or "Section-level disclosure is insufficient."
+    conclusion = _sanitize_external_reasoning(row.gap_note) or "Section-level disclosure is insufficient."
     remediation = _sanitize_published_text(row.remediation_note) or "Add section-specific compliant wording and cross-references."
     return (
         f"section={section}; fact={fact}; rule={rule}; application={legal_application}; "
@@ -435,6 +492,15 @@ def _build_richer_gap_reasoning(
     remediation: str | None,
     conclusion: str | None,
 ) -> str:
+    if issue == "missing_controller_contact":
+        return (
+            f"section={section_id}; issue=missing_controller_contact; "
+            "fact=the company identity is visible but no clear contact route is stated; "
+            "rule=GDPR Articles 13(1)(a) and 14(1)(a) require controller identity and contact details; "
+            "application=the reviewed notice names the company but does not provide an actionable privacy contact channel; "
+            f"conclusion={_sanitize_external_reasoning(conclusion) or 'non-compliant controller-contact disclosure gap'}; "
+            "remediation=add direct privacy contact details (email, webform, or postal route)."
+        )
     safe_fact = _sanitize_published_text(fact) or "Relevant policy evidence indicates missing or unclear disclosure."
     safe_rule = _sanitize_published_text(rule) or "GDPR transparency and notice obligations."
     safe_conclusion = _sanitize_published_text(conclusion) or "The required disclosure element is not sufficiently addressed."
@@ -470,7 +536,7 @@ def _project_section_level_findings(
             elif "special category" in text:
                 issue = "special_category_basis_unclear"
         family = _issue_family(issue)
-        if family not in {"transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping"}:
+        if family not in {"transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping", "recipients"}:
             continue
         if row.section_id.startswith("systemic:") or row.section_id.startswith("ledger:"):
             continue
@@ -618,7 +684,7 @@ def _issue_key_from_section(section_id: str) -> str | None:
 
 
 def _fill_required_published_fields(row: FindingOut) -> FindingOut:
-    issue = _issue_key_from_section(row.section_id)
+    issue = _infer_issue_from_text(_issue_key_from_section(row.section_id), row.gap_note, row.remediation_note)
     family_defaults = {
         "missing_transfer_notice": "State whether personal data are transferred internationally and identify the safeguard or transfer mechanism relied upon.",
         "profiling_disclosure_gap": "If profiling or comparable evaluation occurs, explain the logic involved and significant consequences where required.",
@@ -648,8 +714,12 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.confidence_overall = row.confidence if row.confidence is not None else 0.66
     if not row.primary_legal_anchor:
         row.primary_legal_anchor = [f"GDPR Article {row.citations[0].article_number}"] if row.citations else ["GDPR Article 13"]
+    row.primary_legal_anchor = _anchors_for_issue(issue, row.primary_legal_anchor)
     if not (row.citation_summary_text or "").strip():
         row.citation_summary_text = "Evidence-linked publication record."
+    if not (row.legal_requirement or "").strip():
+        row.legal_requirement = f"Rule: {', '.join(row.primary_legal_anchor)}."
+    row.gap_reasoning = _sanitize_external_reasoning(row.gap_reasoning) or row.gap_reasoning
     return row
 
 

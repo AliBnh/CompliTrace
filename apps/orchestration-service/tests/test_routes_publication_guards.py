@@ -774,6 +774,95 @@ def test_published_clear_omissions_use_non_compliant_conclusion_class(db_session
     assert rows[0].classification == "non_compliant"
 
 
+def test_anchor_sanity_corrects_mismatched_transfer_anchor_family(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer context visible but safeguards missing"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_transfer_notice",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publication_state="blocked",
+            primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+            remediation_note="Add transfer safeguards disclosure.",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    transfer = next(r for r in rows if r.section_id == "systemic:missing_transfer_notice")
+    anchors = transfer.primary_legal_anchor or []
+    assert any("13(1)(f)" in a for a in anchors)
+    assert any("14(1)(f)" in a for a in anchors)
+
+
+def test_projected_reasoning_avoids_internal_engine_concepts(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"Omission basis confirmed via document obligation map"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    assert rows
+    text = " ".join((r.gap_reasoning or "").lower() for r in rows)
+    assert "obligation map" not in text
+    assert "suppression" not in text
+    assert "validator" not in text
+
+
+def test_controller_contact_published_reasoning_uses_fact_rule_application(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"company named but no contact route"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    controller = next(r for r in rows if "controller_contact" in r.section_id)
+    reasoning = (controller.gap_reasoning or "").lower()
+    assert "fact=" in reasoning and "rule=" in reasoning and "application=" in reasoning and "remediation=" in reasoning
+    assert controller.classification in {"non_compliant", "partially_compliant"}
+
+
 def test_get_review_grouped_returns_expected_sections(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
