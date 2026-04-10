@@ -3813,15 +3813,21 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 else "missing_from_section_only"
             ),
             missing_fact_if_unresolved=applicability["unresolved_trigger"],
-            policy_evidence_excerpt=(primary_issue["evidence_text"] or section.content[:220]).strip(),
-            legal_requirement=(
-                f"Primary legal anchor: GDPR Article {qualification['primary_article']} for issue "
-                f"{qualification['issue_name']}."
+            policy_evidence_excerpt=(
+                f.policy_evidence_excerpt
+                or (primary_issue["evidence_text"] or section.content[:220]).strip()
             ),
-            gap_reasoning=f.gap_note,
-            confidence_level=_confidence_level_for(confidence),
-            assessment_type=_assessment_type_for(f, classification),
-            severity_rationale=_severity_rationale(f, claim_types),
+            legal_requirement=(
+                f.legal_requirement
+                or (
+                    f"Primary legal anchor: GDPR Article {qualification['primary_article']} for issue "
+                    f"{qualification['issue_name']}."
+                )
+            ),
+            gap_reasoning=f.gap_reasoning or f.gap_note,
+            confidence_level=f.confidence_level or _confidence_level_for(confidence),
+            assessment_type=f.assessment_type or _assessment_type_for(f, classification),
+            severity_rationale=f.severity_rationale or _severity_rationale(f, claim_types),
             gap_note=f.gap_note,
             remediation_note=f.remediation_note,
         )
