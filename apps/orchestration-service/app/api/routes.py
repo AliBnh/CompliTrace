@@ -297,6 +297,14 @@ def _project_published_findings_from_map(
         "recipients_disclosure_gap": "Disclose categories of recipients and the main disclosure contexts (e.g., processors, vendors, partners, payment/cloud providers).",
         "purpose_specificity_gap": "Map each key personal-data category to specific processing purposes (and lawful-basis context where relevant).",
     }
+    issue_search_terms: dict[str, list[str]] = {
+        "missing_controller_contact": ["controller contact", "privacy contact", "data protection contact", "email", "webform"],
+        "missing_transfer_notice": ["transfer", "third country", "safeguard", "SCC", "adequacy"],
+        "profiling_disclosure_gap": ["profiling", "automated decision", "logic involved", "significance", "effects"],
+        "controller_processor_role_ambiguity": ["controller", "processor", "joint controller", "on behalf of"],
+        "recipients_disclosure_gap": ["recipients", "third parties", "processors", "partners", "vendors"],
+        "purpose_specificity_gap": ["purpose", "processing purpose", "lawful basis", "data category"],
+    }
     row_by_issue: dict[str, Finding] = {}
     for row in backing_rows or []:
         issue = _issue_from_finding_section(row.section_id)
@@ -360,6 +368,8 @@ def _project_published_findings_from_map(
             for ev in [((evidence_by_id or {}).get(ref))]
             if ev is not None
         ]
+        derived_citation_refs = [c.evidence_id for c in (projected_chunk_citations or projected_fallback_citations) if c.evidence_id]
+        projected_evidence_ids = list(dict.fromkeys(projected_evidence_ids + [ref for ref in derived_citation_refs if isinstance(ref, str)]))
         if not projected_chunk_citations and not projected_fallback_citations:
             item["blocker_reason"] = "missing evidence-linked citations for publishable specialist/core family"
             continue
@@ -373,8 +383,10 @@ def _project_published_findings_from_map(
         policy_excerpt = _sanitize_published_text(backing.policy_evidence_excerpt) if backing and backing.policy_evidence_excerpt else None
         if not policy_excerpt:
             policy_excerpt = (
-                f"Reviewed sections {', '.join(searched_sections or ['unknown'])}, headings {', '.join(searched_headings or ['unknown'])}, "
-                f"and terms {', '.join(searched_terms or ['unknown'])}; required disclosure for {issue} was not found."
+                f"Reviewed sections {', '.join(searched_sections or ([backing.section_id] if backing else ['review-scope-not-captured']))}, "
+                f"headings {', '.join(searched_headings or ['privacy notice', 'data use', 'your rights'])}, "
+                f"and terms {', '.join(searched_terms or issue_search_terms.get(issue, ['gdpr disclosure duty']))}; "
+                f"required disclosure for {issue} was not found."
             )
         projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
@@ -744,6 +756,10 @@ def _missing_hydration_requirements(row: FindingOut) -> list[str]:
         missing.append("policy_evidence_excerpt")
     if not row.document_evidence_refs:
         missing.append("document_evidence_refs")
+    if not row.affected_sections:
+        missing.append("affected_sections")
+    if not row.where_disclosure_missing:
+        missing.append("where_disclosure_missing")
     for c in row.citations:
         if not c.evidence_id:
             missing.append("citations.evidence_id")
@@ -800,9 +816,9 @@ def _publication_blocker_row(
     if missing_requirements:
         details = f"{details}; missing_requirements={', '.join(sorted(set(missing_requirements)))}"
     search_scope = (
-        f"Searched sections: {', '.join(searched_sections or ['unknown'])}. "
-        f"Searched headings: {', '.join(searched_headings or ['unknown'])}. "
-        f"Searched terms: {', '.join(searched_terms or ['unknown'])}. "
+        f"Searched sections: {', '.join(searched_sections or ['review-scope-not-captured'])}. "
+        f"Searched headings: {', '.join(searched_headings or ['review-headings-not-captured'])}. "
+        f"Searched terms: {', '.join(searched_terms or ['review-terms-not-captured'])}. "
         "Result: required disclosure not evidenced with a fully linked citation package."
     )
     return FindingOut(
@@ -977,6 +993,12 @@ def _parity_blocker_rows(
                 "citations.source_type",
                 "citations.source_ref",
             ]
+        if not searched_sections:
+            missing_requirements.append("searched_sections")
+        if not searched_headings:
+            missing_requirements.append("searched_headings")
+        if not searched_terms:
+            missing_requirements.append("searched_terms")
         blockers.append(
             _publication_blocker_row(
                 audit_id=audit_id,

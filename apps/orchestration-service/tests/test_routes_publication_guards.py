@@ -142,7 +142,9 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
 
     assert len(findings) == 1
     assert findings[0].section_id == "systemic:missing_transfer_notice"
-    assert findings[0].document_evidence_refs == ["evi:policy:sec-transfer"]
+    assert findings[0].document_evidence_refs is not None
+    assert "evi:policy:sec-transfer" in findings[0].document_evidence_refs
+    assert "evi:chunk:transfer-chunk-1" in findings[0].document_evidence_refs
     assert findings[0].confidence_overall == 0.8
     assert findings[0].primary_legal_anchor == ["GDPR Article 13(1)(f)"]
     assert [c.chunk_id for c in findings[0].citations] == ["transfer-chunk-1"]
@@ -349,7 +351,9 @@ def test_get_findings_emits_publication_blocker_for_unmaterialized_publishable_f
     assert blocker.publication_blocked is True
     assert blocker.issue_key == "missing_transfer_notice"
     assert "missing evidence" in (blocker.blocker_reason or "")
-    assert sorted(blocker.missing_requirements or []) == ["citations", "document_evidence_refs"]
+    assert blocker.missing_requirements is not None
+    assert "citations" in blocker.missing_requirements
+    assert "document_evidence_refs" in blocker.missing_requirements
 
 
 def test_get_findings_projects_controller_identity_contact_family(db_session: Session):
