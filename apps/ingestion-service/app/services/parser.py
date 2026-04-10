@@ -372,8 +372,12 @@ def _commit_section(
         header_lines = [_clean_line(line) for line in content_lines if _clean_line(line)]
         if not header_lines:
             return
-        normalized_title = header_lines[0]
-        content = _clean_line(" ".join(header_lines[1:]))
+        if len(header_lines) >= 2:
+            normalized_title = header_lines[1]
+            content = _clean_line(" ".join([header_lines[0], *header_lines[2:]]))
+        else:
+            normalized_title = header_lines[0]
+            content = ""
         sections.append(
             ParsedSection(
                 section_order=len(sections) + 1,
@@ -441,6 +445,11 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
     for page_num, lines in pages:
         for line in lines:
             if _canonical_line(line) in boilerplate and not is_heading(line):
+                continue
+
+            if current_title == "Document Header" and not SECTION_NUM_RE.match(line):
+                current_content.append(line)
+                last_page = page_num
                 continue
 
             if is_heading(line):

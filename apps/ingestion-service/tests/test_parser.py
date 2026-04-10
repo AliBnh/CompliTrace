@@ -274,8 +274,8 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
     assert "2. Categories of Data Collected" in titles
     assert "3. Information Processing" in titles
     assert "4. Legal Basis for Processing" in titles
-    assert "Open Data Synthesis, Inc." in titles
     assert "Enterprise Privacy Policy" in titles
+    assert "Open Data Synthesis, Inc." in by_title["Enterprise Privacy Policy"]
     assert "2.1 Identifiers" in titles
     assert "2.2 Technical Data" in titles
     assert "3.1 Service Delivery" in titles
