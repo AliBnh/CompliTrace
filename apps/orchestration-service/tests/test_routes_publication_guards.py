@@ -428,6 +428,47 @@ def test_get_findings_projects_controller_identity_contact_family(db_session: Se
     assert rows[0].citations[0].evidence_id == "evi:chunk:controller-chunk-1"
 
 
+def test_get_findings_emits_blockers_for_all_required_publish_families_when_unmaterialized(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{'
+                '"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"controller missing","blocker_reason":"incomplete hydration"},'
+                '"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing","blocker_reason":"missing evidence linkage"},'
+                '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing","blocker_reason":"missing section traceability"},'
+                '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role ambiguity","blocker_reason":"incomplete hydration"},'
+                '"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"recipients missing","blocker_reason":"missing evidence linkage"},'
+                '"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"purpose mapping missing","blocker_reason":"confidence inconsistency"}'
+                '}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    blocker_rows = [row for row in rows if row.classification == "publication_blocked"]
+    assert len(blocker_rows) == 6
+    assert {row.issue_key for row in blocker_rows} == {
+        "missing_controller_contact",
+        "missing_transfer_notice",
+        "profiling_disclosure_gap",
+        "controller_processor_role_ambiguity",
+        "recipients_disclosure_gap",
+        "purpose_specificity_gap",
+    }
+
+
 def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     finding = Finding(

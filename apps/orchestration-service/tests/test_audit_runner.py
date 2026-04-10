@@ -368,6 +368,15 @@ def test_normalize_analysis_anchors_rewrites_mismatched_transfer_family():
     assert "14(1)(f)" in anchors
 
 
+def test_normalize_analysis_anchors_enforces_family_validators_for_rights_and_complaint():
+    rights = _normalize_analysis_anchors("missing_rights_notice", '["GDPR Article 13(1)(a)"]') or ""
+    complaint = _normalize_analysis_anchors("missing_complaint_right", '["GDPR Article 13(1)(a)"]') or ""
+    assert "13(2)(b)" in rights
+    assert "14(2)(e)" in rights
+    assert "13(2)(d)" in complaint
+    assert "77" in complaint
+
+
 def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(bind=engine)

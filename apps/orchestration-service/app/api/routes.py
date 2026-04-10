@@ -427,6 +427,8 @@ def _project_published_findings_from_map(
 
 def _issue_family(issue: str | None) -> str | None:
     mapping = {
+        "missing_controller_contact": "controller_identity_contact",
+        "missing_controller_identity": "controller_identity_contact",
         "missing_transfer_notice": "transfer",
         "profiling_disclosure_gap": "profiling",
         "controller_processor_role_ambiguity": "role_ambiguity",
@@ -559,7 +561,7 @@ def _project_section_level_findings(
             elif "special category" in text:
                 issue = "special_category_basis_unclear"
         family = _issue_family(issue)
-        if family not in {"transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping", "recipients"}:
+        if family not in {"controller_identity_contact", "transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping", "recipients"}:
             continue
         if row.section_id.startswith("systemic:") or row.section_id.startswith("ledger:"):
             continue

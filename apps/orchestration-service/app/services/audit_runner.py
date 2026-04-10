@@ -2071,13 +2071,20 @@ def _analysis_anchor_templates(issue: str | None) -> list[str]:
         "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
         "missing_controller_identity": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
         "missing_transfer_notice": ["GDPR Article 13(1)(f)", "GDPR Article 14(1)(f)", "GDPR Article 44", "GDPR Article 46"],
-        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)"],
+        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)", "GDPR Article 22"],
         "recipients_disclosure_gap": ["GDPR Article 13(1)(e)", "GDPR Article 14(1)(e)"],
         "purpose_specificity_gap": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)", "GDPR Article 5(1)(b)"],
         "missing_legal_basis": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)"],
         "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
-        "missing_rights_notice": ["GDPR Article 13(2)(b)", "GDPR Article 14(2)(c)"],
-        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)"],
+        "missing_rights_notice": [
+            "GDPR Article 13(2)(b)",
+            "GDPR Article 13(2)(c)",
+            "GDPR Article 13(2)(d)",
+            "GDPR Article 14(2)(c)",
+            "GDPR Article 14(2)(d)",
+            "GDPR Article 14(2)(e)",
+        ],
+        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)", "GDPR Article 77"],
     }
     return templates.get(issue or "", [])
 
