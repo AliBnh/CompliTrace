@@ -61,8 +61,7 @@ def test_split_numbered_heading_and_body_prefers_colon_delimited_subheading():
         "used to authenticate and manage access to services."
     )
     heading, body = split_numbered_heading_and_body(line) or ("", "")
-    assert heading.startswith("2.1")
-    assert "Identifiers" in heading
+    assert heading == "2.1 Identifiers"
     assert body.startswith("We collect full name")
 
 
@@ -167,3 +166,36 @@ def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypa
     sections = parse_pdf_into_sections("dummy.pdf")
     assert len(sections) == 1
     assert sections[0].section_title == "1.1 Purpose of this Policy"
+
+
+def test_parse_pdf_into_sections_keeps_decimal_subheading_without_extra_dot(monkeypatch):
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_text(self, _mode: str) -> str:
+            return self._text
+
+    class _FakeDoc(list):
+        pass
+
+    class _FakeFitz:
+        @staticmethod
+        def open(_path: str):
+            return _FakeDoc(
+                [
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "2 Categories of Data Collected 2.1 Identifiers: We collect full name and email used to authenticate access.",
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
+    sections = parse_pdf_into_sections("dummy.pdf")
+    titles = [s.section_title for s in sections]
+    assert "2.1 Identifiers" in titles
+    assert "2.1. Identifiers" not in titles
