@@ -34,6 +34,7 @@ from app.services.audit_runner import (
     _claim_has_primary_anchor,
     _normalize_severity,
     _normalize_analysis_anchors,
+    _partner_review_pass,
     _finding_signature,
     _ensure_reasoning_chain,
     _clean_remediation_legal_mismatches,
@@ -365,6 +366,32 @@ def test_normalize_analysis_anchors_rewrites_mismatched_transfer_family():
     assert anchors is not None
     assert "13(1)(f)" in anchors
     assert "14(1)(f)" in anchors
+
+
+def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        row = Finding(
+            audit_id=audit.id,
+            section_id="sec-transfer",
+            status="needs review",
+            severity=None,
+            finding_type="local",
+            publish_flag="no",
+            gap_note="We transfer data outside the EEA but safeguards are not disclosed.",
+            remediation_note=None,
+            policy_evidence_excerpt="We transfer personal data and no safeguards are listed.",
+        )
+        db.add(row)
+        db.commit()
+        _partner_review_pass(db, audit.id)
+        updated = db.get(Finding, row.id)
+        assert updated.classification in {"gap_support", "section_support", "evidence_support"}
 
 
 def test_paragraph_ref_compatible_tolerates_format_variants():

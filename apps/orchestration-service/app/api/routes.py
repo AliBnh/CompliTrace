@@ -380,11 +380,12 @@ def _project_published_findings_from_map(
             else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language.")
         )
         legal_requirement_text = _sanitize_published_text(backing.legal_requirement) if backing and backing.legal_requirement else None
+        resolved_severity, resolved_rationale = _severity_rule(inferred_issue, "gap", f"systemic:{issue}", reason)
         projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
                 section_id=f"systemic:{issue}",
                 status="gap",
-                severity=severity_defaults.get(family, "medium"),
+                severity=resolved_severity or severity_defaults.get(family, "medium"),
                 classification=_published_legal_conclusion("gap", inferred_issue, "probable_gap"),
                 finding_type="systemic",
                 publish_flag="yes",
@@ -417,7 +418,7 @@ def _project_published_findings_from_map(
                     remediation=rem_note,
                     conclusion=_sanitize_external_reasoning(reason),
                 ),
-                severity_rationale=_sanitize_published_text(backing.severity_rationale) if backing and backing.severity_rationale else "Severity set from family criticality and final disposition.",
+                severity_rationale=_sanitize_published_text(backing.severity_rationale) if backing and backing.severity_rationale else resolved_rationale,
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
                 citations=(projected_chunk_citations or projected_fallback_citations),
         )
@@ -478,6 +479,28 @@ def _published_legal_conclusion(status: str | None, issue: str | None, existing:
     if status == "gap":
         return "partially_compliant"
     return existing or "not_assessable"
+
+
+def _severity_rule(issue: str | None, status: str | None, section_id: str, reasoning: str | None) -> tuple[str, str]:
+    high_default = {"missing_legal_basis", "missing_controller_contact", "missing_controller_identity", "missing_transfer_notice", "profiling_disclosure_gap"}
+    medium_default = {"missing_retention_period", "missing_rights_notice", "missing_complaint_right", "recipients_disclosure_gap", "purpose_specificity_gap", "controller_processor_role_ambiguity"}
+    text = (reasoning or "").lower()
+    total_failure = any(t in text for t in {"across sections", "across the notice", "not stated for any", "no clear contact route"})
+    rights_or_accountability = any(t in text for t in {"rights", "accountability", "exercise of rights", "controller accountability"})
+    if issue in high_default:
+        sev = "high"
+    elif issue in medium_default:
+        sev = "medium"
+    else:
+        sev = "medium" if status in {"gap", "partial"} else "low"
+    if sev == "medium" and (total_failure or rights_or_accountability):
+        sev = "high"
+    rationale = (
+        f"severity_rule={sev}; issue={issue or 'unknown'}; "
+        f"basis={'total_failure' if total_failure else 'family_default'}; "
+        f"accountability_impact={'yes' if rights_or_accountability else 'no'}; section={section_id}"
+    )
+    return sev, rationale
 
 
 def _build_richer_gap_reasoning(
@@ -706,8 +729,11 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.confidence_applicability = 0.74
     if row.confidence_synthesis is None:
         row.confidence_synthesis = 0.7
-    if row.severity_rationale is None:
-        row.severity_rationale = "Severity set from family criticality, disposition, and evidence confidence."
+    sev, sev_rationale = _severity_rule(issue, row.status, row.section_id, row.gap_reasoning or row.gap_note)
+    if row.severity is None:
+        row.severity = sev
+    if row.severity_rationale is None or "family criticality" in (row.severity_rationale or "").lower():
+        row.severity_rationale = sev_rationale
     if row.gap_reasoning is None:
         row.gap_reasoning = row.gap_note or "Gap confirmed by final disposition map and evidence-linked projection."
     if row.remediation_note is None and issue:
@@ -730,6 +756,7 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
     if not (row.legal_requirement or "").strip():
         row.legal_requirement = f"Rule: {', '.join(row.primary_legal_anchor)}."
     row.gap_reasoning = _sanitize_external_reasoning(row.gap_reasoning) or row.gap_reasoning
+    row.classification = _published_legal_conclusion(row.status, issue, row.classification)
     return row
 
 

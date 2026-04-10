@@ -725,6 +725,75 @@ def test_projected_findings_include_section_level_high_signal_findings(db_sessio
     assert "fact=" in reasoning and "rule=" in reasoning and "application=" in reasoning and "conclusion=" in reasoning and "remediation=" in reasoning
 
 
+def test_section_level_findings_exist_for_transfer_profiling_and_role_ambiguity(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    local_rows = [
+        ("1.3 Territorial Reach", "transfer", "Transfer safeguard language missing", "transfer-chunk"),
+        ("2.4 Usage, Behavioral, and Product Interaction Data", "profiling", "Profiling logic not clearly disclosed", "profiling-chunk"),
+        ("1.2 Audience and Application", "controller/processor", "Role allocation is ambiguous", "role-chunk"),
+    ]
+    for section_id, obligation, gap_note, chunk in local_rows:
+        finding = Finding(
+            audit_id=audit.id,
+            section_id=section_id,
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="local",
+            publication_state="publishable",
+            publish_flag="yes",
+            confidence=0.78,
+            confidence_evidence=0.76,
+            confidence_applicability=0.74,
+            confidence_synthesis=0.72,
+            source_scope="full_notice",
+            source_scope_confidence=0.8,
+            assertion_level="probable_document_gap",
+            obligation_under_review=obligation,
+            policy_evidence_excerpt=gap_note,
+            legal_requirement="GDPR transparency rule",
+            gap_reasoning=gap_note,
+            gap_note=gap_note,
+            remediation_note="Add compliant disclosure text.",
+            document_evidence_refs='["evi:policy:' + section_id + '"]',
+        )
+        db_session.add(finding)
+        db_session.flush()
+        db_session.add(
+            FindingCitation(
+                finding_id=finding.id,
+                chunk_id=chunk,
+                article_number="13",
+                paragraph_ref=None,
+                article_title="Transparency",
+                excerpt=gap_note,
+            )
+        )
+        db_session.add(EvidenceRecord(evidence_id=f"evi:chunk:{chunk}", audit_id=audit.id, evidence_type="retrieval_chunk", source_ref=chunk, text_excerpt=gap_note, article_number="13"))
+        db_session.add(EvidenceRecord(evidence_id=f"evi:policy:{section_id}", audit_id=audit.id, evidence_type="policy_section", source_ref=section_id, text_excerpt=gap_note))
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing"},"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing"},"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role missing"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    section_ids = {r.section_id for r in rows}
+    assert "1.3 Territorial Reach" in section_ids
+    assert "2.4 Usage, Behavioral, and Product Interaction Data" in section_ids
+    assert "1.2 Audience and Application" in section_ids
+
+
 def test_published_clear_omissions_use_non_compliant_conclusion_class(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     finding = Finding(
@@ -896,6 +965,7 @@ def test_projected_reasoning_avoids_internal_engine_concepts(db_session: Session
     assert "obligation map" not in text
     assert "suppression" not in text
     assert "validator" not in text
+    assert "gdpr_applicability=" in text
 
 
 def test_controller_contact_published_reasoning_uses_fact_rule_application(db_session: Session):

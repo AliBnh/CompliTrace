@@ -2041,6 +2041,12 @@ def _finding_issue_id(row: Finding) -> str | None:
             return issue
     if "recipient" in text or "third party" in text or "vendor" in text:
         return "recipients_disclosure_gap"
+    if "transfer" in text or "third country" in text or "outside the eea" in text:
+        return "missing_transfer_notice"
+    if "profil" in text or "automated decision" in text:
+        return "profiling_disclosure_gap"
+    if "controller" in text and "processor" in text:
+        return "controller_processor_role_ambiguity"
     if "purpose" in text and "category" in text:
         return "purpose_specificity_gap"
     if "special category" in text or "article 9" in text or "sensitive data" in text:
@@ -3056,8 +3062,34 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                     "Provide complete notice excerpts and rerun legal qualification.",
                 ),
             )
+            support_classification = "not_assessable"
+            support_status = "partial"
+            context_text = _norm(f"{row.policy_evidence_excerpt or ''} {row.gap_note or ''} {row.remediation_note or ''}")
+            explicit_context = any(t in context_text for t in {"we collect", "we process", "we share", "we transfer", "profil", "controller", "processor"})
+            clear_obligation_trigger = issue_id in {
+                "missing_controller_contact",
+                "missing_transfer_notice",
+                "profiling_disclosure_gap",
+                "controller_processor_role_ambiguity",
+                "recipients_disclosure_gap",
+                "purpose_specificity_gap",
+                "special_category_basis_unclear",
+                "missing_legal_basis",
+                "missing_retention_period",
+                "missing_rights_notice",
+                "missing_complaint_right",
+            }
+            visible_omission = any(t in context_text for t in {"missing", "not disclosed", "not clearly", "without", "does not"})
+            if explicit_context and clear_obligation_trigger and visible_omission:
+                support_classification = "gap_support"
+                support_status = "gap"
+            elif explicit_context and clear_obligation_trigger:
+                support_classification = "section_support"
+            elif clear_obligation_trigger:
+                support_classification = "evidence_support"
             row.status = "partial"
-            row.classification = "not_assessable"
+            row.status = support_status
+            row.classification = support_classification
             row.finding_type = "supporting_evidence"
             row.publish_flag = "no"
             row.artifact_role = "support_only"
