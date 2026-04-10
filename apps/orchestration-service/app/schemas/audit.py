@@ -60,6 +60,9 @@ class FindingOut(BaseModel):
     issue_key: str | None = None
     blocker_reason: str | None = None
     missing_requirements: list[str] | None = None
+    affected_sections: list[str] | None = None
+    where_evidence_found: list[str] | None = None
+    where_disclosure_missing: list[str] | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

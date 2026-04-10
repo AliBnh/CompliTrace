@@ -69,6 +69,9 @@ export type FindingOut = {
   issue_key?: string | null
   blocker_reason?: string | null
   missing_requirements?: string[] | null
+  affected_sections?: string[] | null
+  where_evidence_found?: string[] | null
+  where_disclosure_missing?: string[] | null
   legal_requirement?: string | null
   gap_reasoning?: string | null
   severity_rationale?: string | null

@@ -567,9 +567,10 @@ def test_projected_findings_keep_non_null_citation_linkage_when_chunk_evidence_r
 
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
-    assert rows[0].citations[0].evidence_id == "evi:chunk:rights-legacy-chunk"
-    assert rows[0].citations[0].source_type == "retrieval_chunk"
-    assert rows[0].citations[0].source_ref == "rights-legacy-chunk"
+    assert rows[0].classification == "publication_blocked"
+    assert rows[0].blocker_reason == "missing evidence linkage"
+    assert rows[0].missing_requirements is not None
+    assert "document_evidence_refs" in rows[0].missing_requirements
 
 
 def test_specialist_review_publish_blocks_project_to_published_with_rich_hydration(db_session: Session):
@@ -869,8 +870,8 @@ def test_projected_findings_include_section_level_high_signal_findings(db_sessio
     by_section = {r.section_id: r for r in rows}
     assert "1.3 Territorial Reach" in by_section
     reasoning = by_section["1.3 Territorial Reach"].gap_reasoning or ""
-    assert "section=1.3 Territorial Reach;" in reasoning
-    assert "fact=" in reasoning and "rule=" in reasoning and "application=" in reasoning and "conclusion=" in reasoning and "remediation=" in reasoning
+    assert "In section 1.3 Territorial Reach" in reasoning
+    assert "Applicable GDPR duty:" in reasoning and "Breach finding:" in reasoning and "Required remediation:" in reasoning
 
 
 def test_section_level_findings_exist_for_transfer_profiling_and_role_ambiguity(db_session: Session):
@@ -1113,7 +1114,9 @@ def test_projected_reasoning_avoids_internal_engine_concepts(db_session: Session
     assert "obligation map" not in text
     assert "suppression" not in text
     assert "validator" not in text
-    assert "gdpr_applicability=" in text
+    assert "fact:" in text
+    assert "law:" in text
+    assert "breach:" in text
 
 
 def test_controller_contact_published_reasoning_uses_fact_rule_application(db_session: Session):
@@ -1163,7 +1166,8 @@ def test_controller_contact_published_reasoning_uses_fact_rule_application(db_se
     rows = get_findings(audit.id, db_session)
     controller = next(r for r in rows if "controller_contact" in r.section_id)
     reasoning = (controller.gap_reasoning or "").lower()
-    assert "fact=" in reasoning and "rule=" in reasoning and "application=" in reasoning and "remediation=" in reasoning
+    assert "under gdpr articles 13(1)(a) and 14(1)(a)" in reasoning
+    assert "remediation:" in reasoning
     assert controller.classification in {"non_compliant", "partially_compliant"}
 
 
