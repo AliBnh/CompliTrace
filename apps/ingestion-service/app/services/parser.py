@@ -53,6 +53,22 @@ SENTENCE_START_WORDS = {
     "should",
 }
 
+BODY_START_WORDS = {
+    "we",
+    "our",
+    "this",
+    "these",
+    "they",
+    "it",
+    "you",
+    "your",
+    "the",
+    "a",
+    "an",
+    "personal",
+    "users",
+}
+
 
 def _normalize_space(text: str) -> str:
     return MULTISPACE_RE.sub(" ", text).strip()
@@ -67,6 +83,11 @@ def _clean_line(text: str) -> str:
     text = _normalize_space(text)
     text = re.sub(r"\s*[-–—]\s*$", "", text)
     return text
+
+
+def _format_numbered_heading(number: str, heading_text: str) -> str:
+    suffix = "." if "." not in number else ""
+    return _clean_line(f"{number}{suffix} {heading_text}")
 
 
 def is_noise_line(line: str) -> bool:
@@ -143,6 +164,17 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
 
     number = m.group(1)
     rest = m.group(2)
+    # Prefer explicit "Title: body" split when present.
+    if ":" in rest:
+        left, right = rest.split(":", 1)
+        left_words = left.strip().split()
+        right_words = right.strip().split()
+        if 1 <= len(left_words) <= 10 and len(right_words) >= 3:
+            heading = _format_numbered_heading(number, " ".join(left_words))
+            body = _clean_line(" ".join(right_words))
+            if len(heading.split()) >= 2 and len(body.split()) >= 3:
+                return heading, body
+
     words = rest.split()
     if len(words) < 4:
         return None
@@ -150,17 +182,20 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
     cut: int | None = None
     for i, word in enumerate(words):
         norm = word.lower().strip(",.;:()")
-        if i >= 3 and norm in SENTENCE_START_WORDS:
+        next_norm = ""
+        if i + 1 < len(words):
+            next_norm = words[i + 1].lower().strip(",.;:()")
+        if i >= 2 and norm == "data" and next_norm in {"is", "are", "was", "were"} and len(words) - i >= 3:
             cut = i
             break
-
-    if cut is None and len(words) > 9:
-        cut = 9
+        if i >= 1 and norm in BODY_START_WORDS and len(words) - i >= 3:
+            cut = i
+            break
 
     if cut is None:
         return None
 
-    heading = _clean_line(f"{number}. {' '.join(words[:cut])}")
+    heading = _format_numbered_heading(number, " ".join(words[:cut]))
     body = _clean_line(" ".join(words[cut:]))
     if len(heading.split()) < 2 or len(body.split()) < 3:
         return None

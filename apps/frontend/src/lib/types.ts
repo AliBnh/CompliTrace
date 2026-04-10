@@ -22,7 +22,7 @@ export type SectionOut = {
 export type AuditOut = {
   id: UUID
   document_id: UUID
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'review_required'
+  status: 'pending' | 'running' | 'complete' | 'failed' | 'review_required' | 'audit_incomplete'
   started_at: string
   completed_at?: string | null
   model_provider: string
@@ -65,6 +65,13 @@ export type FindingOut = {
   source_scope_confidence?: number | null
   referenced_unseen_sections?: string[] | null
   assertion_level?: 'confirmed_document_gap' | 'excerpt_limited_gap' | 'referenced_but_unseen' | 'not_assessable' | null
+  publication_blocked?: boolean | null
+  issue_key?: string | null
+  blocker_reason?: string | null
+  missing_requirements?: string[] | null
+  affected_sections?: string[] | null
+  where_evidence_found?: string[] | null
+  where_disclosure_missing?: string[] | null
   legal_requirement?: string | null
   gap_reasoning?: string | null
   severity_rationale?: string | null

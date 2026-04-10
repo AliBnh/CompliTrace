@@ -55,6 +55,21 @@ def test_split_numbered_heading_and_body_returns_none_when_no_body():
     assert split_numbered_heading_and_body(line) is None
 
 
+def test_split_numbered_heading_and_body_returns_none_for_long_sentence_without_clear_boundary():
+    line = "4.1 The Company primarily relies on user consent inferred from interactions with our services."
+    assert split_numbered_heading_and_body(line) is None
+
+
+def test_split_numbered_heading_and_body_prefers_colon_delimited_subheading():
+    line = (
+        "2.1 Identifiers: We collect full name, email address, phone number, and session tokens "
+        "used to authenticate and manage access to services."
+    )
+    heading, body = split_numbered_heading_and_body(line) or ("", "")
+    assert heading == "2.1 Identifiers"
+    assert body.startswith("We collect full name")
+
+
 def test_detect_boilerplate_lines_generic():
     pages = [
         (1, ["Confidential", "Data Retention"]),
@@ -156,3 +171,109 @@ def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypa
     sections = parse_pdf_into_sections("dummy.pdf")
     assert len(sections) == 1
     assert sections[0].section_title == "1.1 Purpose of this Policy"
+
+
+def test_parse_pdf_into_sections_keeps_decimal_subheading_without_extra_dot(monkeypatch):
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_text(self, _mode: str) -> str:
+            return self._text
+
+    class _FakeDoc(list):
+        pass
+
+    class _FakeFitz:
+        @staticmethod
+        def open(_path: str):
+            return _FakeDoc(
+                [
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "2 Categories of Data Collected 2.1 Identifiers: We collect full name and email used to authenticate access.",
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
+    sections = parse_pdf_into_sections("dummy.pdf")
+    titles = [s.section_title for s in sections]
+    assert "2.1 Identifiers" in titles
+    assert "2.1. Identifiers" not in titles
+
+
+def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_bodies(monkeypatch):
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_text(self, _mode: str) -> str:
+            return self._text
+
+    class _FakeDoc(list):
+        pass
+
+    class _FakeFitz:
+        @staticmethod
+        def open(_path: str):
+            return _FakeDoc(
+                [
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "Open Data Synthesis, Inc.",
+                                "Enterprise Privacy Policy",
+                                "1. Introduction",
+                                "1.1 Overview",
+                                "This Privacy Policy describes categories of personal data processed.",
+                                "2. Categories of Data Collected",
+                                "2.1 Identifiers We collect full name, email address, phone number and organizational identifiers.",
+                                "2.2 Technical Data This includes system logs, IP address metadata, browser type, and telemetry.",
+                                "3. Information Processing",
+                                "3.1 Service Delivery Personal data is processed to enable authentication and access management.",
+                                "3.2 Analytics and Optimization Data is used to generate operational insights and improve experiences.",
+                            ]
+                        )
+                    ),
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "4. Legal Basis for Processing",
+                                "4.1 The Company primarily relies on user consent where required",
+                                "under local law.",
+                                "5. Security Measures",
+                                "5.1 The Company employs encryption protocols",
+                                "and audit controls.",
+                                "6. Data Subject Rights",
+                                "6.1 Users may exercise rights of access, rectification,",
+                                "erasure and portability.",
+                                "13. Contact Information",
+                                "13.1 For inquiries regarding this Privacy Policy",
+                                "contact privacy@opendata.com.",
+                            ]
+                        )
+                    ),
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
+
+    sections = parse_pdf_into_sections("dummy.pdf")
+    titles = [s.section_title for s in sections]
+    by_title = {s.section_title: s.content for s in sections}
+
+    assert "2.1 Identifiers" in titles
+    assert "2.2 Technical Data" in titles
+    assert "3.1 Service Delivery" in titles
+    assert "3.2 Analytics and Optimization" in titles
+    assert any(title.startswith("4.1 ") for title in titles)
+    assert any(title.startswith("13.1 ") for title in titles)
+
+    assert "We collect full name, email address" in by_title["2.1 Identifiers"]
+    assert "This includes system logs" in by_title["2.2 Technical Data"]
+    assert "processed to enable authentication and access management" in by_title["3.1 Service Delivery"]
+    assert all(". ." not in title for title in titles)
