@@ -298,21 +298,16 @@ PRIVACY_NOTICE_SCOPE_PRIMARY = {5, 6, 9, 12, 13, 14, 21, 22, 44, 45, 46, 47, 49,
 
 CLAIM_ARTICLE_RULES: dict[str, dict[str, set[int]]] = {
     "missing_controller_identity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
-    "missing_dpo_contact": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
-    "missing_legal_basis": {"primary": {6, 13, 14}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
-    "missing_purposes": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 44, 45, 46, 47, 49}},
-    "missing_recipients": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
-    "missing_transfer_disclosure": {"primary": {13, 14}, "support": {44, 45, 46, 47, 49}, "disallowed": {15, 21}},
-    "missing_transfer_safeguard_mechanism": {
-        "primary": {44, 45, 46, 47, 49},
-        "support": {13, 14},
-        "disallowed": {15, 21},
-    },
+    "missing_controller_contact": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_legal_basis": {"primary": {13, 14, 6}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
     "missing_retention_period": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
     "missing_rights_notice": {"primary": {13, 14, 12, 15, 16, 17, 18, 19, 20, 21, 22}, "support": {5}, "disallowed": set()},
     "missing_complaint_right": {"primary": {13, 14, 77}, "support": {12}, "disallowed": {21, 22}},
-    "missing_profiling_logic": {"primary": {13, 14}, "support": {22, 21}, "disallowed": {15}},
-    "missing_special_category_basis": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
+    "missing_transfer_notice": {"primary": {13, 14, 44, 45, 46}, "support": {47, 49}, "disallowed": {15, 21}},
+    "profiling_disclosure_gap": {"primary": {13, 14}, "support": {22}, "disallowed": {15}},
+    "recipients_disclosure_gap": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+    "purpose_specificity_gap": {"primary": {13, 14, 5}, "support": {12, 6}, "disallowed": {21, 22}},
+    "special_category_basis_unclear": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
     "controller_processor_role_ambiguity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
 }
 
@@ -3174,6 +3169,28 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             if issue.replace("_", " ") in text:
                 key = issue
                 break
+        if key in CLAIM_ARTICLE_RULES and row.primary_legal_anchor:
+            anchors = _decode_json_list(row.primary_legal_anchor)
+            anchor_articles = {_article_int(a) for a in anchors if _article_int(a) is not None}
+            rule = CLAIM_ARTICLE_RULES[key]
+            if anchor_articles:
+                has_primary_or_support = bool(anchor_articles & (rule["primary"] | rule["support"]))
+                has_disallowed = bool(anchor_articles & rule["disallowed"])
+                if not has_primary_or_support or has_disallowed:
+                    row.status = "not applicable"
+                    row.classification = "diagnostic_internal_only"
+                    row.finding_type = "supporting_evidence"
+                    row.publish_flag = "no"
+                    row.artifact_role = "support_only"
+                    row.finding_level = "none"
+                    row.publication_state = "internal_only"
+                    row.gap_note = (
+                        f"Issue/article family mismatch rejected for issue '{key}'. "
+                        f"Anchors={sorted(anchor_articles)}; expected primary/support={sorted(rule['primary'] | rule['support'])}."
+                    )
+                    row.remediation_note = "Re-map fact pattern to the correct GDPR article family before publication."
+                    row.confidence = min(row.confidence or 0.4, 0.4)
+                    continue
         if key in seen_root_keys and not row.section_id.startswith("systemic:"):
             row.status = "not applicable"
             row.classification = "supporting_evidence"

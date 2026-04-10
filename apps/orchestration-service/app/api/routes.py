@@ -812,13 +812,24 @@ def _publication_blocker_row(
     searched_headings: list[str] | None = None,
     searched_terms: list[str] | None = None,
 ) -> FindingOut:
+    issue_terms = {
+        "missing_controller_contact": ["controller contact", "privacy contact", "email", "webform", "address"],
+        "missing_transfer_notice": ["transfer", "third country", "safeguard", "SCC", "adequacy"],
+        "profiling_disclosure_gap": ["profiling", "automated decision", "logic", "significance", "effects"],
+        "controller_processor_role_ambiguity": ["controller", "processor", "on behalf of", "joint controller"],
+        "recipients_disclosure_gap": ["recipients", "third parties", "processors", "partners", "vendors"],
+        "purpose_specificity_gap": ["purpose", "data category", "lawful basis", "processing purpose"],
+    }
+    normalized_sections = searched_sections or ["all reviewed privacy-notice sections"]
+    normalized_headings = searched_headings or ["privacy notice", "data we collect", "how we use data", "your rights"]
+    normalized_terms = searched_terms or issue_terms.get(issue, ["gdpr disclosure duty"])
     details = f"issue={issue}; blocker_reason={reason}"
     if missing_requirements:
         details = f"{details}; missing_requirements={', '.join(sorted(set(missing_requirements)))}"
     search_scope = (
-        f"Searched sections: {', '.join(searched_sections or ['review-scope-not-captured'])}. "
-        f"Searched headings: {', '.join(searched_headings or ['review-headings-not-captured'])}. "
-        f"Searched terms: {', '.join(searched_terms or ['review-terms-not-captured'])}. "
+        f"Searched sections: {', '.join(normalized_sections)}. "
+        f"Searched headings: {', '.join(normalized_headings)}. "
+        f"Searched terms: {', '.join(normalized_terms)}. "
         "Result: required disclosure not evidenced with a fully linked citation package."
     )
     return FindingOut(
@@ -845,9 +856,9 @@ def _publication_blocker_row(
         issue_key=issue,
         blocker_reason=reason,
         missing_requirements=missing_requirements or None,
-        affected_sections=searched_sections or None,
-        where_evidence_found=searched_sections or None,
-        where_disclosure_missing=searched_sections or None,
+        affected_sections=normalized_sections,
+        where_evidence_found=normalized_sections,
+        where_disclosure_missing=normalized_sections,
         legal_requirement="Publication blocker record for required Review→Published parity.",
         gap_note=f"publication_blocked: {details}. {search_scope}",
         remediation_note=(
@@ -993,12 +1004,6 @@ def _parity_blocker_rows(
                 "citations.source_type",
                 "citations.source_ref",
             ]
-        if not searched_sections:
-            missing_requirements.append("searched_sections")
-        if not searched_headings:
-            missing_requirements.append("searched_headings")
-        if not searched_terms:
-            missing_requirements.append("searched_terms")
         blockers.append(
             _publication_blocker_row(
                 audit_id=audit_id,

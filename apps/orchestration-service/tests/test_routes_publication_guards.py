@@ -354,6 +354,8 @@ def test_get_findings_emits_publication_blocker_for_unmaterialized_publishable_f
     assert blocker.missing_requirements is not None
     assert "citations" in blocker.missing_requirements
     assert "document_evidence_refs" in blocker.missing_requirements
+    assert blocker.gap_note is not None and "Searched sections:" in blocker.gap_note
+    assert "unknown" not in blocker.gap_note.lower()
 
 
 def test_get_findings_projects_controller_identity_contact_family(db_session: Session):

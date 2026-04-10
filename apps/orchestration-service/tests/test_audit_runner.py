@@ -1095,6 +1095,21 @@ def test_classify_finding_quality_outputs_probable_gap_for_core_notice_without_c
     assert conf is not None and conf >= 0.55
 
 
+def test_claim_type_to_issue_mapping_uses_canonical_issue_families():
+    from app.services.audit_runner import _claim_type_to_issue_id
+
+    assert _claim_type_to_issue_id("controller_contact") == "missing_controller_contact"
+    assert _claim_type_to_issue_id("transfer") == "missing_transfer_notice"
+    assert _claim_type_to_issue_id("profiling") == "profiling_disclosure_gap"
+
+
+def test_classify_finding_quality_avoids_not_assessable_for_specialist_claim_without_citations():
+    finding = LlmFinding(status="gap", severity="medium", gap_note="Profiling signals visible.", remediation_note="Add profiling disclosures.", citations=[])
+    klass, conf = _classify_finding_quality(finding, [], {"profiling"}, "direct")
+    assert klass == "probable_gap"
+    assert conf is not None and conf >= 0.5
+
+
 def test_classify_finding_quality_marks_needs_review_as_probable_gap_for_core_notice():
     finding = LlmFinding(status="needs review", severity=None, gap_note="insufficient evidence", remediation_note=None, citations=[])
     klass, conf = _classify_finding_quality(finding, [], {"retention"}, "unknown")
