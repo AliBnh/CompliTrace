@@ -69,6 +69,11 @@ def _clean_line(text: str) -> str:
     return text
 
 
+def _format_numbered_heading(number: str, heading_text: str) -> str:
+    suffix = "." if "." not in number else ""
+    return _clean_line(f"{number}{suffix} {heading_text}")
+
+
 def is_noise_line(line: str) -> bool:
     s = _clean_line(line)
     if not s:
@@ -143,6 +148,17 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
 
     number = m.group(1)
     rest = m.group(2)
+    # Prefer explicit "Title: body" split when present.
+    if ":" in rest:
+        left, right = rest.split(":", 1)
+        left_words = left.strip().split()
+        right_words = right.strip().split()
+        if 1 <= len(left_words) <= 10 and len(right_words) >= 3:
+            heading = _format_numbered_heading(number, " ".join(left_words))
+            body = _clean_line(" ".join(right_words))
+            if len(heading.split()) >= 2 and len(body.split()) >= 3:
+                return heading, body
+
     words = rest.split()
     if len(words) < 4:
         return None
@@ -160,7 +176,7 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
     if cut is None:
         return None
 
-    heading = _clean_line(f"{number}. {' '.join(words[:cut])}")
+    heading = _format_numbered_heading(number, " ".join(words[:cut]))
     body = _clean_line(" ".join(words[cut:]))
     if len(heading.split()) < 2 or len(body.split()) < 3:
         return None
