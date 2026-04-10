@@ -1076,9 +1076,10 @@ def test_ensure_reasoning_chain_adds_evidence_requirement_assessment():
         [LlmCitation(chunk_id="c13", article_number="13")],
         {"legal_basis"},
     )
-    assert "Evidence:" in (updated.gap_note or "")
-    assert "Requirement:" in (updated.gap_note or "")
-    assert "Assessment:" in (updated.gap_note or "")
+    assert "Fact:" in (updated.gap_note or "")
+    assert "Law:" in (updated.gap_note or "")
+    assert "Breach:" in (updated.gap_note or "")
+    assert "Conclusion:" in (updated.gap_note or "")
 
 
 def test_clean_remediation_rewrites_wrong_13_1_f_legal_basis_reference():

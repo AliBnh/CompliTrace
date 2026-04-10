@@ -158,6 +158,7 @@ SYSTEMIC_ANCHOR_MAP: dict[str, dict[str, list[str]]] = {
 
 SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
     "missing_controller_identity": "controller_identity_present",
+    "missing_controller_contact": "controller_contact_present",
     "missing_legal_basis": "legal_basis_present",
     "missing_retention_period": "retention_present",
     "missing_rights_notice": "rights_present",
@@ -166,6 +167,7 @@ SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
 
 SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
     "missing_controller_identity": {"controller", "company", "contact", "privacy notice", "personal data"},
+    "missing_controller_contact": {"contact", "email", "privacy@", "webform", "address", "data subject"},
     "missing_legal_basis": {"purpose", "process", "collect", "use", "personal data"},
     "missing_retention_period": {"retain", "retention", "storage", "personal data", "process"},
     "missing_rights_notice": {"right", "data subject", "access", "rectification", "erasure", "process"},
@@ -176,7 +178,7 @@ SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
 
 CORE_DUTY_TO_ISSUE: dict[str, str] = {
     "controller_identity": "missing_controller_identity",
-    "controller_contact": "missing_controller_identity",
+    "controller_contact": "missing_controller_contact",
     "legal_basis": "missing_legal_basis",
     "retention": "missing_retention_period",
     "rights": "missing_rights_notice",
@@ -1143,14 +1145,14 @@ def _claim_has_primary_anchor(claim_types: set[str], citations: list[LlmCitation
 
 def _claim_type_to_issue_id(claim_type: str) -> str:
     mapping = {
-        "controller_contact": "missing_controller_identity",
+        "controller_contact": "missing_controller_contact",
         "legal_basis": "missing_legal_basis",
         "retention": "missing_retention_period",
         "rights": "missing_rights_notice",
         "complaint": "missing_complaint_right",
-        "transfer": "missing_transfer_disclosure",
-        "profiling": "missing_profiling_logic",
-        "sensitive_data": "missing_special_category_basis",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "sensitive_data": "special_category_basis_unclear",
         "right_to_object": "missing_rights_notice",
     }
     return mapping.get(claim_type, claim_type)
@@ -1858,14 +1860,17 @@ def _ensure_reasoning_chain(f: LlmFinding, section: SectionData, citations: list
     if f.status not in {"gap", "partial"}:
         return f
     gap = f.gap_note or ""
-    if "Evidence:" in gap and "Requirement:" in gap and "Assessment:" in gap:
+    if all(token in gap for token in {"Fact:", "Law:", "Breach:", "Conclusion:"}):
         return f
     evidence = _norm(section.content)[:220]
     requirement_articles = ", ".join(sorted({c.article_number for c in citations})) or "validated GDPR disclosure obligations"
     claim_text = ", ".join(sorted(claim_types)) if claim_types else "identified transparency obligations"
+    breach = gap or "Policy language appears incomplete against cited obligations."
     f.gap_note = (
-        f"Evidence: {evidence}. Requirement: {requirement_articles} ({claim_text}). "
-        f"Assessment: {gap or 'Policy language appears incomplete against cited obligations.'}"
+        f"Fact: {evidence}. "
+        f"Law: {requirement_articles} ({claim_text}). "
+        f"Breach: {breach}. "
+        "Conclusion: the notice should be remediated to satisfy the applicable GDPR disclosure duty."
     )
     return f
 
@@ -1883,11 +1888,13 @@ def _classify_finding_quality(
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
-        if claim_types & CORE_NOTICE_CLAIMS:
+        if claim_types & (CORE_NOTICE_CLAIMS | {"profiling", "transfer", "recipients", "sensitive_data"}):
             return "probable_gap", 0.58
         return "not_assessable", 0.2
     has_primary = _claim_has_primary_anchor(claim_types, citations)
     if not has_primary:
+        if claim_types:
+            return "probable_gap", 0.52
         return "not_assessable", 0.25
     contradiction_penalty = 0.2 if _has_claim_citation_contradiction(claim_types, citations) else 0.0
     source_bonus = 0.1 if source_mode in {"direct", "indirect"} else 0.0
@@ -1910,6 +1917,13 @@ def _classify_finding_quality(
 
 def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
     return (now_monotonic - started_monotonic) > budget_seconds
+
+
+def _has_positive_controller_contradiction(text: str) -> bool:
+    norm = _norm(text)
+    has_entity = any(t in norm for t in {"controller", "legal entity", "company", "we are"})
+    has_contact = any(t in norm for t in {"privacy@", "contact us", "email", "postal address", "webform", "dpo@"})
+    return has_entity and has_contact
 
 
 def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
@@ -2514,11 +2528,11 @@ def _issue_to_family(issue: str | None) -> str | None:
 def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, str]:
     matched = [r for r in rows if _finding_issue_id(r) == issue]
     if any(r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap"} and r.publish_flag == "yes" for r in matched):
-        return "gap", "publishable evidence-backed gap survives synthesis and publication gates"
+        return "gap", "Fact: reviewed notice text indicates processing context. Law: GDPR transparency duties for this issue apply. Breach: required disclosure remains missing or unclear. Conclusion: publishable compliance gap."
     if any(r.classification == "referenced_but_unseen" for r in matched):
-        return "referenced_but_unseen", "cross-reference to unseen sections prevents full confirmation"
+        return "referenced_but_unseen", "Fact: referenced sections are not visible in reviewed excerpts. Law: duty may apply but full verification needs cited sections. Breach: confirmation blocked by unseen material. Conclusion: referenced but unseen."
     if any(r.classification == "not_assessable" for r in matched):
-        return "not_assessable", "insufficient material quality/coverage"
+        return "not_assessable", "Fact: available excerpt is fragmentary for this issue. Law: GDPR conclusion requires complete context. Breach: evidence scope is insufficient for legal confirmation. Conclusion: not assessable."
     return "satisfied", "no unresolved issue artifact survived gates"
 
 
@@ -3754,17 +3768,29 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             classification,
         )
         if not consistency_ok:
-            contradiction_fail_total.inc()
-            classification = "contradiction_internal_only"
-            f.status = "needs review"
-            f.severity = None
-            f.gap_note = (
-                "Internal QA consistency gate rejected this draft finding. "
-                f"Reason: {consistency_reason or 'mismatch'}."
-            )
-            f.remediation_note = None
-            valid_citations = []
-            confidence = min(confidence or 0.35, 0.35)
+            controller_issue = qualification["issue_name"] in {"missing_controller_identity", "missing_controller_contact"}
+            contradictory_disclosure = _has_positive_controller_contradiction(section.content)
+            if controller_issue and not contradictory_disclosure:
+                classification = classification or "probable_gap"
+                f.gap_note = (
+                    f"{f.gap_note or ''} Fact: controller-related processing context is visible. "
+                    "Law: GDPR Articles 13(1)(a)/14(1)(a) require controller identity and contact-route disclosure. "
+                    f"Breach: {consistency_reason or 'controller-contact disclosure remains unclear'}. "
+                    "Conclusion: keep as publishable controller identity/contact gap absent contradictory disclosure."
+                ).strip()
+                confidence = max(confidence or 0.55, 0.55)
+            else:
+                contradiction_fail_total.inc()
+                classification = "contradiction_internal_only"
+                f.status = "needs review"
+                f.severity = None
+                f.gap_note = (
+                    "Internal QA consistency gate rejected this draft finding. "
+                    f"Reason: {consistency_reason or 'mismatch'}."
+                )
+                f.remediation_note = None
+                valid_citations = []
+                confidence = min(confidence or 0.35, 0.35)
 
         if f.status in {"gap", "partial"}:
             signature = _finding_signature(f, valid_citations)
