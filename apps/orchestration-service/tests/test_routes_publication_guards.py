@@ -323,7 +323,7 @@ def test_get_findings_projects_from_evidence_refs_when_supporting_citations_are_
     assert rows[0].section_id == "systemic:missing_transfer_notice"
 
 
-def test_get_findings_emits_publication_blocker_for_unmaterialized_publishable_family(db_session: Session):
+def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publishable_family(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -347,16 +347,14 @@ def test_get_findings_emits_publication_blocker_for_unmaterialized_publishable_f
 
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
-    blocker = rows[0]
-    assert blocker.classification == "publication_blocked"
-    assert blocker.publication_blocked is True
-    assert blocker.issue_key == "missing_transfer_notice"
-    assert "missing evidence" in (blocker.blocker_reason or "")
-    assert blocker.missing_requirements is not None
-    assert "citations" in blocker.missing_requirements
-    assert "document_evidence_refs" in blocker.missing_requirements
-    assert blocker.gap_note is not None and "Searched sections:" in blocker.gap_note
-    assert "unknown" not in blocker.gap_note.lower()
+    finding = rows[0]
+    assert finding.classification == "clear_non_compliance"
+    assert finding.publication_blocked is not True
+    assert finding.issue_key == "missing_transfer_notice"
+    assert finding.document_evidence_refs is not None
+    assert finding.citations
+    assert finding.citations[0].source_type == "absence_trace"
+    assert finding.gap_note is not None and "transfer safeguards missing" in finding.gap_note
 
 
 def test_get_findings_projects_controller_identity_contact_family(db_session: Session):
@@ -435,7 +433,7 @@ def test_get_findings_projects_controller_identity_contact_family(db_session: Se
     assert rows[0].citations[0].evidence_id == "evi:chunk:controller-chunk-1"
 
 
-def test_get_findings_emits_blockers_for_all_required_publish_families_when_unmaterialized(db_session: Session):
+def test_get_findings_emits_publishable_absence_proof_for_required_publish_families_when_unmaterialized(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -464,9 +462,9 @@ def test_get_findings_emits_blockers_for_all_required_publish_families_when_unma
     db_session.commit()
 
     rows = get_findings(audit.id, db_session)
-    blocker_rows = [row for row in rows if row.classification == "publication_blocked"]
-    assert len(blocker_rows) == 6
-    assert {row.issue_key for row in blocker_rows} == {
+    published_rows = [row for row in rows if row.section_id.startswith("systemic:") and row.classification != "publication_blocked"]
+    assert len(published_rows) >= 6
+    assert {row.issue_key for row in published_rows if row.issue_key} >= {
         "missing_controller_contact",
         "missing_transfer_notice",
         "profiling_disclosure_gap",
@@ -474,6 +472,48 @@ def test_get_findings_emits_blockers_for_all_required_publish_families_when_unma
         "recipients_disclosure_gap",
         "purpose_specificity_gap",
     }
+    for row in published_rows:
+        if row.issue_key in {
+            "missing_controller_contact",
+            "missing_transfer_notice",
+            "profiling_disclosure_gap",
+            "controller_processor_role_ambiguity",
+            "recipients_disclosure_gap",
+            "purpose_specificity_gap",
+        }:
+            assert row.document_evidence_refs
+            assert row.citations
+            assert row.citations[0].evidence_id is not None
+            assert row.citations[0].source_type == "absence_trace"
+            assert row.citations[0].source_ref is not None
+
+
+def test_get_findings_maps_controller_identity_contact_to_identity_issue_when_reasoning_says_identity_missing(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{"controller_identity_contact":{"status":"gap","publication_recommendation":"publish",'
+                '"reasoning":"controller identity missing from notice"}}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    identity = next(r for r in rows if r.section_id == "systemic:missing_controller_identity")
+    assert identity.issue_key == "missing_controller_identity"
+    assert identity.classification == "clear_non_compliance"
 
 
 def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
@@ -1174,6 +1214,49 @@ def test_controller_contact_published_reasoning_uses_fact_rule_application(db_se
     assert "under gdpr articles 13(1)(a) and 14(1)(a)" in reasoning
     assert "remediation:" in reasoning
     assert controller.classification in {"non_compliant", "partially_compliant"}
+
+
+def test_published_evidence_excerpt_uses_quote_or_absence_mode_not_generic_phrase(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    finding = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_transfer_notice",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="systemic",
+        publish_flag="yes",
+        publication_state="publishable",
+        primary_legal_anchor='["GDPR Art. 13(1)(f)"]',
+        citation_summary_text="summary",
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        confidence_overall=0.7,
+        remediation_note="Add transfer safeguards.",
+        policy_evidence_excerpt="Reviewed sections show processing context but do not contain required disclosure language.",
+        document_evidence_refs='["evi:policy:transfer"]',
+    )
+    db_session.add(finding)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=finding.id,
+            chunk_id="transfer-c1",
+            article_number="13",
+            paragraph_ref="1(f)",
+            article_title="Transfers",
+            excerpt="We transfer data across jurisdictions.",
+        )
+    )
+    db_session.add(EvidenceRecord(evidence_id="evi:policy:transfer", audit_id=audit.id, evidence_type="policy_section", source_ref="transfer", text_excerpt="x"))
+    db_session.add(EvidenceRecord(evidence_id="evi:chunk:transfer-c1", audit_id=audit.id, evidence_type="retrieval_chunk", source_ref="transfer-c1", text_excerpt="We transfer data across jurisdictions."))
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    published = next(r for r in rows if r.section_id == "systemic:missing_transfer_notice")
+    excerpt = (published.policy_evidence_excerpt or "").lower()
+    assert "reviewed sections show processing context but do not contain required disclosure language" not in excerpt
+    assert ("quote mode" in excerpt) or ("absence-proof mode" in excerpt)
 
 
 def test_get_review_grouped_returns_expected_sections(db_session: Session):

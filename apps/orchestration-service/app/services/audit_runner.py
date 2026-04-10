@@ -146,13 +146,29 @@ SYSTEMIC_ANCHOR_MAP: dict[str, dict[str, list[str]]] = {
         "primary": ["GDPR Art. 13(2)(d)", "GDPR Art. 14(2)(e)"],
         "secondary": ["GDPR Art. 77"],
     },
+    "missing_controller_contact": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
     "missing_transfer_notice": {
         "primary": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)"],
-        "secondary": ["GDPR Art. 44"],
+        "secondary": ["GDPR Art. 44", "GDPR Art. 45", "GDPR Art. 46"],
     },
     "profiling_disclosure_gap": {
         "primary": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)"],
         "secondary": ["GDPR Art. 22"],
+    },
+    "recipients_disclosure_gap": {
+        "primary": ["GDPR Art. 13(1)(e)", "GDPR Art. 14(1)(e)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "purpose_specificity_gap": {
+        "primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+        "secondary": ["GDPR Art. 5(1)(b)"],
+    },
+    "controller_processor_role_ambiguity": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 5(1)(a)"],
     },
 }
 
@@ -511,6 +527,21 @@ def _confidence_level_for(confidence: float | None) -> str:
 
 
 def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
+    high_policy_claims = {"controller_identity", "controller_contact", "controller_identity_contact", "legal_basis", "rights", "complaint"}
+    medium_policy_claims = {"retention", "recipients", "purpose_mapping", "role_ambiguity"}
+    conditional_high_claims = {"transfer", "profiling"}
+
+    if claim_types & high_policy_claims:
+        return "High severity under policy for core identity/legal-basis/rights/complaint transparency duties."
+    if claim_types & medium_policy_claims:
+        return "Medium severity under policy for bounded transparency gaps (retention/recipients/purpose/role clarity)."
+    if claim_types & conditional_high_claims:
+        text = _norm(finding.gap_note or "")
+        explicit_activity = any(t in text for t in {"transfer", "third country", "profiling", "automated decision", "logic involved"})
+        if explicit_activity:
+            return "High severity under policy because activity is explicit and required disclosure is absent."
+        return "Medium severity under policy pending explicit transfer/profiling activity confirmation."
+
     if finding.severity == "high":
         return "High severity due to central GDPR transparency obligation impact and broad rights exposure."
     if finding.severity == "medium":
@@ -928,7 +959,8 @@ def _issue_has_unseen_reference(issue_id: str, refs: list[CrossReference]) -> bo
         "missing_retention_period": "retention",
         "missing_rights_notice": "rights",
         "missing_complaint_right": "rights",
-        "missing_controller_identity": "controller_contact",
+        "missing_controller_identity": "controller_identity",
+        "missing_controller_contact": "controller_contact",
         "missing_transfer_notice": "transfer",
     }
     wanted = topic_map.get(issue_id, "general")
@@ -1835,9 +1867,18 @@ def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmC
 def _normalize_severity(status: str, severity: str | None, claim_types: set[str]) -> str | None:
     if status not in {"gap", "partial"}:
         return None
-    high_claims = {"legal_basis", "rights", "retention", "complaint", "transfer"}
+
+    high_claims = {"controller_identity", "controller_contact", "controller_identity_contact", "legal_basis", "rights", "complaint"}
+    medium_claims = {"retention", "recipients", "purpose_mapping", "role_ambiguity"}
+    conditional_high_claims = {"transfer", "profiling"}
+
     if claim_types & high_claims:
         return "high"
+    if claim_types & medium_claims:
+        return "medium"
+    if claim_types & conditional_high_claims:
+        text = _norm((severity or "") + " " + " ".join(sorted(claim_types)))
+        return "high" if "transfer" in text or "profiling" in text else "medium"
     if severity in {"high", "medium", "low"}:
         return severity
     return "medium"
@@ -1876,14 +1917,28 @@ def _classify_finding_quality(
     claim_types: set[str],
     source_mode: str,
 ) -> tuple[str | None, float | None]:
+    presumptively_assessable_claims = CORE_NOTICE_CLAIMS | {
+        "profiling",
+        "transfer",
+        "recipients",
+        "sensitive_data",
+        "controller_identity",
+        "controller_contact",
+        "role_ambiguity",
+        "purpose_mapping",
+    }
+    fragmentary_markers = {"fragmentary", "truncated", "insufficient excerpt", "unseen section", "outside notice"}
+    gap_text = _norm(f.gap_note or "")
+    is_fragmentary = any(m in gap_text for m in fragmentary_markers)
+
     if f.status == "needs review":
-        if claim_types & CORE_NOTICE_CLAIMS:
+        if claim_types & presumptively_assessable_claims and not is_fragmentary:
             return "probable_gap", 0.55
         return "not_assessable", 0.2
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
-        if claim_types & (CORE_NOTICE_CLAIMS | {"profiling", "transfer", "recipients", "sensitive_data"}):
+        if claim_types & presumptively_assessable_claims and not is_fragmentary:
             return "probable_gap", 0.58
         return "not_assessable", 0.2
     has_primary = _claim_has_primary_anchor(claim_types, citations)
@@ -2217,7 +2272,11 @@ def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool)
         "profiling_disclosure_gap": "The notice references profiling-like processing but does not provide required profiling transparency details.",
     }.get(issue_id, "The notice-level evidence indicates a missing transparency obligation.")
     if omission_basis:
-        return f"{base} Explicit absence reasoning: reviewed sections show processing context but do not contain the required disclosure language."
+        section_scope = ", ".join(refs[:5]) if refs else "all reviewed notice sections"
+        return (
+            f"{base} Absence-proof mode: sections reviewed={section_scope}; result=required disclosure absent. "
+            "Legal effect: GDPR transparency obligation is unmet because no explicit compliant disclosure text was found."
+        )
     if refs:
         return f"{base} Evidence sections reviewed: {', '.join(refs[:3])}."
     return base
@@ -2569,7 +2628,7 @@ def _build_final_disposition_map(
         "complaint_right": "missing_complaint_right",
     }
     core_obligation_key_by_family = {
-        "controller_identity_contact": "controller_contact",
+        "controller_identity_contact": "controller_identity_contact",
         "legal_basis": "legal_basis",
         "retention": "retention",
         "rights_notice": "rights",
@@ -2579,8 +2638,20 @@ def _build_final_disposition_map(
         status, reason = _final_disposition_for_issue(rows, issue)
         obligation_key = core_obligation_key_by_family.get(family)
         if status == "satisfied":
-            if obligation_key and obligation_map.get(obligation_key) is False:
+            if family != "controller_identity_contact" and obligation_key and obligation_map.get(obligation_key) is False:
                 status, reason = "not_assessable", f"{obligation_key}=not_visible and no publishable issue found"
+            elif family == "controller_identity_contact":
+                identity_present = obligation_map.get("controller_identity")
+                contact_present = obligation_map.get("controller_contact")
+                if identity_present is False:
+                    status, reason = "gap", "controller legal identity disclosure is missing or unclear"
+                    issue = "missing_controller_identity"
+                elif contact_present is False:
+                    status, reason = "gap", "controller contact route disclosure is missing or unclear"
+                    issue = "missing_controller_contact"
+                elif identity_present is None or contact_present is None or not _has_positive_core_evidence(rows, "controller_identity_contact"):
+                    status, reason = "gap", "controller identity/contact transparency is missing or not explicit"
+                    issue = "missing_controller_contact"
             elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
                 if family == "controller_identity_contact":
                     status, reason = "gap", "controller identity may be visible but controller contact disclosure is missing or unclear"
@@ -2965,6 +3036,11 @@ def _final_publication_validator(
             and bool(row.remediation_note)
             and not missing_requirements
         )
+        if should_publish and (row.confidence_overall or 0.0) < 0.55:
+            rationale = _norm(row.gap_reasoning or "")
+            if "confidence" not in rationale and "evidence" not in rationale:
+                missing_requirements.append("confidence_explanation")
+                should_publish = False
         issue_key = _finding_issue_id(row)
         requires_strong_hydration = issue_key in {
             "missing_legal_basis",
@@ -3014,7 +3090,7 @@ def _final_publication_validator(
         missing_publishable: list[str] = []
         for family, issues in family_issue.items():
             item = disposition_map.get(family, {}) if isinstance(disposition_map.get(family, {}), dict) else {}
-            if str(item.get("status") or "") != "gap":
+            if str(item.get("status") or "") not in {"gap", "referenced_but_unseen"}:
                 continue
             if str(item.get("publication_recommendation") or "") != "publish":
                 continue

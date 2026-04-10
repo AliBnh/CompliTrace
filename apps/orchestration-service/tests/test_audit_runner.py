@@ -195,6 +195,67 @@ def test_final_publication_validator_marks_audit_incomplete_when_publishable_gap
         assert audit.status == "audit_incomplete"
 
 
+def test_final_publication_validator_marks_audit_incomplete_when_publishable_referenced_unseen_family_is_unmaterialized():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-2", status="running")
+        db.add(audit)
+        db.flush()
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-2",
+                status="partial",
+                severity="medium",
+                classification="supporting_evidence",
+                finding_type="supporting_evidence",
+                publish_flag="no",
+                publication_state="internal_only",
+                gap_note="support row",
+            )
+        )
+        db.commit()
+        disposition_map = {
+            "profiling": {
+                "status": "referenced_but_unseen",
+                "publication_recommendation": "publish",
+                "reasoning": "profiling references unresolved",
+            }
+        }
+
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(audit)
+        assert audit.status == "audit_incomplete"
+
+
+def test_build_final_disposition_map_splits_controller_identity_from_contact_when_identity_missing():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="1. Introduction",
+            content="We process personal data.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {
+        "controller_identity": False,
+        "controller_contact": True,
+        "controller_identity_contact": False,
+        "legal_basis": True,
+        "retention": True,
+        "rights": True,
+        "complaint": True,
+    }
+    out = _build_final_disposition_map([], sections, obligation_map)
+    controller = out["controller_identity_contact"]
+    assert controller["status"] == "gap"
+    assert controller["issue_key"] == "missing_controller_identity"
+
+
 def test_upsert_evidence_records_deduplicates_same_policy_section_id():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
@@ -1041,9 +1102,10 @@ def test_claim_has_primary_anchor_requires_matching_claim_articles():
     assert _claim_has_primary_anchor({"complaint"}, citations) is True
 
 
-def test_normalize_severity_escalates_key_transparency_claims():
-    assert _normalize_severity("gap", "medium", {"retention"}) == "high"
+def test_normalize_severity_applies_policy_buckets():
+    assert _normalize_severity("gap", "high", {"retention"}) == "medium"
     assert _normalize_severity("partial", None, {"rights"}) == "high"
+    assert _normalize_severity("gap", "medium", {"purpose_mapping"}) == "medium"
     assert _normalize_severity("compliant", "high", {"rights"}) is None
 
 
@@ -1108,6 +1170,32 @@ def test_classify_finding_quality_avoids_not_assessable_for_specialist_claim_wit
     klass, conf = _classify_finding_quality(finding, [], {"profiling"}, "direct")
     assert klass == "probable_gap"
     assert conf is not None and conf >= 0.5
+
+
+def test_classify_finding_quality_treats_role_ambiguity_as_presumptively_assessable_without_citations():
+    finding = LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note="Controller/processor role language is ambiguous in notice sections.",
+        remediation_note="Clarify roles by processing purpose.",
+        citations=[],
+    )
+    klass, conf = _classify_finding_quality(finding, [], {"role_ambiguity"}, "direct")
+    assert klass == "probable_gap"
+    assert conf is not None and conf >= 0.5
+
+
+def test_classify_finding_quality_allows_not_assessable_when_excerpt_is_fragmentary():
+    finding = LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note="Fragmentary excerpt; unseen section needed for legal conclusion.",
+        remediation_note=None,
+        citations=[],
+    )
+    klass, conf = _classify_finding_quality(finding, [], {"role_ambiguity"}, "direct")
+    assert klass == "not_assessable"
+    assert conf == 0.2
 
 
 def test_classify_finding_quality_marks_needs_review_as_probable_gap_for_core_notice():
