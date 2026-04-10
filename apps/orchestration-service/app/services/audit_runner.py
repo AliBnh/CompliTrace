@@ -2138,6 +2138,33 @@ def _citation_articles_fit_issue(db: Session, finding_id: str, issue_key: str | 
     return has_primary_or_support and not has_disallowed
 
 
+def _has_positive_contradictory_disclosure(db: Session, row: Finding, issue_key: str | None) -> bool:
+    contradiction_signals = {"contradict", "conflict", "inconsistent", "already disclosed", "actually disclosed"}
+    rationale = _norm(f"{row.gap_reasoning or ''} {row.gap_note or ''}")
+    if not any(token in rationale for token in contradiction_signals):
+        return False
+    issue_terms = {
+        "missing_legal_basis": {"legal basis", "article 6", "lawful basis"},
+        "missing_transfer_notice": {"transfer", "third country", "safeguard", "adequacy", "scc"},
+        "missing_controller_contact": {"contact", "email", "address", "webform"},
+        "missing_controller_identity": {"controller", "company", "entity"},
+        "missing_retention_period": {"retention", "retain", "storage period"},
+        "missing_rights_notice": {"right", "access", "erasure", "rectification", "restriction"},
+        "missing_complaint_right": {"complaint", "supervisory authority"},
+    }.get(issue_key or "", set())
+    citation_rows = db.query(FindingCitation.excerpt).filter(FindingCitation.finding_id == row.id).all()
+    positive_disclosure_markers = {"we provide", "we disclose", "you can contact", "you may contact", "we retain", "you have the right"}
+    for (excerpt,) in citation_rows:
+        text = _norm(excerpt or "")
+        if not text:
+            continue
+        if issue_terms and not any(term in text for term in issue_terms):
+            continue
+        if any(marker in text for marker in positive_disclosure_markers):
+            return True
+    return False
+
+
 def _section_ref(section: SectionData) -> str:
     short_title = section.section_title.strip() if section.section_title.strip() else f"Section {section.section_order}"
     return f"section:{section.id}:{short_title}"
@@ -3047,6 +3074,8 @@ def _final_publication_validator(
         issue_key = _finding_issue_id(row)
         if not _citation_articles_fit_issue(db, row.id, issue_key):
             missing_requirements.append("citations.article_matrix")
+        if _has_positive_contradictory_disclosure(db, row, issue_key):
+            missing_requirements.append("contradictory_text_present")
 
         should_publish = (
             row.publish_flag == "yes"

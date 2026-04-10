@@ -53,6 +53,7 @@ from app.services.audit_runner import (
     _extract_notice_cross_references,
     _source_scope_qualification,
     _issue_has_unseen_reference,
+    _has_positive_contradictory_disclosure,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -276,7 +277,7 @@ def test_final_publication_validator_blocks_publishable_row_without_flbc_reasoni
             primary_legal_anchor='["GDPR Article 13(1)(c)"]',
             citation_summary_text="summary",
             source_scope="full_notice",
-            assertion_level="probable_document_gap",
+            assertion_level="confirmed_document_gap",
             confidence_overall=0.71,
             remediation_note="Add legal bases by purpose.",
             gap_reasoning="Missing legal basis disclosure in notice.",
@@ -314,7 +315,7 @@ def test_final_publication_validator_blocks_publishable_row_on_citation_article_
             primary_legal_anchor='["GDPR Article 13(1)(f)"]',
             citation_summary_text="summary",
             source_scope="full_notice",
-            assertion_level="probable_document_gap",
+            assertion_level="confirmed_document_gap",
             confidence_overall=0.74,
             remediation_note="Add transfer safeguards.",
             gap_reasoning="Fact: transfer context. Law: Article 13(1)(f). Breach: missing safeguards. Conclusion: gap.",
@@ -325,7 +326,115 @@ def test_final_publication_validator_blocks_publishable_row_on_citation_article_
         db.add(FindingCitation(finding_id=finding.id, chunk_id="c21", article_number="21", paragraph_ref="1", article_title="Right to object", excerpt="x"))
         db.commit()
 
-        disposition_map = {"transfer": {"status": "gap", "publication_recommendation": "publish", "reasoning": "transfer missing"}}
+        disposition_map = {
+            "controller_identity_contact": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "legal_basis": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "retention": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "rights_notice": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "complaint_right": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "transfer": {"status": "gap", "publication_recommendation": "publish", "reasoning": "transfer missing"},
+            "profiling": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "role_ambiguity": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "article14_source": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "recipients": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "purpose_mapping": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "special_category": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "dpo_contact": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+        }
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(finding)
+        assert finding.publish_flag == "no"
+        assert finding.publication_state == "blocked"
+
+
+def test_contradiction_helper_requires_positive_quote_not_just_wording():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-5", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_transfer_notice",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="confirmed_document_gap",
+            confidence_overall=0.72,
+            remediation_note="Add transfer safeguards.",
+            gap_reasoning="Fact: transfer context exists. Law: Art 13(1)(f). Breach: safeguards absent. Conclusion: contradiction check pending.",
+            omission_basis="true",
+            support_complete="true",
+            document_evidence_refs='["evi:policy:transfer"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(FindingCitation(finding_id=finding.id, chunk_id="c13", article_number="13", paragraph_ref="1(f)", article_title="Transfers", excerpt="Data may move across regions."))
+        db.commit()
+
+        assert _has_positive_contradictory_disclosure(db, finding, "missing_transfer_notice") is False
+
+
+def test_final_publication_validator_blocks_when_positive_contradictory_quote_exists():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-6", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_controller_contact",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(a)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="probable_document_gap",
+            confidence_overall=0.73,
+            remediation_note="Add contact route.",
+            gap_reasoning="Fact: contact appears contradictory. Law: Art 13(1)(a). Breach: unclear. Conclusion: contradictory text may already disclose contact.",
+            document_evidence_refs='["evi:policy:controller"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(
+            FindingCitation(
+                finding_id=finding.id,
+                chunk_id="c-contact",
+                article_number="13",
+                paragraph_ref="1(a)",
+                article_title="Controller contact",
+                excerpt="You may contact us at privacy@example.com for any request.",
+            )
+        )
+        db.commit()
+        assert _has_positive_contradictory_disclosure(db, finding, "missing_controller_contact") is True
+
+        disposition_map = {
+            "controller_identity_contact": {
+                "status": "gap",
+                "publication_recommendation": "publish",
+                "reasoning": "contact missing",
+            },
+            "legal_basis": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "retention": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "rights_notice": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "complaint_right": {"status": "satisfied", "publication_recommendation": "internal_only"},
+        }
         _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
         db.refresh(finding)
         assert finding.publish_flag == "no"
