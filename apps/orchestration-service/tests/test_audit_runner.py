@@ -48,6 +48,7 @@ from app.services.audit_runner import (
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
     _build_final_disposition_map,
+    _final_publication_validator,
     _upsert_evidence_records,
     _extract_notice_cross_references,
     _source_scope_qualification,
@@ -157,6 +158,41 @@ def test_upsert_evidence_records_creates_policy_and_chunk_entries():
         ids = {r.evidence_id for r in records}
         assert f"evi:policy:{finding.section_id}" in ids
         assert "evi:chunk:gdpr-art-13-p-1-c" in ids
+
+
+def test_final_publication_validator_marks_audit_incomplete_when_publishable_gap_family_is_unmaterialized():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-1",
+                status="partial",
+                severity="medium",
+                classification="supporting_evidence",
+                finding_type="supporting_evidence",
+                publish_flag="no",
+                publication_state="internal_only",
+                gap_note="support row",
+            )
+        )
+        db.commit()
+        disposition_map = {
+            "transfer": {
+                "status": "gap",
+                "publication_recommendation": "publish",
+                "reasoning": "transfer disclosure missing",
+            }
+        }
+
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(audit)
+        assert audit.status == "audit_incomplete"
 
 
 def test_upsert_evidence_records_deduplicates_same_policy_section_id():
@@ -366,6 +402,15 @@ def test_normalize_analysis_anchors_rewrites_mismatched_transfer_family():
     assert anchors is not None
     assert "13(1)(f)" in anchors
     assert "14(1)(f)" in anchors
+
+
+def test_normalize_analysis_anchors_enforces_family_validators_for_rights_and_complaint():
+    rights = _normalize_analysis_anchors("missing_rights_notice", '["GDPR Article 13(1)(a)"]') or ""
+    complaint = _normalize_analysis_anchors("missing_complaint_right", '["GDPR Article 13(1)(a)"]') or ""
+    assert "13(2)(b)" in rights
+    assert "14(2)(e)" in rights
+    assert "13(2)(d)" in complaint
+    assert "77" in complaint
 
 
 def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
@@ -582,7 +627,7 @@ def test_systemic_evidence_refs_include_obligation_map_omission_marker():
     )
     assert omission_basis is True
     assert any(ref.startswith("section:") for ref in refs)
-    assert "obligation_map:legal_basis_present=not_visible" in refs
+    assert "coverage_check:legal_basis_present=not_visible_in_reviewed_sections" in refs
 
 
 def test_coverage_to_support_validator_requires_required_obligation_absence():
@@ -1031,9 +1076,10 @@ def test_ensure_reasoning_chain_adds_evidence_requirement_assessment():
         [LlmCitation(chunk_id="c13", article_number="13")],
         {"legal_basis"},
     )
-    assert "Evidence:" in (updated.gap_note or "")
-    assert "Requirement:" in (updated.gap_note or "")
-    assert "Assessment:" in (updated.gap_note or "")
+    assert "Fact:" in (updated.gap_note or "")
+    assert "Law:" in (updated.gap_note or "")
+    assert "Breach:" in (updated.gap_note or "")
+    assert "Conclusion:" in (updated.gap_note or "")
 
 
 def test_clean_remediation_rewrites_wrong_13_1_f_legal_basis_reference():
