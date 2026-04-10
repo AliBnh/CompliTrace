@@ -2071,13 +2071,20 @@ def _analysis_anchor_templates(issue: str | None) -> list[str]:
         "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
         "missing_controller_identity": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
         "missing_transfer_notice": ["GDPR Article 13(1)(f)", "GDPR Article 14(1)(f)", "GDPR Article 44", "GDPR Article 46"],
-        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)"],
+        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)", "GDPR Article 22"],
         "recipients_disclosure_gap": ["GDPR Article 13(1)(e)", "GDPR Article 14(1)(e)"],
         "purpose_specificity_gap": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)", "GDPR Article 5(1)(b)"],
         "missing_legal_basis": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)"],
         "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
-        "missing_rights_notice": ["GDPR Article 13(2)(b)", "GDPR Article 14(2)(c)"],
-        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)"],
+        "missing_rights_notice": [
+            "GDPR Article 13(2)(b)",
+            "GDPR Article 13(2)(c)",
+            "GDPR Article 13(2)(d)",
+            "GDPR Article 14(2)(c)",
+            "GDPR Article 14(2)(d)",
+            "GDPR Article 14(2)(e)",
+        ],
+        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)", "GDPR Article 77"],
     }
     return templates.get(issue or "", [])
 
@@ -2183,10 +2190,10 @@ def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligati
     omission_basis = False
     if obligation_key:
         if obligation_map.get(obligation_key) is False:
-            matched_sections.append(f"obligation_map:{obligation_key}=not_visible")
+            matched_sections.append(f"coverage_check:{obligation_key}=not_visible_in_reviewed_sections")
             omission_basis = True
         else:
-            matched_sections.append(f"obligation_map:{obligation_key}=visible")
+            matched_sections.append(f"coverage_check:{obligation_key}=visible_in_reviewed_sections")
     return list(dict.fromkeys(matched_sections)), omission_basis
 
 
@@ -2201,7 +2208,7 @@ def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool)
         "profiling_disclosure_gap": "The notice references profiling-like processing but does not provide required profiling transparency details.",
     }.get(issue_id, "The notice-level evidence indicates a missing transparency obligation.")
     if omission_basis:
-        return f"{base} Omission basis confirmed via document obligation map and section-level processing references."
+        return f"{base} Explicit absence reasoning: reviewed sections show processing context but do not contain the required disclosure language."
     if refs:
         return f"{base} Evidence sections reviewed: {', '.join(refs[:3])}."
     return base
@@ -2486,6 +2493,7 @@ def _enforce_core_and_specialist_completeness(
 def _issue_to_family(issue: str | None) -> str | None:
     mapping = {
         "missing_controller_identity": "controller_identity_contact",
+        "missing_controller_contact": "controller_identity_contact",
         "missing_legal_basis": "legal_basis",
         "missing_retention_period": "retention",
         "missing_rights_notice": "rights_notice",
@@ -2495,7 +2503,10 @@ def _issue_to_family(issue: str | None) -> str | None:
         "profiling_disclosure_gap": "profiling",
         "controller_processor_role_ambiguity": "role_ambiguity",
         "article_14_indirect_collection_gap": "article14_source",
+        "recipients_disclosure_gap": "recipients",
+        "purpose_specificity_gap": "purpose_mapping",
         "special_category_basis_unclear": "special_category",
+        "dpo_contact_gap": "dpo_contact",
     }
     return mapping.get(issue or "")
 
@@ -2503,7 +2514,7 @@ def _issue_to_family(issue: str | None) -> str | None:
 def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, str]:
     matched = [r for r in rows if _finding_issue_id(r) == issue]
     if any(r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap"} and r.publish_flag == "yes" for r in matched):
-        return "gap", "publishable gap/systemic violation present"
+        return "gap", "publishable evidence-backed gap survives synthesis and publication gates"
     if any(r.classification == "referenced_but_unseen" for r in matched):
         return "referenced_but_unseen", "cross-reference to unseen sections prevents full confirmation"
     if any(r.classification == "not_assessable" for r in matched):

@@ -65,6 +65,10 @@ export type FindingOut = {
   source_scope_confidence?: number | null
   referenced_unseen_sections?: string[] | null
   assertion_level?: 'confirmed_document_gap' | 'excerpt_limited_gap' | 'referenced_but_unseen' | 'not_assessable' | null
+  publication_blocked?: boolean | null
+  issue_key?: string | null
+  blocker_reason?: string | null
+  missing_requirements?: string[] | null
   legal_requirement?: string | null
   gap_reasoning?: string | null
   severity_rationale?: string | null
