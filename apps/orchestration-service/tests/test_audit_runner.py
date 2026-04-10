@@ -256,6 +256,82 @@ def test_build_final_disposition_map_splits_controller_identity_from_contact_whe
     assert controller["issue_key"] == "missing_controller_identity"
 
 
+def test_final_publication_validator_blocks_publishable_row_without_flbc_reasoning():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-3", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_legal_basis",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="probable_document_gap",
+            confidence_overall=0.71,
+            remediation_note="Add legal bases by purpose.",
+            gap_reasoning="Missing legal basis disclosure in notice.",
+            document_evidence_refs='["evi:policy:lb"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(FindingCitation(finding_id=finding.id, chunk_id="c13", article_number="13", paragraph_ref="1(c)", article_title="Legal basis", excerpt="x"))
+        db.commit()
+
+        disposition_map = {"legal_basis": {"status": "gap", "publication_recommendation": "publish", "reasoning": "legal basis missing"}}
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(finding)
+        assert finding.publish_flag == "no"
+        assert finding.publication_state == "blocked"
+
+
+def test_final_publication_validator_blocks_publishable_row_on_citation_article_matrix_mismatch():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-4", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_transfer_notice",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="probable_document_gap",
+            confidence_overall=0.74,
+            remediation_note="Add transfer safeguards.",
+            gap_reasoning="Fact: transfer context. Law: Article 13(1)(f). Breach: missing safeguards. Conclusion: gap.",
+            document_evidence_refs='["evi:policy:transfer"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(FindingCitation(finding_id=finding.id, chunk_id="c21", article_number="21", paragraph_ref="1", article_title="Right to object", excerpt="x"))
+        db.commit()
+
+        disposition_map = {"transfer": {"status": "gap", "publication_recommendation": "publish", "reasoning": "transfer missing"}}
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(finding)
+        assert finding.publish_flag == "no"
+        assert finding.publication_state == "blocked"
+
+
 def test_upsert_evidence_records_deduplicates_same_policy_section_id():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(bind=engine)

@@ -210,6 +210,64 @@ def _anchors_for_issue(issue: str | None, anchors: list[str] | None) -> list[str
     return matching or preferred
 
 
+ISSUE_ARTICLE_RULES: dict[str, dict[str, set[int]]] = {
+    "missing_controller_identity": {"primary": {13, 14}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_controller_contact": {"primary": {13, 14}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_legal_basis": {"primary": {6, 13, 14}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_retention_period": {"primary": {5, 13, 14}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_rights_notice": {"primary": {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}, "disallowed": set()},
+    "missing_complaint_right": {"primary": {13, 14, 77}, "disallowed": {21, 22}},
+    "missing_transfer_notice": {"primary": {13, 14, 44, 45, 46}, "disallowed": {15, 21}},
+    "profiling_disclosure_gap": {"primary": {13, 14, 22}, "disallowed": {15}},
+    "controller_processor_role_ambiguity": {"primary": {13, 14}, "disallowed": {21, 22}},
+    "recipients_disclosure_gap": {"primary": {13, 14}, "disallowed": {21, 22}},
+    "purpose_specificity_gap": {"primary": {5, 6, 13, 14}, "disallowed": {21, 22}},
+}
+
+
+def _article_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _citation_article_findings(issue: str | None, citations: list[CitationOut]) -> tuple[bool, bool]:
+    rules = ISSUE_ARTICLE_RULES.get(issue or "")
+    if not rules:
+        return True, False
+    article_numbers = {_article_int(c.article_number) for c in citations}
+    article_numbers.discard(None)
+    if not article_numbers:
+        return False, False
+    has_primary = bool(article_numbers & rules.get("primary", set()))
+    has_disallowed = bool(article_numbers & rules.get("disallowed", set()))
+    return has_primary, has_disallowed
+
+
+def _ensure_flbc_reasoning(row: FindingOut, issue: str | None) -> None:
+    if row.status not in {"gap", "partial"}:
+        return
+    current = _sanitize_external_reasoning(row.gap_reasoning) or _sanitize_external_reasoning(row.gap_note) or ""
+    if all(token in current for token in ("Fact:", "Law:", "Breach:", "Conclusion:")):
+        row.gap_reasoning = current
+        return
+    evidence_text = _sanitize_published_text(row.policy_evidence_excerpt) or "Notice evidence reviewed."
+    rule_text = _sanitize_external_reasoning(row.legal_requirement) or ", ".join(row.primary_legal_anchor or ["GDPR Articles 12-14"])
+    breach_text = _sanitize_published_text(row.gap_note) or f"Required disclosure for {issue or 'the issue'} is missing or unclear."
+    row.gap_reasoning = (
+        f"Fact: {evidence_text} "
+        f"Law: {rule_text}. "
+        f"Breach: {breach_text}. "
+        "Conclusion: the privacy notice does not satisfy the cited GDPR transparency requirement."
+    )
+
+
 def _sanitize_review_text(text: str | None, *, debug: bool) -> str | None:
     if debug or not text:
         return text
@@ -767,6 +825,12 @@ def _missing_hydration_requirements(row: FindingOut) -> list[str]:
             missing.append("citations.source_type")
         if not c.source_ref:
             missing.append("citations.source_ref")
+    issue = _infer_issue_from_text(_issue_key_from_section(row.section_id), row.gap_note, row.remediation_note)
+    has_primary_article, has_disallowed_article = _citation_article_findings(issue, row.citations)
+    if not has_primary_article:
+        missing.append("citations.article_primary_fit")
+    if has_disallowed_article:
+        missing.append("citations.article_disallowed")
     return missing
 
 
@@ -821,6 +885,8 @@ def _is_substantive_publication_blocker(row: FindingOut) -> bool:
 
 def _blocker_reason_for_missing_requirements(missing: list[str]) -> str:
     missing_set = set(missing)
+    if {"citations.article_primary_fit", "citations.article_disallowed"} & missing_set:
+        return "citation article mismatch"
     if {"document_evidence_refs", "citations", "citations.evidence_id", "citations.source_type", "citations.source_ref"} & missing_set:
         return "missing evidence linkage"
     if {"source_scope", "assertion_level"} & missing_set:
@@ -1108,7 +1174,12 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
             "Result: required disclosure absent."
         )
     row.policy_evidence_excerpt = excerpt
-    row.gap_reasoning = _sanitize_external_reasoning(row.gap_reasoning) or row.gap_reasoning
+    _ensure_flbc_reasoning(row, issue)
+    has_primary_article, has_disallowed_article = _citation_article_findings(issue, row.citations)
+    if has_disallowed_article or not has_primary_article:
+        row.confidence_overall = min(row.confidence_overall or 0.55, 0.5)
+        if row.severity == "high":
+            row.severity = "medium"
     row.classification = _published_legal_conclusion(row.status, issue, row.classification)
     return row
 
@@ -1225,7 +1296,8 @@ def _parity_blocker_rows(
                 "citations.source_type",
                 "citations.source_ref",
             ]
-        if issue in PUBLISHABLE_FALLBACK_ISSUES:
+        article_mismatch = {"citations.article_primary_fit", "citations.article_disallowed"} & set(missing_requirements)
+        if issue in PUBLISHABLE_FALLBACK_ISSUES and not article_mismatch:
             blockers.append(
                 _absence_proof_publishable_row(
                     audit_id=audit_id,

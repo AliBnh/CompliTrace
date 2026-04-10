@@ -2120,6 +2120,24 @@ def _finding_issue_id(row: Finding) -> str | None:
     return None
 
 
+def _has_flbc_reasoning(text: str | None) -> bool:
+    normalized = _norm(text or "")
+    return all(token in normalized for token in ("fact:", "law:", "breach:", "conclusion:"))
+
+
+def _citation_articles_fit_issue(db: Session, finding_id: str, issue_key: str | None) -> bool:
+    if not issue_key or issue_key not in CLAIM_ARTICLE_RULES:
+        return True
+    rows = db.query(FindingCitation.article_number).filter(FindingCitation.finding_id == finding_id).all()
+    article_numbers = {_article_int(article) for (article,) in rows if _article_int(article) is not None}
+    if not article_numbers:
+        return False
+    rule = CLAIM_ARTICLE_RULES[issue_key]
+    has_primary_or_support = bool(article_numbers & (rule["primary"] | rule["support"]))
+    has_disallowed = bool(article_numbers & rule["disallowed"])
+    return has_primary_or_support and not has_disallowed
+
+
 def _section_ref(section: SectionData) -> str:
     short_title = section.section_title.strip() if section.section_title.strip() else f"Section {section.section_order}"
     return f"section:{section.id}:{short_title}"
@@ -3026,6 +3044,9 @@ def _final_publication_validator(
             missing_requirements.append("citations")
         if not row.document_evidence_refs:
             missing_requirements.append("document_evidence_refs")
+        issue_key = _finding_issue_id(row)
+        if not _citation_articles_fit_issue(db, row.id, issue_key):
+            missing_requirements.append("citations.article_matrix")
 
         should_publish = (
             row.publish_flag == "yes"
@@ -3041,7 +3062,9 @@ def _final_publication_validator(
             if "confidence" not in rationale and "evidence" not in rationale:
                 missing_requirements.append("confidence_explanation")
                 should_publish = False
-        issue_key = _finding_issue_id(row)
+        if should_publish and not _has_flbc_reasoning(row.gap_reasoning):
+            missing_requirements.append("gap_reasoning.flbc")
+            should_publish = False
         requires_strong_hydration = issue_key in {
             "missing_legal_basis",
             "missing_retention_period",

@@ -516,6 +516,36 @@ def test_get_findings_maps_controller_identity_contact_to_identity_issue_when_re
     assert identity.classification == "clear_non_compliance"
 
 
+def test_get_findings_keeps_article_mismatch_as_publication_blocker_not_absence_publishable(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing",'
+                '"missing_requirements":["citations.article_disallowed","citations.article_primary_fit"]}}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert len(rows) == 1
+    assert rows[0].classification == "publication_blocked"
+    assert rows[0].publication_blocked is True
+    assert rows[0].missing_requirements is not None
+    assert "citations.article_disallowed" in rows[0].missing_requirements
+
+
 def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     finding = Finding(
@@ -915,8 +945,7 @@ def test_projected_findings_include_section_level_high_signal_findings(db_sessio
     by_section = {r.section_id: r for r in rows}
     assert "1.3 Territorial Reach" in by_section
     reasoning = by_section["1.3 Territorial Reach"].gap_reasoning or ""
-    assert "In section 1.3 Territorial Reach" in reasoning
-    assert "Applicable GDPR duty:" in reasoning and "Breach finding:" in reasoning and "Required remediation:" in reasoning
+    assert all(token in reasoning for token in ["Fact:", "Law:", "Breach:", "Conclusion:"])
 
 
 def test_section_level_findings_exist_for_transfer_profiling_and_role_ambiguity(db_session: Session):
@@ -1211,8 +1240,7 @@ def test_controller_contact_published_reasoning_uses_fact_rule_application(db_se
     rows = get_findings(audit.id, db_session)
     controller = next(r for r in rows if "controller_contact" in r.section_id)
     reasoning = (controller.gap_reasoning or "").lower()
-    assert "under gdpr articles 13(1)(a) and 14(1)(a)" in reasoning
-    assert "remediation:" in reasoning
+    assert all(token in reasoning for token in ["fact:", "law:", "breach:", "conclusion:"])
     assert controller.classification in {"non_compliant", "partially_compliant"}
 
 
