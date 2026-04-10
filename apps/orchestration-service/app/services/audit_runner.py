@@ -2993,6 +2993,42 @@ def _final_publication_validator(
             )
     for message in _state_invariant_validator(rows):
         _record_suppression_ledger(db, audit_id, message, "invariant violation", "state_invariant_validator", message)
+    if audit is not None and audit.status != "review_required":
+        family_issue = {
+            "controller_identity_contact": {"missing_controller_identity", "missing_controller_contact"},
+            "transfer": {"missing_transfer_notice"},
+            "profiling": {"profiling_disclosure_gap"},
+            "role_ambiguity": {"controller_processor_role_ambiguity"},
+            "recipients": {"recipients_disclosure_gap"},
+            "purpose_mapping": {"purpose_specificity_gap"},
+        }
+        missing_publishable: list[str] = []
+        for family, issues in family_issue.items():
+            item = disposition_map.get(family, {}) if isinstance(disposition_map.get(family, {}), dict) else {}
+            if str(item.get("status") or "") != "gap":
+                continue
+            if str(item.get("publication_recommendation") or "") != "publish":
+                continue
+            has_publishable = any(
+                _finding_issue_id(r) in issues
+                and r.publish_flag == "yes"
+                and r.publication_state == "publishable"
+                and r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap", "referenced_but_unseen"}
+                for r in rows
+            )
+            if not has_publishable:
+                missing_publishable.append(family)
+        if missing_publishable:
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                "audit_incomplete_missing_publishable_families",
+                "final publication completeness gate failed",
+                "final_publication_completeness_gate",
+                ",".join(sorted(missing_publishable)),
+            )
     db.commit()
 
 

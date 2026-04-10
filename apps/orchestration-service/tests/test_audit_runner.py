@@ -48,6 +48,7 @@ from app.services.audit_runner import (
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
     _build_final_disposition_map,
+    _final_publication_validator,
     _upsert_evidence_records,
     _extract_notice_cross_references,
     _source_scope_qualification,
@@ -157,6 +158,41 @@ def test_upsert_evidence_records_creates_policy_and_chunk_entries():
         ids = {r.evidence_id for r in records}
         assert f"evi:policy:{finding.section_id}" in ids
         assert "evi:chunk:gdpr-art-13-p-1-c" in ids
+
+
+def test_final_publication_validator_marks_audit_incomplete_when_publishable_gap_family_is_unmaterialized():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-1",
+                status="partial",
+                severity="medium",
+                classification="supporting_evidence",
+                finding_type="supporting_evidence",
+                publish_flag="no",
+                publication_state="internal_only",
+                gap_note="support row",
+            )
+        )
+        db.commit()
+        disposition_map = {
+            "transfer": {
+                "status": "gap",
+                "publication_recommendation": "publish",
+                "reasoning": "transfer disclosure missing",
+            }
+        }
+
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(audit)
+        assert audit.status == "audit_incomplete"
 
 
 def test_upsert_evidence_records_deduplicates_same_policy_section_id():

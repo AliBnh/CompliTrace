@@ -22,7 +22,7 @@ export type SectionOut = {
 export type AuditOut = {
   id: UUID
   document_id: UUID
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'review_required'
+  status: 'pending' | 'running' | 'complete' | 'failed' | 'review_required' | 'audit_incomplete'
   started_at: string
   completed_at?: string | null
   model_provider: string
