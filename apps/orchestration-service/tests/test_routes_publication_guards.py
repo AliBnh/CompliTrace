@@ -318,7 +318,155 @@ def test_get_findings_projects_from_evidence_refs_when_supporting_citations_are_
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     assert rows[0].section_id == "systemic:missing_transfer_notice"
-    assert rows[0].citations[0].evidence_id == "evi:policy:sec-transfer"
+
+
+def test_get_findings_emits_publication_blocker_for_unmaterialized_publishable_family(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing",'
+                '"blocker_reason":"missing evidence linkage","missing_requirements":["document_evidence_refs","citations"]}}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert len(rows) == 1
+    blocker = rows[0]
+    assert blocker.classification == "publication_blocked"
+    assert blocker.publication_blocked is True
+    assert blocker.issue_key == "missing_transfer_notice"
+    assert "missing evidence" in (blocker.blocker_reason or "")
+    assert sorted(blocker.missing_requirements or []) == ["citations", "document_evidence_refs"]
+
+
+def test_get_findings_projects_controller_identity_contact_family(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    backing = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_controller_contact",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="systemic",
+        publication_state="blocked",
+        confidence=0.8,
+        confidence_article_fit=0.78,
+        confidence_overall=0.79,
+        source_scope="full_notice",
+        source_scope_confidence=0.9,
+        assertion_level="probable_document_gap",
+        primary_legal_anchor='["GDPR Article 13(1)(a)","GDPR Article 14(1)(a)"]',
+        citation_summary_text="controller contact summary",
+        support_complete="true",
+        omission_basis="true",
+        remediation_note="Add controller contact route.",
+        document_evidence_refs='["evi:policy:sec-controller"]',
+    )
+    db_session.add(backing)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=backing.id,
+            chunk_id="controller-chunk-1",
+            article_number="13",
+            paragraph_ref="1(a)",
+            article_title="Controller details",
+            excerpt="Identity and contact details shall be provided.",
+        )
+    )
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"controller contact missing","positive_evidence_ids":["evi:policy:sec-controller"]}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:policy:sec-controller",
+            audit_id=audit.id,
+            evidence_type="policy_section",
+            source_ref="sec-controller",
+            text_excerpt="controller section",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:controller-chunk-1",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="controller-chunk-1",
+            text_excerpt="Identity and contact details shall be provided.",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert rows
+    assert any(row.section_id == "systemic:missing_controller_contact" and row.classification != "publication_blocked" for row in rows)
+    assert rows[0].citations[0].evidence_id == "evi:chunk:controller-chunk-1"
+
+
+def test_get_findings_emits_blockers_for_all_required_publish_families_when_unmaterialized(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{'
+                '"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"controller missing","blocker_reason":"incomplete hydration"},'
+                '"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing","blocker_reason":"missing evidence linkage"},'
+                '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing","blocker_reason":"missing section traceability"},'
+                '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role ambiguity","blocker_reason":"incomplete hydration"},'
+                '"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"recipients missing","blocker_reason":"missing evidence linkage"},'
+                '"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"purpose mapping missing","blocker_reason":"confidence inconsistency"}'
+                '}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    blocker_rows = [row for row in rows if row.classification == "publication_blocked"]
+    assert len(blocker_rows) == 6
+    assert {row.issue_key for row in blocker_rows} == {
+        "missing_controller_contact",
+        "missing_transfer_notice",
+        "profiling_disclosure_gap",
+        "controller_processor_role_ambiguity",
+        "recipients_disclosure_gap",
+        "purpose_specificity_gap",
+    }
 
 
 def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
