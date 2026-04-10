@@ -255,6 +255,8 @@ def _project_published_findings_from_map(
         "missing_transfer_notice": "State whether personal data are transferred internationally and identify the safeguard or transfer mechanism relied upon, such as adequacy decisions or appropriate safeguards, and how data subjects can obtain further information.",
         "profiling_disclosure_gap": "If profiling or comparable evaluation occurs, explain the logic involved and, where required, the significance and envisaged consequences for individuals.",
         "controller_processor_role_ambiguity": "Clarify when the organization acts as controller, processor, or similar role across the different processing contexts described in the notice.",
+        "recipients_disclosure_gap": "Disclose categories of recipients and the main disclosure contexts (e.g., processors, vendors, partners, payment/cloud providers).",
+        "purpose_specificity_gap": "Map each key personal-data category to specific processing purposes (and lawful-basis context where relevant).",
     }
     row_by_issue: dict[str, Finding] = {}
     for row in backing_rows or []:
@@ -297,12 +299,46 @@ def _project_published_findings_from_map(
             for c in (backing.citations if backing else [])
             if _is_real_evidence_ref(c.chunk_id)
         ]
+        projected_fallback_citations = [
+            CitationOut(
+                chunk_id=(ev.source_ref or ev.evidence_id or "policy-evidence"),
+                evidence_id=ev.evidence_id,
+                source_type=ev.evidence_type,
+                source_ref=ev.source_ref,
+                article_number=ev.article_number or "13",
+                paragraph_ref=ev.paragraph_ref,
+                article_title="Evidence record",
+                excerpt=_render_published_evidence_excerpt(None, ev.text_excerpt, issue_hint=issue),
+            )
+            for ref in projected_evidence_ids
+            for ev in [((evidence_by_id or {}).get(ref))]
+            if ev is not None
+        ]
+        if not projected_chunk_citations and not projected_fallback_citations:
+            projected_fallback_citations = [
+                CitationOut(
+                    chunk_id=f"policy-summary:{issue}",
+                    evidence_id=None,
+                    source_type="policy_summary",
+                    source_ref=issue,
+                    article_number="13",
+                    paragraph_ref=None,
+                    article_title="Policy summary",
+                    excerpt=_render_published_evidence_excerpt(None, reason, issue_hint=issue),
+                )
+            ]
+        rem_note = (
+            _sanitize_published_text(backing.remediation_note)
+            if backing and backing.remediation_note
+            else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language.")
+        )
+        legal_requirement_text = _sanitize_published_text(backing.legal_requirement) if backing and backing.legal_requirement else None
         projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
                 section_id=f"systemic:{issue}",
                 status="gap",
                 severity=severity_defaults.get(family, "medium"),
-                classification="probable_gap",
+                classification=_published_legal_conclusion("gap", issue, "probable_gap"),
                 finding_type="systemic",
                 publish_flag="yes",
                 artifact_role="publishable_finding",
@@ -322,31 +358,21 @@ def _project_published_findings_from_map(
                 citation_summary_text=_sanitize_published_text(backing.citation_summary_text) if backing and backing.citation_summary_text else fallback_summary,
                 support_complete=_deserialize_bool_flag(backing.support_complete) if backing else None,
                 omission_basis=_deserialize_bool_flag(backing.omission_basis) if backing else None,
+                legal_requirement=legal_requirement_text
+                or f"Family rule anchor for {issue}: {', '.join(primary_anchor)}.",
                 gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
-                remediation_note=_sanitize_published_text(backing.remediation_note)
-                if backing and backing.remediation_note
-                else remediation_defaults.get(issue, "Address the identified gap with explicit GDPR-compliant notice language."),
-                gap_reasoning=_sanitize_published_text(backing.gap_reasoning) if backing and backing.gap_reasoning else _sanitize_published_text(reason),
+                remediation_note=rem_note,
+                gap_reasoning=_build_richer_gap_reasoning(
+                    section_id=f"systemic:{issue}",
+                    issue=issue,
+                    fact=backing.policy_evidence_excerpt if backing else reason,
+                    rule=legal_requirement_text or ", ".join(primary_anchor),
+                    remediation=rem_note,
+                    conclusion=_sanitize_published_text(reason),
+                ),
                 severity_rationale=_sanitize_published_text(backing.severity_rationale) if backing and backing.severity_rationale else "Severity set from family criticality and final disposition.",
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
-                citations=(
-                    projected_chunk_citations
-                    or [
-                        CitationOut(
-                            chunk_id=(ev.source_ref or ev.evidence_id),
-                            evidence_id=ev.evidence_id,
-                            source_type=ev.evidence_type,
-                            source_ref=ev.source_ref,
-                            article_number=ev.article_number or "13",
-                            paragraph_ref=ev.paragraph_ref,
-                            article_title="Evidence record",
-                            excerpt=_render_published_evidence_excerpt(None, ev.text_excerpt, issue_hint=issue),
-                        )
-                        for ref in projected_evidence_ids
-                        for ev in [((evidence_by_id or {}).get(ref))]
-                        if ev is not None
-                    ]
-                ),
+                citations=(projected_chunk_citations or projected_fallback_citations),
         )
         projected = _fill_required_published_fields(projected)
         if not _hydration_missing(projected):
@@ -370,12 +396,53 @@ def _section_level_reasoning(row: Finding) -> str:
     section = row.section_id
     obligation = row.obligation_under_review or "transparency disclosure duty"
     fact = _sanitize_published_text(row.policy_evidence_excerpt) or _sanitize_published_text(row.gap_note) or "Section-local evidence indicates a visibility gap."
-    legal_application = _sanitize_published_text(row.legal_requirement) or "Apply Articles 12-14 transparency obligations to this section context."
+    rule = _sanitize_published_text(row.legal_requirement) or "Apply GDPR transparency duties (Articles 12-14 and family-specific anchors)."
+    legal_application = "Section-specific language is evaluated against the cited rule to determine whether disclosure is complete and explicit."
     conclusion = _sanitize_published_text(row.gap_note) or "Section-level disclosure is insufficient."
     remediation = _sanitize_published_text(row.remediation_note) or "Add section-specific compliant wording and cross-references."
     return (
-        f"section={section}; obligation={obligation}; fact={fact}; "
-        f"legal_application={legal_application}; conclusion={conclusion}; remediation={remediation}"
+        f"section={section}; fact={fact}; rule={rule}; application={legal_application}; "
+        f"conclusion={conclusion}; remediation={remediation}; obligation={obligation}"
+    )
+
+
+def _published_legal_conclusion(status: str | None, issue: str | None, existing: str | None) -> str:
+    if status in {"not_assessable", "needs review"}:
+        return "not_assessable"
+    if status == "partial":
+        return "partially_compliant"
+    strong_non_compliant = {
+        "missing_legal_basis",
+        "missing_retention_period",
+        "missing_rights_notice",
+        "missing_complaint_right",
+        "missing_transfer_notice",
+        "profiling_disclosure_gap",
+    }
+    if status == "gap" and issue in strong_non_compliant:
+        return "non_compliant"
+    if status == "gap":
+        return "partially_compliant"
+    return existing or "not_assessable"
+
+
+def _build_richer_gap_reasoning(
+    *,
+    section_id: str,
+    issue: str | None,
+    fact: str | None,
+    rule: str | None,
+    remediation: str | None,
+    conclusion: str | None,
+) -> str:
+    safe_fact = _sanitize_published_text(fact) or "Relevant policy evidence indicates missing or unclear disclosure."
+    safe_rule = _sanitize_published_text(rule) or "GDPR transparency and notice obligations."
+    safe_conclusion = _sanitize_published_text(conclusion) or "The required disclosure element is not sufficiently addressed."
+    safe_remediation = _sanitize_published_text(remediation) or "Provide explicit compliant notice wording."
+    return (
+        f"section={section_id}; issue={issue or 'unspecified'}; fact={safe_fact}; "
+        f"rule={safe_rule}; application=apply rule to visible section text and evidence package; "
+        f"conclusion={safe_conclusion}; remediation={safe_remediation}"
     )
 
 
@@ -430,7 +497,7 @@ def _project_section_level_findings(
                     section_id=row.section_id,
                     status=row.status,
                     severity=row.severity,
-                    classification=row.classification,
+                    classification=_published_legal_conclusion(row.status, issue, row.classification),
                     finding_type=row.finding_type,
                     publish_flag=row.publish_flag,
                     artifact_role=row.artifact_role,
@@ -443,7 +510,8 @@ def _project_section_level_findings(
                     confidence_synthesis=row.confidence_synthesis,
                     confidence_overall=row.confidence_overall if row.confidence_overall is not None else row.confidence,
                     obligation_under_review=row.obligation_under_review,
-                    legal_requirement=_sanitize_published_text(row.legal_requirement),
+                    legal_requirement=_sanitize_published_text(row.legal_requirement)
+                    or f"Section-level family rule for {issue or family}.",
                     gap_reasoning=_section_level_reasoning(row),
                     severity_rationale=_sanitize_published_text(row.severity_rationale),
                     primary_legal_anchor=_deserialize_json_list(row.primary_legal_anchor)
@@ -612,8 +680,22 @@ def _reconciliation_blockers(
         if ignored_families and family in ignored_families:
             continue
         has_projection = any(p.id.endswith(f":{family}") for p in projected_rows)
-        if not has_projection and not published_rows:
-            blockers.append(f"publish recommendation for {family} has no materialized finding")
+        family_issue_map = {
+            "transfer": "missing_transfer_notice",
+            "profiling": "profiling_disclosure_gap",
+            "role_ambiguity": "controller_processor_role_ambiguity",
+            "recipients": "recipients_disclosure_gap",
+            "purpose_mapping": "purpose_specificity_gap",
+        }
+        expected_issue = family_issue_map.get(family)
+        has_persisted_family = any(
+            (_issue_from_finding_section(r.section_id) == expected_issue)
+            or (expected_issue and expected_issue in ((r.gap_note or "").lower() + " " + (r.remediation_note or "").lower()))
+            for r in (published_rows or [])
+        )
+        explicit_blocker = bool(item.get("blocker_reason"))
+        if not has_projection and not has_persisted_family and not explicit_blocker:
+            blockers.append(f"publish recommendation for {family} has no materialized finding or explicit blocker")
     return blockers
 
 
@@ -739,7 +821,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 section_id=row.section_id,
                 status=row.status,
                 severity=row.severity,
-                classification=row.classification,
+                classification=_published_legal_conclusion(row.status, _issue_from_finding_section(row.section_id), row.classification),
                 finding_type=row.finding_type,
                 publish_flag=row.publish_flag,
                 artifact_role=row.artifact_role,
@@ -761,8 +843,20 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 section_vs_document_scope=row.section_vs_document_scope,
                 missing_fact_if_unresolved=row.missing_fact_if_unresolved,
                 policy_evidence_excerpt=row.policy_evidence_excerpt,
-                legal_requirement=row.legal_requirement,
-                gap_reasoning=_section_level_reasoning(row) if not row.section_id.startswith("systemic:") else row.gap_reasoning,
+                legal_requirement=_sanitize_published_text(row.legal_requirement)
+                or f"Published legal application for {_issue_from_finding_section(row.section_id) or 'section finding'}.",
+                gap_reasoning=(
+                    _section_level_reasoning(row)
+                    if not row.section_id.startswith("systemic:")
+                    else _build_richer_gap_reasoning(
+                        section_id=row.section_id,
+                        issue=_issue_from_finding_section(row.section_id),
+                        fact=row.policy_evidence_excerpt or row.gap_note,
+                        rule=row.legal_requirement or row.primary_legal_anchor,
+                        remediation=row.remediation_note,
+                        conclusion=row.gap_note,
+                    )
+                ),
                 confidence_level=row.confidence_level,
                 assessment_type=row.assessment_type,
                 severity_rationale=_sanitize_published_text(row.severity_rationale),

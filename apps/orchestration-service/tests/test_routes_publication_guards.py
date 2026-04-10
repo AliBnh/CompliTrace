@@ -463,6 +463,28 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
             ),
             Finding(
                 audit_id=audit.id,
+                section_id="systemic:recipients_disclosure_gap",
+                status="gap",
+                severity="medium",
+                classification="probable_gap",
+                finding_type="systemic",
+                publication_state="blocked",
+                primary_legal_anchor='["GDPR Article 13(1)(e)"]',
+                document_evidence_refs='["evi:policy:recipients"]',
+            ),
+            Finding(
+                audit_id=audit.id,
+                section_id="systemic:purpose_specificity_gap",
+                status="gap",
+                severity="medium",
+                classification="probable_gap",
+                finding_type="systemic",
+                publication_state="blocked",
+                primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+                document_evidence_refs='["evi:policy:purpose"]',
+            ),
+            Finding(
+                audit_id=audit.id,
                 section_id="ledger:final-disposition",
                 status="not applicable",
                 severity=None,
@@ -470,7 +492,9 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
                 gap_reasoning=(
                     '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing","positive_evidence_ids":["evi:policy:transfer"]},'
                     '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing","positive_evidence_ids":["evi:policy:profiling"]},'
-                    '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role allocation missing","positive_evidence_ids":["evi:policy:roles"]}}'
+                    '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role allocation missing","positive_evidence_ids":["evi:policy:roles"]},'
+                    '"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"recipients missing","positive_evidence_ids":["evi:policy:recipients"]},'
+                    '"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"purpose mapping missing","positive_evidence_ids":["evi:policy:purpose"]}}'
                 ),
                 publish_flag="no",
                 publication_state="internal_only",
@@ -481,6 +505,8 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
             EvidenceRecord(evidence_id="evi:policy:transfer", audit_id=audit.id, evidence_type="policy_section", source_ref="transfer", text_excerpt="transfer evidence"),
             EvidenceRecord(evidence_id="evi:policy:profiling", audit_id=audit.id, evidence_type="policy_section", source_ref="profiling", text_excerpt="profiling evidence"),
             EvidenceRecord(evidence_id="evi:policy:roles", audit_id=audit.id, evidence_type="policy_section", source_ref="roles", text_excerpt="roles evidence"),
+            EvidenceRecord(evidence_id="evi:policy:recipients", audit_id=audit.id, evidence_type="policy_section", source_ref="recipients", text_excerpt="recipient evidence"),
+            EvidenceRecord(evidence_id="evi:policy:purpose", audit_id=audit.id, evidence_type="policy_section", source_ref="purpose", text_excerpt="purpose evidence"),
         ]
     )
     db_session.commit()
@@ -490,6 +516,8 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
     assert "systemic:missing_transfer_notice" in issues
     assert "systemic:profiling_disclosure_gap" in issues
     assert "systemic:controller_processor_role_ambiguity" in issues
+    assert "systemic:recipients_disclosure_gap" in issues
+    assert "systemic:purpose_specificity_gap" in issues
     for row in rows:
         assert row.confidence_evidence is not None
         assert row.confidence_applicability is not None
@@ -690,7 +718,60 @@ def test_projected_findings_include_section_level_high_signal_findings(db_sessio
     rows = get_findings(audit.id, db_session)
     by_section = {r.section_id: r for r in rows}
     assert "1.3 Territorial Reach" in by_section
-    assert "section=1.3 Territorial Reach;" in (by_section["1.3 Territorial Reach"].gap_reasoning or "")
+    reasoning = by_section["1.3 Territorial Reach"].gap_reasoning or ""
+    assert "section=1.3 Territorial Reach;" in reasoning
+    assert "fact=" in reasoning and "rule=" in reasoning and "application=" in reasoning and "conclusion=" in reasoning and "remediation=" in reasoning
+
+
+def test_published_clear_omissions_use_non_compliant_conclusion_class(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    finding = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_legal_basis",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="systemic",
+        publication_state="publishable",
+        publish_flag="yes",
+        confidence=0.8,
+        confidence_evidence=0.8,
+        confidence_applicability=0.8,
+        confidence_synthesis=0.8,
+        confidence_overall=0.8,
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+        citation_summary_text="legal basis missing",
+        gap_note="Lawful basis disclosure is missing.",
+        remediation_note="Add lawful basis by purpose.",
+    )
+    db_session.add(finding)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=finding.id,
+            chunk_id="lb-chunk",
+            article_number="13",
+            paragraph_ref="1(c)",
+            article_title="Legal basis",
+            excerpt="controller shall provide legal basis",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:lb-chunk",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="lb-chunk",
+            text_excerpt="legal basis evidence",
+            article_number="13",
+            paragraph_ref="1(c)",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    assert rows[0].classification == "non_compliant"
 
 
 def test_get_review_grouped_returns_expected_sections(db_session: Session):
