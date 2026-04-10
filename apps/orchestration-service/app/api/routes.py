@@ -907,10 +907,40 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.assertion_level = "probable_document_gap"
     if row.confidence_overall is None:
         row.confidence_overall = row.confidence if row.confidence is not None else 0.66
+    evidence_linkage = bool(row.citations) and all(
+        c.evidence_id is not None and c.source_type is not None and c.source_ref is not None for c in row.citations
+    )
+    evidence_quality = 0.35
+    if row.policy_evidence_excerpt:
+        evidence_quality += 0.2
+    if row.document_evidence_refs:
+        evidence_quality += 0.2
+    if evidence_linkage:
+        evidence_quality += 0.25
+    traceability_quality = 0.25
+    if row.affected_sections:
+        traceability_quality += 0.25
+    if row.where_evidence_found and row.where_disclosure_missing:
+        traceability_quality += 0.25
+    if row.source_scope and row.assertion_level:
+        traceability_quality += 0.25
+    article_fit_quality = row.confidence_article_fit if row.confidence_article_fit is not None else (0.8 if row.primary_legal_anchor else 0.5)
+    contradiction_quality = 0.0 if "contradict" in ((row.gap_reasoning or "").lower()) else 1.0
+    completeness_quality = 0.0 if _hydration_missing(row) else 1.0
+    derived_confidence = (
+        0.35 * min(1.0, evidence_quality)
+        + 0.2 * min(1.0, traceability_quality)
+        + 0.2 * min(1.0, article_fit_quality)
+        + 0.1 * contradiction_quality
+        + 0.15 * completeness_quality
+    )
+    row.confidence_overall = round(max(0.2, min(0.95, derived_confidence)), 2)
     if (not row.policy_evidence_excerpt) or (not row.citations) or any(
         c.evidence_id is None or c.source_type is None or c.source_ref is None for c in row.citations
     ):
         row.confidence_overall = min(row.confidence_overall or 0.55, 0.55)
+    if evidence_quality >= 0.75 and row.confidence_overall < 0.55:
+        row.confidence_overall = 0.6
     if not row.primary_legal_anchor:
         row.primary_legal_anchor = [f"GDPR Article {row.citations[0].article_number}"] if row.citations else ["GDPR Article 13"]
     row.primary_legal_anchor = _anchors_for_issue(issue, row.primary_legal_anchor)
@@ -920,6 +950,31 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.legal_requirement = f"Rule: {', '.join(row.primary_legal_anchor)}."
     row.gap_reasoning = _sanitize_external_reasoning(row.gap_reasoning) or row.gap_reasoning
     row.classification = _published_legal_conclusion(row.status, issue, row.classification)
+    return row
+
+
+def _to_audit_ready_view(row: FindingOut) -> FindingOut:
+    row.publish_flag = None
+    row.artifact_role = None
+    row.finding_level = None
+    row.publication_state = None
+    row.confidence = None
+    row.confidence_evidence = None
+    row.confidence_applicability = None
+    row.confidence_synthesis = None
+    row.missing_from_section = None
+    row.missing_from_document = None
+    row.not_visible_in_excerpt = None
+    row.obligation_under_review = None
+    row.collection_mode = None
+    row.applicability_status = None
+    row.visibility_status = None
+    row.section_vs_document_scope = None
+    row.missing_fact_if_unresolved = None
+    row.support_complete = None
+    row.omission_basis = None
+    row.source_scope_confidence = None
+    row.referenced_unseen_sections = None
     return row
 
 
@@ -1107,10 +1162,14 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         section_level = _project_section_level_findings(backing_rows, known_evidence_ids, evidence_by_chunk)
         combined = projected + [row for row in section_level if row.id not in {p.id for p in projected}]
         combined += _parity_blocker_rows(audit_id, decision_map, combined, backing_rows)
+        if any(r.classification == "publication_blocked" for r in combined) and audit.status == "complete":
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            db.commit()
         blockers = _reconciliation_blockers(audit, decision_map, [], combined, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        return combined
+        return [_to_audit_ready_view(r) for r in combined]
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
@@ -1122,10 +1181,14 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     ).all()
     if not rows:
         parity_blockers = _parity_blocker_rows(audit_id, decision_map, [], [])
+        if parity_blockers and audit.status == "complete":
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            db.commit()
         blockers = _reconciliation_blockers(audit, decision_map, [], parity_blockers, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        return parity_blockers
+        return [_to_audit_ready_view(r) for r in parity_blockers]
     blockers = _reconciliation_blockers(audit, decision_map, rows, [])
     if blockers:
         raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
@@ -1215,7 +1278,11 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         )
     published = [row for row in out if not _hydration_missing(row)]
     published += _parity_blocker_rows(audit_id, decision_map, published, rows)
-    return published
+    if any(r.classification == "publication_blocked" for r in published) and audit.status == "complete":
+        audit.status = "audit_incomplete"
+        db.add(audit)
+        db.commit()
+    return [_to_audit_ready_view(r) for r in published]
 
 
 @router.get("/audits/{audit_id}/analysis", response_model=list[AnalysisItemOut])

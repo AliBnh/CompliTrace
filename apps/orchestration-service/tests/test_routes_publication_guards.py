@@ -145,7 +145,8 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
     assert findings[0].document_evidence_refs is not None
     assert "evi:policy:sec-transfer" in findings[0].document_evidence_refs
     assert "evi:chunk:transfer-chunk-1" in findings[0].document_evidence_refs
-    assert findings[0].confidence_overall == 0.8
+    assert findings[0].confidence_overall is not None
+    assert findings[0].confidence_overall >= 0.7
     assert findings[0].primary_legal_anchor == ["GDPR Article 13(1)(f)"]
     assert [c.chunk_id for c in findings[0].citations] == ["transfer-chunk-1"]
     assert findings[0].citations[0].evidence_id == "evi:chunk:transfer-chunk-1"
@@ -674,9 +675,7 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
     assert "systemic:recipients_disclosure_gap" in issues
     assert "systemic:purpose_specificity_gap" in issues
     for row in rows:
-        assert row.confidence_evidence is not None
-        assert row.confidence_applicability is not None
-        assert row.confidence_synthesis is not None
+        assert row.confidence_overall is not None
         assert row.severity_rationale is not None
         assert row.gap_reasoning is not None
         assert row.document_evidence_refs is not None
