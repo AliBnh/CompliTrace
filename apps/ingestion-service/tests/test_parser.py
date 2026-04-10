@@ -55,6 +55,11 @@ def test_split_numbered_heading_and_body_returns_none_when_no_body():
     assert split_numbered_heading_and_body(line) is None
 
 
+def test_split_numbered_heading_and_body_returns_none_for_long_sentence_without_clear_boundary():
+    line = "4.1 The Company primarily relies on user consent inferred from interactions with our services."
+    assert split_numbered_heading_and_body(line) is None
+
+
 def test_split_numbered_heading_and_body_prefers_colon_delimited_subheading():
     line = (
         "2.1 Identifiers: We collect full name, email address, phone number, and session tokens "
@@ -238,13 +243,17 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
                         "\n".join(
                             [
                                 "4. Legal Basis for Processing",
-                                "4.1 The Company primarily relies on user consent where required under local law.",
+                                "4.1 The Company primarily relies on user consent where required",
+                                "under local law.",
                                 "5. Security Measures",
-                                "5.1 The Company employs encryption protocols and audit controls.",
+                                "5.1 The Company employs encryption protocols",
+                                "and audit controls.",
                                 "6. Data Subject Rights",
-                                "6.1 Users may exercise rights of access, rectification, erasure and portability.",
+                                "6.1 Users may exercise rights of access, rectification,",
+                                "erasure and portability.",
                                 "13. Contact Information",
-                                "13.1 For inquiries regarding this Privacy Policy contact privacy@opendata.com.",
+                                "13.1 For inquiries regarding this Privacy Policy",
+                                "contact privacy@opendata.com.",
                             ]
                         )
                     ),

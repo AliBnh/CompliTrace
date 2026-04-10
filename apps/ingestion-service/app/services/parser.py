@@ -192,9 +192,6 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
             cut = i
             break
 
-    if cut is None and len(words) > 9:
-        cut = 9
-
     if cut is None:
         return None
 
