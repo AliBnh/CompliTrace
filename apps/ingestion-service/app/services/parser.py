@@ -203,10 +203,19 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
         first = words[0].lower().strip(",.;:()")
         if "." in number and len(words) >= 4 and first in BODY_START_WORDS:
             return _format_numbered_heading(number, ""), _clean_line(rest)
+        if "." in number and len(words) >= 6:
+            return _format_numbered_heading(number, ""), _clean_line(rest)
         return None
 
     if cut == 0:
         return _format_numbered_heading(number, ""), _clean_line(rest)
+
+    # For decimal subsections, keep heading text only when it looks like a short label.
+    if "." in number:
+        heading_words = words[:cut]
+        first_heading = heading_words[0].lower().strip(",.;:()") if heading_words else ""
+        if len(heading_words) > 4 or first_heading in BODY_START_WORDS:
+            return _format_numbered_heading(number, ""), _clean_line(rest)
 
     heading = _format_numbered_heading(number, " ".join(words[:cut]))
     body = _clean_line(" ".join(words[cut:]))
@@ -359,12 +368,30 @@ def _commit_section(
     page_start: int | None,
     page_end: int | None,
 ) -> None:
+    if title == "Document Header":
+        header_lines = [_clean_line(line) for line in content_lines if _clean_line(line)]
+        if not header_lines:
+            return
+        normalized_title = header_lines[0]
+        content = _clean_line(" ".join(header_lines[1:]))
+        sections.append(
+            ParsedSection(
+                section_order=len(sections) + 1,
+                section_title=normalized_title,
+                content=content,
+                page_start=page_start,
+                page_end=page_end,
+            )
+        )
+        return
+
     content = _clean_line(" ".join(content_lines))
     normalized_title = _normalize_section_title(title) or "Untitled Section"
     is_numbered = bool(SECTION_NUM_RE.match(normalized_title))
 
     if not content and not is_numbered:
-        return
+        if not (HEADING_RE.match(normalized_title) and (normalized_title.istitle() or normalized_title.isupper())):
+            return
     sections.append(
         ParsedSection(
             section_order=len(sections) + 1,

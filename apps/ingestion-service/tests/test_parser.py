@@ -138,7 +138,8 @@ def test_refine_sections_fixes_weak_title_when_numbered_body_starts():
         )
     ]
     refined = _refine_sections(sections, set())
-    assert refined[0].section_title.startswith("2.1 Account, Identity")
+    assert refined[0].section_title == "2.1"
+    assert refined[0].content.startswith("Account, Identity")
 
 
 def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypatch):
@@ -273,12 +274,16 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
     assert "2. Categories of Data Collected" in titles
     assert "3. Information Processing" in titles
     assert "4. Legal Basis for Processing" in titles
+    assert "Open Data Synthesis, Inc." in titles
+    assert "Enterprise Privacy Policy" in titles
     assert "2.1 Identifiers" in titles
     assert "2.2 Technical Data" in titles
     assert "3.1 Service Delivery" in titles
     assert "3.2 Analytics and Optimization" in titles
     assert any(title == "4.1" or title.startswith("4.1 ") for title in titles)
     assert any(title == "13.1" or title.startswith("13.1 ") for title in titles)
+    assert "5.1" in titles
+    assert "6.1" in titles
 
     assert "We collect full name, email address" in by_title["2.1 Identifiers"]
     assert "This includes system logs" in by_title["2.2 Technical Data"]
