@@ -18,6 +18,7 @@ PAGE_RE = re.compile(r"^(?:page\s+)?\d{1,4}$", re.IGNORECASE)
 SECTION_NUM_RE = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+(.+)$")
 SUBSECTION_HEADING_RE = re.compile(r"^\d{1,2}(?:\.\d{1,2}){1,2}\s+[A-Z].{1,120}$")
 SECTION_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z].{1,120}$")
+NUMBER_ONLY_SUBSECTION_RE = re.compile(r"^\d{1,2}\.\d{1,2}$")
 FILE_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/).*(?:\.pdf|\.docx?|\.txt)", re.IGNORECASE)
 MULTISPACE_RE = re.compile(r"\s+")
 INLINE_HEADING_RE = re.compile(r"(?=(?:^|\s)(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+[A-Z])")
@@ -65,6 +66,7 @@ BODY_START_WORDS = {
     "the",
     "a",
     "an",
+    "for",
     "personal",
     "users",
 }
@@ -87,7 +89,9 @@ def _clean_line(text: str) -> str:
 
 def _format_numbered_heading(number: str, heading_text: str) -> str:
     suffix = "." if "." not in number else ""
-    return _clean_line(f"{number}{suffix} {heading_text}")
+    if heading_text:
+        return _clean_line(f"{number}{suffix} {heading_text}")
+    return _clean_line(f"{number}{suffix}")
 
 
 def is_noise_line(line: str) -> bool:
@@ -116,7 +120,7 @@ def is_heading(line: str) -> bool:
     if not s or is_noise_line(s):
         return False
 
-    if SECTION_HEADING_RE.match(s) or SUBSECTION_HEADING_RE.match(s):
+    if SECTION_HEADING_RE.match(s) or SUBSECTION_HEADING_RE.match(s) or NUMBER_ONLY_SUBSECTION_RE.match(s):
         return True
 
     if len(s.split()) > 12:
@@ -185,6 +189,9 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
         next_norm = ""
         if i + 1 < len(words):
             next_norm = words[i + 1].lower().strip(",.;:()")
+        if i == 0 and "." in number and norm in BODY_START_WORDS and len(words) >= 3:
+            cut = 0
+            break
         if i >= 2 and norm == "data" and next_norm in {"is", "are", "was", "were"} and len(words) - i >= 3:
             cut = i
             break
@@ -193,7 +200,13 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
             break
 
     if cut is None:
+        first = words[0].lower().strip(",.;:()")
+        if "." in number and len(words) >= 4 and first in BODY_START_WORDS:
+            return _format_numbered_heading(number, ""), _clean_line(rest)
         return None
+
+    if cut == 0:
+        return _format_numbered_heading(number, ""), _clean_line(rest)
 
     heading = _format_numbered_heading(number, " ".join(words[:cut]))
     body = _clean_line(" ".join(words[cut:]))
@@ -227,7 +240,7 @@ def _normalize_section_title(title: str) -> str:
     if m:
         num = m.group(1)
         rest = _clean_line(m.group(2))
-        return f"{num} {rest}".strip()
+        return _format_numbered_heading(num, rest)
     return s
 
 
@@ -262,6 +275,18 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
     for sec in sections:
         content = _remove_boilerplate_phrases(sec.content, boilerplate_lines)
         title = _normalize_section_title(sec.section_title)
+
+        if not content:
+            refined.append(
+                ParsedSection(
+                    section_order=0,
+                    section_title=title,
+                    content="",
+                    page_start=sec.page_start,
+                    page_end=sec.page_end,
+                )
+            )
+            continue
 
         # Fix weak parent titles where body immediately starts with numbered heading.
         if not SECTION_NUM_RE.match(title):
@@ -335,12 +360,15 @@ def _commit_section(
     page_end: int | None,
 ) -> None:
     content = _clean_line(" ".join(content_lines))
-    if not content:
+    normalized_title = _normalize_section_title(title) or "Untitled Section"
+    is_numbered = bool(SECTION_NUM_RE.match(normalized_title))
+
+    if not content and not is_numbered:
         return
     sections.append(
         ParsedSection(
             section_order=len(sections) + 1,
-            section_title=_normalize_section_title(title) or "Untitled Section",
+            section_title=normalized_title,
             content=content,
             page_start=page_start,
             page_end=page_end,
@@ -378,7 +406,7 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
     boilerplate = _detect_boilerplate_lines(pages)
 
     sections: list[ParsedSection] = []
-    current_title = "Introduction"
+    current_title = "Document Header"
     current_content: list[str] = []
     current_start: int | None = 1
     last_page: int | None = 1

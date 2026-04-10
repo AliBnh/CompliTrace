@@ -57,7 +57,9 @@ def test_split_numbered_heading_and_body_returns_none_when_no_body():
 
 def test_split_numbered_heading_and_body_returns_none_for_long_sentence_without_clear_boundary():
     line = "4.1 The Company primarily relies on user consent inferred from interactions with our services."
-    assert split_numbered_heading_and_body(line) is None
+    heading, body = split_numbered_heading_and_body(line) or ("", "")
+    assert heading == "4.1"
+    assert body.startswith("The Company primarily relies")
 
 
 def test_split_numbered_heading_and_body_prefers_colon_delimited_subheading():
@@ -169,8 +171,9 @@ def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypa
 
     monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
     sections = parse_pdf_into_sections("dummy.pdf")
-    assert len(sections) == 1
-    assert sections[0].section_title == "1.1 Purpose of this Policy"
+    assert len(sections) == 2
+    assert sections[0].section_title == "1. Introduction and Scope"
+    assert sections[1].section_title == "1.1 Purpose of this Policy"
 
 
 def test_parse_pdf_into_sections_keeps_decimal_subheading_without_extra_dot(monkeypatch):
@@ -266,12 +269,16 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
     titles = [s.section_title for s in sections]
     by_title = {s.section_title: s.content for s in sections}
 
+    assert "1. Introduction" in titles
+    assert "2. Categories of Data Collected" in titles
+    assert "3. Information Processing" in titles
+    assert "4. Legal Basis for Processing" in titles
     assert "2.1 Identifiers" in titles
     assert "2.2 Technical Data" in titles
     assert "3.1 Service Delivery" in titles
     assert "3.2 Analytics and Optimization" in titles
-    assert any(title.startswith("4.1 ") for title in titles)
-    assert any(title.startswith("13.1 ") for title in titles)
+    assert any(title == "4.1" or title.startswith("4.1 ") for title in titles)
+    assert any(title == "13.1" or title.startswith("13.1 ") for title in titles)
 
     assert "We collect full name, email address" in by_title["2.1 Identifiers"]
     assert "This includes system logs" in by_title["2.2 Technical Data"]
