@@ -55,6 +55,17 @@ def test_split_numbered_heading_and_body_returns_none_when_no_body():
     assert split_numbered_heading_and_body(line) is None
 
 
+def test_split_numbered_heading_and_body_prefers_colon_delimited_subheading():
+    line = (
+        "2.1 Identifiers: We collect full name, email address, phone number, and session tokens "
+        "used to authenticate and manage access to services."
+    )
+    heading, body = split_numbered_heading_and_body(line) or ("", "")
+    assert heading.startswith("2.1")
+    assert "Identifiers" in heading
+    assert body.startswith("We collect full name")
+
+
 def test_detect_boilerplate_lines_generic():
     pages = [
         (1, ["Confidential", "Data Retention"]),

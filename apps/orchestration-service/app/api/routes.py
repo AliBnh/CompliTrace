@@ -273,21 +273,7 @@ def _project_published_findings_from_map(
     evidence_by_chunk: dict[str, EvidenceRecord] | None = None,
     evidence_by_id: dict[str, EvidenceRecord] | None = None,
 ) -> list[FindingOut]:
-    family_to_issue = {
-        "controller_identity_contact": "missing_controller_contact",
-        "legal_basis": "missing_legal_basis",
-        "retention": "missing_retention_period",
-        "rights_notice": "missing_rights_notice",
-        "complaint_right": "missing_complaint_right",
-        "transfer": "missing_transfer_notice",
-        "profiling": "profiling_disclosure_gap",
-        "role_ambiguity": "controller_processor_role_ambiguity",
-        "article14_source": "article_14_indirect_collection_gap",
-        "recipients": "recipients_disclosure_gap",
-        "special_category": "special_category_basis_unclear",
-        "dpo_contact": "dpo_contact_gap",
-        "purpose_mapping": "purpose_specificity_gap",
-    }
+    family_to_issue = _family_issue_map()
     severity_defaults = {
         "controller_identity_contact": "high",
         "legal_basis": "high",
@@ -311,6 +297,14 @@ def _project_published_findings_from_map(
         "recipients_disclosure_gap": "Disclose categories of recipients and the main disclosure contexts (e.g., processors, vendors, partners, payment/cloud providers).",
         "purpose_specificity_gap": "Map each key personal-data category to specific processing purposes (and lawful-basis context where relevant).",
     }
+    issue_search_terms: dict[str, list[str]] = {
+        "missing_controller_contact": ["controller contact", "privacy contact", "data protection contact", "email", "webform"],
+        "missing_transfer_notice": ["transfer", "third country", "safeguard", "SCC", "adequacy"],
+        "profiling_disclosure_gap": ["profiling", "automated decision", "logic involved", "significance", "effects"],
+        "controller_processor_role_ambiguity": ["controller", "processor", "joint controller", "on behalf of"],
+        "recipients_disclosure_gap": ["recipients", "third parties", "processors", "partners", "vendors"],
+        "purpose_specificity_gap": ["purpose", "processing purpose", "lawful basis", "data category"],
+    }
     row_by_issue: dict[str, Finding] = {}
     for row in backing_rows or []:
         issue = _issue_from_finding_section(row.section_id)
@@ -323,6 +317,9 @@ def _project_published_findings_from_map(
         if status not in {"gap", "referenced_but_unseen"} or publish_rec != "publish":
             continue
         reason = _sanitize_external_reasoning(str(item.get("reasoning") or "")) or ""
+        searched_sections = [str(v) for v in (item.get("searched_sections") or item.get("section_ids") or []) if isinstance(v, str)]
+        searched_headings = [str(v) for v in (item.get("searched_headings") or []) if isinstance(v, str)]
+        searched_terms = [str(v) for v in (item.get("searched_terms") or []) if isinstance(v, str)]
         projected_evidence_ids = [str(v) for v in (item.get("positive_evidence_ids") or []) if isinstance(v, str) and str(v).startswith("evi:")]
         backing = row_by_issue.get(issue)
         if backing is not None:
@@ -371,6 +368,8 @@ def _project_published_findings_from_map(
             for ev in [((evidence_by_id or {}).get(ref))]
             if ev is not None
         ]
+        derived_citation_refs = [c.evidence_id for c in (projected_chunk_citations or projected_fallback_citations) if c.evidence_id]
+        projected_evidence_ids = list(dict.fromkeys(projected_evidence_ids + [ref for ref in derived_citation_refs if isinstance(ref, str)]))
         if not projected_chunk_citations and not projected_fallback_citations:
             item["blocker_reason"] = "missing evidence-linked citations for publishable specialist/core family"
             continue
@@ -381,6 +380,14 @@ def _project_published_findings_from_map(
         )
         legal_requirement_text = _sanitize_published_text(backing.legal_requirement) if backing and backing.legal_requirement else None
         resolved_severity, resolved_rationale = _severity_rule(inferred_issue, "gap", f"systemic:{issue}", reason)
+        policy_excerpt = _sanitize_published_text(backing.policy_evidence_excerpt) if backing and backing.policy_evidence_excerpt else None
+        if not policy_excerpt:
+            policy_excerpt = (
+                f"Reviewed sections {', '.join(searched_sections or ([backing.section_id] if backing else ['review-scope-not-captured']))}, "
+                f"headings {', '.join(searched_headings or ['privacy notice', 'data use', 'your rights'])}, "
+                f"and terms {', '.join(searched_terms or issue_search_terms.get(issue, ['gdpr disclosure duty']))}; "
+                f"required disclosure for {issue} was not found."
+            )
         projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
                 section_id=f"systemic:{issue}",
@@ -406,6 +413,7 @@ def _project_published_findings_from_map(
                 citation_summary_text=_sanitize_published_text(backing.citation_summary_text) if backing and backing.citation_summary_text else fallback_summary,
                 support_complete=_deserialize_bool_flag(backing.support_complete) if backing else None,
                 omission_basis=_deserialize_bool_flag(backing.omission_basis) if backing else None,
+                policy_evidence_excerpt=policy_excerpt,
                 legal_requirement=legal_requirement_text
                 or f"Rule: {', '.join(primary_anchor)}.",
                 gap_note=_sanitize_published_text(reason) or "Required disclosure gap identified in final decision map.",
@@ -420,23 +428,32 @@ def _project_published_findings_from_map(
                 ),
                 severity_rationale=_sanitize_published_text(backing.severity_rationale) if backing and backing.severity_rationale else resolved_rationale,
                 document_evidence_refs=[ref for ref in projected_evidence_ids if (known_evidence_ids is None or ref in known_evidence_ids)] or None,
+                affected_sections=searched_sections or ([backing.section_id] if backing and backing.section_id else [f"systemic:{issue}"]),
+                where_evidence_found=searched_sections or ([backing.section_id] if backing and backing.section_id else [f"systemic:{issue}"]),
+                where_disclosure_missing=searched_sections or ([backing.section_id] if backing and backing.section_id else [f"systemic:{issue}"]),
                 citations=(projected_chunk_citations or projected_fallback_citations),
         )
         projected = _fill_required_published_fields(projected)
-        if family in {"transfer", "profiling", "role_ambiguity", "recipients", "purpose_mapping"}:
+        if family in {"controller_identity_contact", "transfer", "profiling", "role_ambiguity", "recipients", "purpose_mapping"}:
             if not projected.document_evidence_refs:
                 item["blocker_reason"] = "missing document evidence refs for specialist publishable finding"
                 continue
             if not projected.citations or any(c.evidence_id is None or c.source_type is None or c.source_ref is None for c in projected.citations):
                 item["blocker_reason"] = "specialist finding lacks fully linked citation objects"
                 continue
-        if not _hydration_missing(projected):
-            out.append(projected)
+        missing_requirements = _missing_hydration_requirements(projected)
+        if missing_requirements:
+            item["blocker_reason"] = _blocker_reason_for_missing_requirements(missing_requirements)
+            item["missing_requirements"] = missing_requirements
+            continue
+        out.append(projected)
     return out
 
 
 def _issue_family(issue: str | None) -> str | None:
     mapping = {
+        "missing_controller_contact": "controller_identity_contact",
+        "missing_controller_identity": "controller_identity_contact",
         "missing_transfer_notice": "transfer",
         "profiling_disclosure_gap": "profiling",
         "controller_processor_role_ambiguity": "role_ambiguity",
@@ -456,8 +473,12 @@ def _section_level_reasoning(row: Finding) -> str:
     conclusion = _sanitize_external_reasoning(row.gap_note) or "Section-level disclosure is insufficient."
     remediation = _sanitize_published_text(row.remediation_note) or "Add section-specific compliant wording and cross-references."
     return (
-        f"section={section}; fact={fact}; rule={rule}; application={legal_application}; "
-        f"conclusion={conclusion}; remediation={remediation}; obligation={obligation}"
+        f"In section {section}, the notice states: {fact}. "
+        f"Applicable GDPR duty: {rule}. "
+        f"Assessment: {legal_application} "
+        f"Breach finding: {conclusion}. "
+        f"Required remediation: {remediation}. "
+        f"Obligation under review: {obligation}."
     )
 
 
@@ -482,13 +503,16 @@ def _published_legal_conclusion(status: str | None, issue: str | None, existing:
 
 
 def _severity_rule(issue: str | None, status: str | None, section_id: str, reasoning: str | None) -> tuple[str, str]:
-    high_default = {"missing_legal_basis", "missing_controller_contact", "missing_controller_identity", "missing_transfer_notice", "profiling_disclosure_gap"}
-    medium_default = {"missing_retention_period", "missing_rights_notice", "missing_complaint_right", "recipients_disclosure_gap", "purpose_specificity_gap", "controller_processor_role_ambiguity"}
+    high_default = {"missing_legal_basis", "missing_controller_contact", "missing_controller_identity", "missing_rights_notice", "missing_complaint_right"}
+    medium_default = {"missing_retention_period", "recipients_disclosure_gap", "purpose_specificity_gap", "controller_processor_role_ambiguity"}
     text = (reasoning or "").lower()
-    total_failure = any(t in text for t in {"across sections", "across the notice", "not stated for any", "no clear contact route"})
+    transfer_or_profiling_signal = any(t in text for t in {"transfer", "scc", "adequacy", "profil", "automated decision"})
+    total_failure = any(t in text for t in {"across sections", "across the notice", "not stated for any", "no clear contact route", "no safeguard", "not disclosed"})
     rights_or_accountability = any(t in text for t in {"rights", "accountability", "exercise of rights", "controller accountability"})
     if issue in high_default:
         sev = "high"
+    elif issue in {"missing_transfer_notice", "profiling_disclosure_gap"}:
+        sev = "high" if transfer_or_profiling_signal else "medium"
     elif issue in medium_default:
         sev = "medium"
     else:
@@ -514,22 +538,22 @@ def _build_richer_gap_reasoning(
 ) -> str:
     if issue == "missing_controller_contact":
         return (
-            f"section={section_id}; issue=missing_controller_contact; "
-            "fact=the company identity is visible but no clear contact route is stated; "
-            "rule=GDPR Articles 13(1)(a) and 14(1)(a) require controller identity and contact details; "
-            "application=the reviewed notice names the company but does not provide an actionable privacy contact channel; "
-            f"conclusion={_sanitize_external_reasoning(conclusion) or 'non-compliant controller-contact disclosure gap'}; "
-            "remediation=add direct privacy contact details (email, webform, or postal route)."
+            f"The notice content linked to {section_id} identifies the organization but does not provide an actionable privacy contact route. "
+            "Under GDPR Articles 13(1)(a) and 14(1)(a), controller identity and contact details must be disclosed. "
+            "Because a contact channel is missing, the disclosure remains non-compliant for controller-contact transparency. "
+            f"Conclusion: {_sanitize_external_reasoning(conclusion) or 'non-compliant controller-contact disclosure gap'}. "
+            "Remediation: add direct privacy contact details (email, webform, or postal route)."
         )
     safe_fact = _sanitize_published_text(fact) or "Relevant policy evidence indicates missing or unclear disclosure."
     safe_rule = _sanitize_published_text(rule) or "GDPR transparency and notice obligations."
     safe_conclusion = _sanitize_published_text(conclusion) or "The required disclosure element is not sufficiently addressed."
     safe_remediation = _sanitize_published_text(remediation) or "Provide explicit compliant notice wording."
     return (
-        f"section={section_id}; issue={issue or 'unspecified'}; "
-        f"gdpr_applicability=processing/transparency context triggers GDPR notice duties; "
-        f"obligation={safe_rule}; notice_observation={safe_fact}; "
-        f"conclusion_basis={safe_conclusion}; remediation={safe_remediation}"
+        f"Fact: {safe_fact}. "
+        f"Law: {safe_rule}. "
+        f"Breach: {safe_conclusion}. "
+        f"Conclusion for {issue or 'unspecified issue'} in {section_id}: the notice requires corrective disclosure. "
+        f"Remediation: {safe_remediation}."
     )
 
 
@@ -538,10 +562,9 @@ def _review_reasoning(reason: str | None, family_or_duty: str | None) -> str | N
     if not base:
         return base
     return (
-        f"gdpr_applicability=the reviewed notice content triggers GDPR transparency analysis for {family_or_duty or 'this duty'}; "
-        f"obligation=the relevant GDPR disclosure duty must be explicitly stated; "
-        f"notice_observation={base}; "
-        "conclusion_basis=this observation determines the final review disposition."
+        f"The reviewed notice content triggers GDPR transparency analysis for {family_or_duty or 'this duty'}. "
+        f"Observation: {base}. "
+        "The applicable GDPR duty requires explicit disclosure, and this observation determines the final review disposition."
     )
 
 
@@ -569,7 +592,7 @@ def _project_section_level_findings(
             elif "special category" in text:
                 issue = "special_category_basis_unclear"
         family = _issue_family(issue)
-        if family not in {"transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping", "recipients"}:
+        if family not in {"controller_identity_contact", "transfer", "profiling", "role_ambiguity", "special_category", "purpose_mapping", "recipients"}:
             continue
         if row.section_id.startswith("systemic:") or row.section_id.startswith("ledger:"):
             continue
@@ -620,6 +643,9 @@ def _project_section_level_findings(
                     source_scope_confidence=row.source_scope_confidence,
                     assertion_level=row.assertion_level,
                     document_evidence_refs=[ref for ref in (_deserialize_json_list(row.document_evidence_refs) or []) if ref in known_evidence_ids] or None,
+                    affected_sections=[row.section_id],
+                    where_evidence_found=[row.section_id],
+                    where_disclosure_missing=[row.section_id],
                     citation_summary_text=_sanitize_published_text(row.citation_summary_text)
                     or f"Section-local evidence supports {family} publication path.",
                     gap_note=_sanitize_published_text(row.gap_note),
@@ -710,6 +736,139 @@ def _hydration_missing(row: FindingOut) -> bool:
     return False
 
 
+def _missing_hydration_requirements(row: FindingOut) -> list[str]:
+    missing: list[str] = []
+    if not row.primary_legal_anchor:
+        missing.append("primary_legal_anchor")
+    if not (row.citation_summary_text or "").strip():
+        missing.append("citation_summary_text")
+    if not row.source_scope:
+        missing.append("source_scope")
+    if not row.assertion_level:
+        missing.append("assertion_level")
+    if row.confidence_overall is None:
+        missing.append("confidence_overall")
+    if not row.remediation_note:
+        missing.append("remediation_note")
+    if len(row.citations) == 0:
+        missing.append("citations")
+    if not row.policy_evidence_excerpt:
+        missing.append("policy_evidence_excerpt")
+    if not row.document_evidence_refs:
+        missing.append("document_evidence_refs")
+    if not row.affected_sections:
+        missing.append("affected_sections")
+    if not row.where_disclosure_missing:
+        missing.append("where_disclosure_missing")
+    for c in row.citations:
+        if not c.evidence_id:
+            missing.append("citations.evidence_id")
+        if not c.source_type:
+            missing.append("citations.source_type")
+        if not c.source_ref:
+            missing.append("citations.source_ref")
+    return missing
+
+
+def _family_issue_map() -> dict[str, str]:
+    return {
+        "controller_identity_contact": "missing_controller_contact",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights_notice": "missing_rights_notice",
+        "complaint_right": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+        "article14_source": "article_14_indirect_collection_gap",
+        "recipients": "recipients_disclosure_gap",
+        "special_category": "special_category_basis_unclear",
+        "dpo_contact": "dpo_contact_gap",
+        "purpose_mapping": "purpose_specificity_gap",
+    }
+
+
+def _blocker_reason_for_missing_requirements(missing: list[str]) -> str:
+    missing_set = set(missing)
+    if {"document_evidence_refs", "citations", "citations.evidence_id", "citations.source_type", "citations.source_ref"} & missing_set:
+        return "missing evidence linkage"
+    if {"source_scope", "assertion_level"} & missing_set:
+        return "missing section traceability"
+    if {"policy_evidence_excerpt"} & missing_set:
+        return "missing absence-proof or quote evidence"
+    if {"confidence_overall"} & missing_set:
+        return "confidence inconsistency"
+    return "incomplete hydration"
+
+
+def _publication_blocker_row(
+    *,
+    audit_id: str,
+    family: str,
+    issue: str,
+    reason: str,
+    missing_requirements: list[str] | None = None,
+    searched_sections: list[str] | None = None,
+    searched_headings: list[str] | None = None,
+    searched_terms: list[str] | None = None,
+) -> FindingOut:
+    issue_terms = {
+        "missing_controller_contact": ["controller contact", "privacy contact", "email", "webform", "address"],
+        "missing_transfer_notice": ["transfer", "third country", "safeguard", "SCC", "adequacy"],
+        "profiling_disclosure_gap": ["profiling", "automated decision", "logic", "significance", "effects"],
+        "controller_processor_role_ambiguity": ["controller", "processor", "on behalf of", "joint controller"],
+        "recipients_disclosure_gap": ["recipients", "third parties", "processors", "partners", "vendors"],
+        "purpose_specificity_gap": ["purpose", "data category", "lawful basis", "processing purpose"],
+    }
+    normalized_sections = searched_sections or ["all reviewed privacy-notice sections"]
+    normalized_headings = searched_headings or ["privacy notice", "data we collect", "how we use data", "your rights"]
+    normalized_terms = searched_terms or issue_terms.get(issue, ["gdpr disclosure duty"])
+    details = f"issue={issue}; blocker_reason={reason}"
+    if missing_requirements:
+        details = f"{details}; missing_requirements={', '.join(sorted(set(missing_requirements)))}"
+    search_scope = (
+        f"Searched sections: {', '.join(normalized_sections)}. "
+        f"Searched headings: {', '.join(normalized_headings)}. "
+        f"Searched terms: {', '.join(normalized_terms)}. "
+        "Result: required disclosure not evidenced with a fully linked citation package."
+    )
+    return FindingOut(
+        id=f"publication_blocked:{audit_id}:{family}",
+        section_id=f"systemic:{issue}",
+        status="needs review",
+        severity="medium",
+        classification="publication_blocked",
+        finding_type="publication_blocker",
+        publish_flag="no",
+        artifact_role="support_only",
+        finding_level="none",
+        publication_state="blocked",
+        confidence=0.5,
+        confidence_evidence=0.4,
+        confidence_applicability=0.6,
+        confidence_article_fit=0.4,
+        confidence_synthesis=0.5,
+        confidence_overall=0.5,
+        source_scope="uncertain_scope",
+        source_scope_confidence=0.6,
+        assertion_level="not_assessable",
+        publication_blocked=True,
+        issue_key=issue,
+        blocker_reason=reason,
+        missing_requirements=missing_requirements or None,
+        affected_sections=normalized_sections,
+        where_evidence_found=normalized_sections,
+        where_disclosure_missing=normalized_sections,
+        legal_requirement="Publication blocker record for required Review→Published parity.",
+        gap_note=f"publication_blocked: {details}. {search_scope}",
+        remediation_note=(
+            "Resolve all missing requirements, attach evidence-linked citations (evidence_id/source_type/source_ref), "
+            "and rerun publication projection."
+        ),
+        citations=[],
+    )
+
+
 def _issue_key_from_section(section_id: str) -> str | None:
     if section_id.startswith("systemic:"):
         return section_id.split("systemic:", 1)[1]
@@ -748,6 +907,40 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.assertion_level = "probable_document_gap"
     if row.confidence_overall is None:
         row.confidence_overall = row.confidence if row.confidence is not None else 0.66
+    evidence_linkage = bool(row.citations) and all(
+        c.evidence_id is not None and c.source_type is not None and c.source_ref is not None for c in row.citations
+    )
+    evidence_quality = 0.35
+    if row.policy_evidence_excerpt:
+        evidence_quality += 0.2
+    if row.document_evidence_refs:
+        evidence_quality += 0.2
+    if evidence_linkage:
+        evidence_quality += 0.25
+    traceability_quality = 0.25
+    if row.affected_sections:
+        traceability_quality += 0.25
+    if row.where_evidence_found and row.where_disclosure_missing:
+        traceability_quality += 0.25
+    if row.source_scope and row.assertion_level:
+        traceability_quality += 0.25
+    article_fit_quality = row.confidence_article_fit if row.confidence_article_fit is not None else (0.8 if row.primary_legal_anchor else 0.5)
+    contradiction_quality = 0.0 if "contradict" in ((row.gap_reasoning or "").lower()) else 1.0
+    completeness_quality = 0.0 if _hydration_missing(row) else 1.0
+    derived_confidence = (
+        0.35 * min(1.0, evidence_quality)
+        + 0.2 * min(1.0, traceability_quality)
+        + 0.2 * min(1.0, article_fit_quality)
+        + 0.1 * contradiction_quality
+        + 0.15 * completeness_quality
+    )
+    row.confidence_overall = round(max(0.2, min(0.95, derived_confidence)), 2)
+    if (not row.policy_evidence_excerpt) or (not row.citations) or any(
+        c.evidence_id is None or c.source_type is None or c.source_ref is None for c in row.citations
+    ):
+        row.confidence_overall = min(row.confidence_overall or 0.55, 0.55)
+    if evidence_quality >= 0.75 and row.confidence_overall < 0.55:
+        row.confidence_overall = 0.6
     if not row.primary_legal_anchor:
         row.primary_legal_anchor = [f"GDPR Article {row.citations[0].article_number}"] if row.citations else ["GDPR Article 13"]
     row.primary_legal_anchor = _anchors_for_issue(issue, row.primary_legal_anchor)
@@ -757,6 +950,31 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.legal_requirement = f"Rule: {', '.join(row.primary_legal_anchor)}."
     row.gap_reasoning = _sanitize_external_reasoning(row.gap_reasoning) or row.gap_reasoning
     row.classification = _published_legal_conclusion(row.status, issue, row.classification)
+    return row
+
+
+def _to_audit_ready_view(row: FindingOut) -> FindingOut:
+    row.publish_flag = None
+    row.artifact_role = None
+    row.finding_level = None
+    row.publication_state = None
+    row.confidence = None
+    row.confidence_evidence = None
+    row.confidence_applicability = None
+    row.confidence_synthesis = None
+    row.missing_from_section = None
+    row.missing_from_document = None
+    row.not_visible_in_excerpt = None
+    row.obligation_under_review = None
+    row.collection_mode = None
+    row.applicability_status = None
+    row.visibility_status = None
+    row.section_vs_document_scope = None
+    row.missing_fact_if_unresolved = None
+    row.support_complete = None
+    row.omission_basis = None
+    row.source_scope_confidence = None
+    row.referenced_unseen_sections = None
     return row
 
 
@@ -773,6 +991,7 @@ def _reconciliation_blockers(
     if not decision_map:
         return blockers
     core_families = ("controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right")
+    family_issue_map = _family_issue_map()
     for family in core_families:
         status = str((decision_map.get(family, {}) or {}).get("status") or "")
         if status in {"unresolved_internal_error", "blocked"} and (published_rows or projected_rows):
@@ -786,23 +1005,72 @@ def _reconciliation_blockers(
             continue
         if ignored_families and family in ignored_families:
             continue
-        has_projection = any(p.id.endswith(f":{family}") for p in projected_rows)
-        family_issue_map = {
-            "transfer": "missing_transfer_notice",
-            "profiling": "profiling_disclosure_gap",
-            "role_ambiguity": "controller_processor_role_ambiguity",
-            "recipients": "recipients_disclosure_gap",
-            "purpose_mapping": "purpose_specificity_gap",
-        }
+        expected_section_id = f"systemic:{family_issue_map.get(family)}" if family_issue_map.get(family) else None
+        has_projection = any(
+            (expected_section_id is not None and p.section_id == expected_section_id and p.classification != "publication_blocked")
+            or p.id.endswith(f":{family}")
+            for p in projected_rows
+        )
+        family_issue_map = _family_issue_map()
         expected_issue = family_issue_map.get(family)
         has_persisted_family = any(
             (_issue_from_finding_section(r.section_id) == expected_issue)
             or (expected_issue and expected_issue in ((r.gap_note or "").lower() + " " + (r.remediation_note or "").lower()))
             for r in (published_rows or [])
         )
-        explicit_blocker = bool(item.get("blocker_reason"))
+        explicit_blocker = bool(item.get("blocker_reason")) or any(
+            p.classification == "publication_blocked" and p.issue_key == expected_issue for p in projected_rows
+        )
         if not has_projection and not has_persisted_family and not explicit_blocker:
             blockers.append(f"publish recommendation for {family} has no materialized finding or explicit blocker")
+    return blockers
+
+
+def _parity_blocker_rows(
+    audit_id: str,
+    decision_map: dict[str, dict[str, str | bool | list[str] | float]] | None,
+    projected_rows: list[FindingOut],
+    published_rows: list[Finding] | None,
+) -> list[FindingOut]:
+    if not decision_map:
+        return []
+    blockers: list[FindingOut] = []
+    family_issue_map = _family_issue_map()
+    for family, issue in family_issue_map.items():
+        item = decision_map.get(family, {}) or {}
+        if str(item.get("status") or "") not in {"gap", "referenced_but_unseen"}:
+            continue
+        if str(item.get("publication_recommendation") or "") != "publish":
+            continue
+        has_projection = any(p.section_id == f"systemic:{issue}" for p in projected_rows if p.classification != "publication_blocked")
+        has_persisted = any(_issue_from_finding_section(r.section_id) == issue for r in (published_rows or []))
+        if has_projection or has_persisted:
+            continue
+        blocker_reason = str(item.get("blocker_reason") or "incomplete hydration")
+        missing_requirements = [str(v) for v in (item.get("missing_requirements") or []) if isinstance(v, str)]
+        searched_sections = [str(v) for v in (item.get("searched_sections") or item.get("section_ids") or []) if isinstance(v, str)]
+        searched_headings = [str(v) for v in (item.get("searched_headings") or []) if isinstance(v, str)]
+        searched_terms = [str(v) for v in (item.get("searched_terms") or []) if isinstance(v, str)]
+        if not missing_requirements:
+            missing_requirements = [
+                "policy_evidence_excerpt",
+                "document_evidence_refs",
+                "citations.evidence_id",
+                "citations.source_type",
+                "citations.source_ref",
+            ]
+        blockers.append(
+            _publication_blocker_row(
+                audit_id=audit_id,
+                family=family,
+                issue=issue,
+                reason=blocker_reason,
+                missing_requirements=missing_requirements,
+                searched_sections=searched_sections,
+                searched_headings=searched_headings,
+                searched_terms=searched_terms,
+            )
+        )
     return blockers
 
 
@@ -893,10 +1161,15 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     if projected:
         section_level = _project_section_level_findings(backing_rows, known_evidence_ids, evidence_by_chunk)
         combined = projected + [row for row in section_level if row.id not in {p.id for p in projected}]
+        combined += _parity_blocker_rows(audit_id, decision_map, combined, backing_rows)
+        if any(r.classification == "publication_blocked" for r in combined) and audit.status == "complete":
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            db.commit()
         blockers = _reconciliation_blockers(audit, decision_map, [], combined, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        return combined
+        return [_to_audit_ready_view(r) for r in combined]
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
@@ -907,10 +1180,15 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
     if not rows:
-        blockers = _reconciliation_blockers(audit, decision_map, [], [], hydration_filtered_families)
+        parity_blockers = _parity_blocker_rows(audit_id, decision_map, [], [])
+        if parity_blockers and audit.status == "complete":
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            db.commit()
+        blockers = _reconciliation_blockers(audit, decision_map, [], parity_blockers, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        return []
+        return [_to_audit_ready_view(r) for r in parity_blockers]
     blockers = _reconciliation_blockers(audit, decision_map, rows, [])
     if blockers:
         raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
@@ -973,6 +1251,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                     ref for ref in (_deserialize_json_list(row.document_evidence_refs) or []) if ref in evidence_ids
                 ]
                 or None,
+                affected_sections=[row.section_id],
+                where_evidence_found=[row.section_id],
+                where_disclosure_missing=[row.section_id],
                 citation_summary_text=_sanitize_published_text(row.citation_summary_text),
                 support_complete=_deserialize_bool_flag(row.support_complete),
                 omission_basis=_deserialize_bool_flag(row.omission_basis),
@@ -995,7 +1276,13 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 ],
             ))
         )
-    return [row for row in out if not _hydration_missing(row)]
+    published = [row for row in out if not _hydration_missing(row)]
+    published += _parity_blocker_rows(audit_id, decision_map, published, rows)
+    if any(r.classification == "publication_blocked" for r in published) and audit.status == "complete":
+        audit.status = "audit_incomplete"
+        db.add(audit)
+        db.commit()
+    return [_to_audit_ready_view(r) for r in published]
 
 
 @router.get("/audits/{audit_id}/analysis", response_model=list[AnalysisItemOut])

@@ -143,6 +143,17 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
 
     number = m.group(1)
     rest = m.group(2)
+    # Prefer explicit "Title: body" split when present.
+    if ":" in rest:
+        left, right = rest.split(":", 1)
+        left_words = left.strip().split()
+        right_words = right.strip().split()
+        if 1 <= len(left_words) <= 10 and len(right_words) >= 3:
+            heading = _clean_line(f"{number}. {' '.join(left_words)}")
+            body = _clean_line(" ".join(right_words))
+            if len(heading.split()) >= 2 and len(body.split()) >= 3:
+                return heading, body
+
     words = rest.split()
     if len(words) < 4:
         return None
