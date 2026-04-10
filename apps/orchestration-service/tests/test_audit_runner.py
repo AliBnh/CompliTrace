@@ -582,7 +582,7 @@ def test_systemic_evidence_refs_include_obligation_map_omission_marker():
     )
     assert omission_basis is True
     assert any(ref.startswith("section:") for ref in refs)
-    assert "obligation_map:legal_basis_present=not_visible" in refs
+    assert "coverage_check:legal_basis_present=not_visible_in_reviewed_sections" in refs
 
 
 def test_coverage_to_support_validator_requires_required_obligation_absence():
