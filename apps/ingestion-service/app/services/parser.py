@@ -53,6 +53,22 @@ SENTENCE_START_WORDS = {
     "should",
 }
 
+BODY_START_WORDS = {
+    "we",
+    "our",
+    "this",
+    "these",
+    "they",
+    "it",
+    "you",
+    "your",
+    "the",
+    "a",
+    "an",
+    "personal",
+    "users",
+}
+
 
 def _normalize_space(text: str) -> str:
     return MULTISPACE_RE.sub(" ", text).strip()
@@ -166,7 +182,13 @@ def split_numbered_heading_and_body(line: str) -> tuple[str, str] | None:
     cut: int | None = None
     for i, word in enumerate(words):
         norm = word.lower().strip(",.;:()")
-        if i >= 3 and norm in SENTENCE_START_WORDS:
+        next_norm = ""
+        if i + 1 < len(words):
+            next_norm = words[i + 1].lower().strip(",.;:()")
+        if i >= 2 and norm == "data" and next_norm in {"is", "are", "was", "were"} and len(words) - i >= 3:
+            cut = i
+            break
+        if i >= 1 and norm in BODY_START_WORDS and len(words) - i >= 3:
             cut = i
             break
 
