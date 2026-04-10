@@ -516,6 +516,79 @@ def test_get_findings_maps_controller_identity_contact_to_identity_issue_when_re
     assert identity.classification == "clear_non_compliance"
 
 
+def test_get_findings_does_not_409_when_persisted_rows_exist_but_missing_publish_families_are_blocked(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    persisted = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_legal_basis",
+        status="gap",
+        severity="high",
+        classification="clear_non_compliance",
+        finding_type="systemic",
+        publication_state="publishable",
+        publish_flag="yes",
+        primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+        citation_summary_text="summary",
+        source_scope="full_notice",
+        assertion_level="probable_document_gap",
+        confidence_overall=0.74,
+        remediation_note="Add lawful basis details.",
+        document_evidence_refs='["evi:policy:lb"]',
+        gap_reasoning="Fact: missing lawful basis. Law: Art 13/14. Breach: absent. Conclusion: gap.",
+    )
+    db_session.add(persisted)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=persisted.id,
+            chunk_id="lb-c1",
+            article_number="13",
+            paragraph_ref="1(c)",
+            article_title="Legal basis",
+            excerpt="Lawful basis disclosure is required.",
+        )
+    )
+    db_session.add(EvidenceRecord(evidence_id="evi:policy:lb", audit_id=audit.id, evidence_type="policy_section", source_ref="lb", text_excerpt="x"))
+    db_session.add(EvidenceRecord(evidence_id="evi:chunk:lb-c1", audit_id=audit.id, evidence_type="retrieval_chunk", source_ref="lb-c1", text_excerpt="Lawful basis disclosure is required.", article_number="13"))
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{'
+                '"legal_basis":{"status":"gap","publication_recommendation":"publish","reasoning":"legal basis missing"},'
+                '"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"contact missing"},'
+                '"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing"},'
+                '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing"},'
+                '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role ambiguity"},'
+                '"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"recipients missing"},'
+                '"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"purpose mapping missing"}'
+                '}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert any(r.section_id == "systemic:missing_legal_basis" for r in rows)
+    assert {r.section_id for r in rows if r.section_id.startswith("systemic:")} >= {
+        "systemic:missing_controller_contact",
+        "systemic:missing_transfer_notice",
+        "systemic:profiling_disclosure_gap",
+        "systemic:controller_processor_role_ambiguity",
+        "systemic:recipients_disclosure_gap",
+        "systemic:purpose_specificity_gap",
+    }
+
+
 def test_get_findings_keeps_article_mismatch_as_publication_blocker_not_absence_publishable(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(

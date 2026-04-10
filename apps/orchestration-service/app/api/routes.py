@@ -1440,10 +1440,6 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
         return [_to_audit_ready_view(r) for r in parity_blockers]
-    blockers = _reconciliation_blockers(audit, decision_map, rows, [])
-    if blockers:
-        raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-
     out: list[FindingOut] = []
     evidence_ids = known_evidence_ids
     seen: set[str] = set()
@@ -1529,6 +1525,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         )
     published = [row for row in out if not _hydration_missing(row)]
     published += _parity_blocker_rows(audit_id, decision_map, published, rows)
+    blockers = _reconciliation_blockers(audit, decision_map, rows, published)
+    if blockers:
+        raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
     if any(r.classification == "publication_blocked" for r in published) and audit.status == "complete":
         audit.status = "audit_incomplete"
         db.add(audit)
