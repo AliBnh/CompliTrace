@@ -2060,6 +2060,34 @@ def _serialize_json_list(values: list[str]) -> str:
     return json.dumps(unique, ensure_ascii=False)
 
 
+def _analysis_anchor_templates(issue: str | None) -> list[str]:
+    templates = {
+        "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
+        "missing_controller_identity": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
+        "missing_transfer_notice": ["GDPR Article 13(1)(f)", "GDPR Article 14(1)(f)", "GDPR Article 44", "GDPR Article 46"],
+        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)"],
+        "recipients_disclosure_gap": ["GDPR Article 13(1)(e)", "GDPR Article 14(1)(e)"],
+        "purpose_specificity_gap": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)", "GDPR Article 5(1)(b)"],
+        "missing_legal_basis": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)"],
+        "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
+        "missing_rights_notice": ["GDPR Article 13(2)(b)", "GDPR Article 14(2)(c)"],
+        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)"],
+    }
+    return templates.get(issue or "", [])
+
+
+def _normalize_analysis_anchors(issue: str | None, raw_anchors: str | None) -> str | None:
+    preferred = _analysis_anchor_templates(issue)
+    if not preferred:
+        return raw_anchors
+    parsed = _decode_json_list(raw_anchors)
+    if not parsed:
+        return _serialize_json_list(preferred)
+    norm = " ".join(a.lower() for a in parsed)
+    matched = [a for a in preferred if a.lower() in norm]
+    return _serialize_json_list(matched or preferred)
+
+
 def _decode_json_list(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -3127,6 +3155,7 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     for row in rows:
         publishable = row.publication_state == "publishable" if row.publication_state else row.publish_flag == "yes"
+        issue_type = _finding_issue_id(row)
         analysis = AuditAnalysisItem(
             audit_id=audit_id,
             section_id=row.section_id,
@@ -3140,7 +3169,7 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
                 if row.finding_type == "local"
                 else "candidate_issue"
             ),
-            issue_type=_finding_issue_id(row),
+            issue_type=issue_type,
             status_candidate=(
                 "not_applicable"
                 if row.status == "not applicable"
@@ -3173,10 +3202,10 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
                 if row.status in {"gap", "partial"}
                 else "candidate_compliant"
             ),
-            candidate_issue=_finding_issue_id(row),
+            candidate_issue=issue_type,
             policy_evidence_excerpt=row.policy_evidence_excerpt,
             legal_requirement_candidate=row.legal_requirement,
-            article_candidates=row.primary_legal_anchor,
+            article_candidates=_normalize_analysis_anchors(issue_type, row.primary_legal_anchor),
             retrieval_summary=row.citation_summary_text,
             qualification_summary=row.legal_requirement,
             evidence_sufficiency="weak" if row.status == "needs review" else "sufficient",

@@ -33,6 +33,7 @@ from app.services.audit_runner import (
     _targeted_notice_query,
     _claim_has_primary_anchor,
     _normalize_severity,
+    _normalize_analysis_anchors,
     _finding_signature,
     _ensure_reasoning_chain,
     _clean_remediation_legal_mismatches,
@@ -357,6 +358,13 @@ def test_article_int_parsing():
     assert _article_int("13") == 13
     assert _article_int("Article 46") == 46
     assert _article_int(None) is None
+
+
+def test_normalize_analysis_anchors_rewrites_mismatched_transfer_family():
+    anchors = _normalize_analysis_anchors("missing_transfer_notice", '["GDPR Article 13(1)(a)"]')
+    assert anchors is not None
+    assert "13(1)(f)" in anchors
+    assert "14(1)(f)" in anchors
 
 
 def test_paragraph_ref_compatible_tolerates_format_variants():

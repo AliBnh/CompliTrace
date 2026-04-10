@@ -524,8 +524,10 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
         assert row.confidence_synthesis is not None
         assert row.severity_rationale is not None
         assert row.gap_reasoning is not None
+        assert row.document_evidence_refs is not None
         assert row.citations
         assert all(c.evidence_id is not None and c.source_type is not None and c.source_ref is not None for c in row.citations)
+        assert all(c.source_type != "policy_summary" for c in row.citations)
 
 
 def test_sanitize_review_text_strips_internal_markers_when_not_debug():
@@ -801,7 +803,39 @@ def test_anchor_sanity_corrects_mismatched_transfer_anchor_family(db_session: Se
             finding_type="systemic",
             publication_state="blocked",
             primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+            document_evidence_refs='["evi:policy:transfer"]',
             remediation_note="Add transfer safeguards disclosure.",
+        )
+    )
+    db_session.flush()
+    transfer_finding = db_session.query(Finding).filter(Finding.audit_id == audit.id, Finding.section_id == "systemic:missing_transfer_notice").first()
+    db_session.add(
+        FindingCitation(
+            finding_id=transfer_finding.id,
+            chunk_id="transfer-anchor-chunk",
+            article_number="44",
+            paragraph_ref=None,
+            article_title="Transfers",
+            excerpt="transfer safeguards text",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:policy:transfer",
+            audit_id=audit.id,
+            evidence_type="policy_section",
+            source_ref="transfer",
+            text_excerpt="transfer evidence",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:transfer-anchor-chunk",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="transfer-anchor-chunk",
+            text_excerpt="transfer safeguards text",
+            article_number="44",
         )
     )
     db_session.commit()
@@ -814,6 +848,30 @@ def test_anchor_sanity_corrects_mismatched_transfer_anchor_family(db_session: Se
 
 def test_projected_reasoning_avoids_internal_engine_concepts(db_session: Session):
     audit = _create_audit(db_session, status="complete")
+    backing = Finding(
+        audit_id=audit.id,
+        section_id="systemic:purpose_specificity_gap",
+        status="gap",
+        severity="medium",
+        classification="probable_gap",
+        finding_type="systemic",
+        publication_state="blocked",
+        primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+        document_evidence_refs='["evi:policy:purpose"]',
+        remediation_note="Map categories to purposes.",
+    )
+    db_session.add(backing)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=backing.id,
+            chunk_id="purpose-chunk",
+            article_number="13",
+            paragraph_ref="1(c)",
+            article_title="Purpose mapping",
+            excerpt="purpose text",
+        )
+    )
     db_session.add(
         Finding(
             audit_id=audit.id,
@@ -829,6 +887,8 @@ def test_projected_reasoning_avoids_internal_engine_concepts(db_session: Session
             finding_level="none",
         )
     )
+    db_session.add(EvidenceRecord(evidence_id="evi:policy:purpose", audit_id=audit.id, evidence_type="policy_section", source_ref="purpose", text_excerpt="purpose evidence"))
+    db_session.add(EvidenceRecord(evidence_id="evi:chunk:purpose-chunk", audit_id=audit.id, evidence_type="retrieval_chunk", source_ref="purpose-chunk", text_excerpt="purpose text", article_number="13"))
     db_session.commit()
     rows = get_findings(audit.id, db_session)
     assert rows
@@ -840,6 +900,30 @@ def test_projected_reasoning_avoids_internal_engine_concepts(db_session: Session
 
 def test_controller_contact_published_reasoning_uses_fact_rule_application(db_session: Session):
     audit = _create_audit(db_session, status="complete")
+    backing = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_controller_contact",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="systemic",
+        publication_state="blocked",
+        primary_legal_anchor='["GDPR Article 13(1)(a)"]',
+        document_evidence_refs='["evi:policy:controller"]',
+        remediation_note="Add privacy contact details.",
+    )
+    db_session.add(backing)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=backing.id,
+            chunk_id="controller-chunk",
+            article_number="13",
+            paragraph_ref="1(a)",
+            article_title="Controller contact",
+            excerpt="controller details",
+        )
+    )
     db_session.add(
         Finding(
             audit_id=audit.id,
@@ -855,6 +939,8 @@ def test_controller_contact_published_reasoning_uses_fact_rule_application(db_se
             finding_level="none",
         )
     )
+    db_session.add(EvidenceRecord(evidence_id="evi:policy:controller", audit_id=audit.id, evidence_type="policy_section", source_ref="controller", text_excerpt="company named without contact route"))
+    db_session.add(EvidenceRecord(evidence_id="evi:chunk:controller-chunk", audit_id=audit.id, evidence_type="retrieval_chunk", source_ref="controller-chunk", text_excerpt="controller details", article_number="13"))
     db_session.commit()
     rows = get_findings(audit.id, db_session)
     controller = next(r for r in rows if "controller_contact" in r.section_id)

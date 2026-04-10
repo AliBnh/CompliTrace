@@ -372,18 +372,8 @@ def _project_published_findings_from_map(
             if ev is not None
         ]
         if not projected_chunk_citations and not projected_fallback_citations:
-            projected_fallback_citations = [
-                CitationOut(
-                    chunk_id=f"policy-summary:{issue}",
-                    evidence_id=None,
-                    source_type="policy_summary",
-                    source_ref=issue,
-                    article_number="13",
-                    paragraph_ref=None,
-                    article_title="Policy summary",
-                    excerpt=_render_published_evidence_excerpt(None, reason, issue_hint=issue),
-                )
-            ]
+            item["blocker_reason"] = "missing evidence-linked citations for publishable specialist/core family"
+            continue
         rem_note = (
             _sanitize_published_text(backing.remediation_note)
             if backing and backing.remediation_note
@@ -432,6 +422,13 @@ def _project_published_findings_from_map(
                 citations=(projected_chunk_citations or projected_fallback_citations),
         )
         projected = _fill_required_published_fields(projected)
+        if family in {"transfer", "profiling", "role_ambiguity", "recipients", "purpose_mapping"}:
+            if not projected.document_evidence_refs:
+                item["blocker_reason"] = "missing document evidence refs for specialist publishable finding"
+                continue
+            if not projected.citations or any(c.evidence_id is None or c.source_type is None or c.source_ref is None for c in projected.citations):
+                item["blocker_reason"] = "specialist finding lacks fully linked citation objects"
+                continue
         if not _hydration_missing(projected):
             out.append(projected)
     return out
@@ -506,9 +503,22 @@ def _build_richer_gap_reasoning(
     safe_conclusion = _sanitize_published_text(conclusion) or "The required disclosure element is not sufficiently addressed."
     safe_remediation = _sanitize_published_text(remediation) or "Provide explicit compliant notice wording."
     return (
-        f"section={section_id}; issue={issue or 'unspecified'}; fact={safe_fact}; "
-        f"rule={safe_rule}; application=apply rule to visible section text and evidence package; "
-        f"conclusion={safe_conclusion}; remediation={safe_remediation}"
+        f"section={section_id}; issue={issue or 'unspecified'}; "
+        f"gdpr_applicability=processing/transparency context triggers GDPR notice duties; "
+        f"obligation={safe_rule}; notice_observation={safe_fact}; "
+        f"conclusion_basis={safe_conclusion}; remediation={safe_remediation}"
+    )
+
+
+def _review_reasoning(reason: str | None, family_or_duty: str | None) -> str | None:
+    base = _sanitize_external_reasoning(reason)
+    if not base:
+        return base
+    return (
+        f"gdpr_applicability=the reviewed notice content triggers GDPR transparency analysis for {family_or_duty or 'this duty'}; "
+        f"obligation=the relevant GDPR disclosure duty must be explicitly stated; "
+        f"notice_observation={base}; "
+        "conclusion_basis=this observation determines the final review disposition."
     )
 
 
@@ -1226,7 +1236,7 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
                     duty=duty,
                     triggered=bool(item.get("triggered", True)),
                     final_disposition=final_status,
-                    reason=_sanitize_review_text(item.get("reasoning"), debug=debug),
+                    reason=_sanitize_review_text(_review_reasoning(item.get("reasoning"), duty), debug=debug),
                     source_scope_dependency=str(item.get("source_scope_dependency") or "high"),
                     publication_recommendation=str(item.get("publication_recommendation") or "internal_only"),
                 )
@@ -1252,7 +1262,7 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
                     family=label,
                     triggered=bool(item.get("triggered", item.get("status") != "satisfied")),
                     final_disposition=item.get("status"),
-                    reason=_sanitize_review_text(item.get("reasoning"), debug=debug),
+                    reason=_sanitize_review_text(_review_reasoning(item.get("reasoning"), family), debug=debug),
                     source_scope_dependency=str(item.get("source_scope_dependency") or "low"),
                     publication_recommendation=str(item.get("publication_recommendation") or "internal_only"),
                 )
