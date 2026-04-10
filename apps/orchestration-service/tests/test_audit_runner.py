@@ -335,8 +335,8 @@ def test_final_disposition_special_category_ambiguous_sensitive_language_not_ove
     disposition = _build_final_disposition_map([], sections, {})
     special = disposition["special_category"]
     assert special["triggered"] is True
-    assert special["status"] == "not_assessable"
-    assert special["publication_recommendation"] == "internal_only"
+    assert special["status"] == "referenced_but_unseen"
+    assert special["publication_recommendation"] == "publish"
 
 
 def test_final_disposition_special_category_true_art9_without_condition_is_gap():

@@ -2271,10 +2271,10 @@ def _add_anchor_citations(db: Session, systemic_row: Finding, anchors: list[str]
         db.add(
             FindingCitation(
                 finding_id=systemic_row.id,
-                chunk_id=f"systemic-anchor:{systemic_row.section_id}:{idx}",
+                chunk_id=f"coverage_check:{systemic_row.section_id}:{idx}",
                 article_number=anchor,
                 paragraph_ref=None,
-                article_title="Deterministic systemic legal anchor",
+                article_title="Derived systemic legal anchor",
                 excerpt=summary,
             )
         )
@@ -2737,7 +2737,7 @@ def _build_final_disposition_map(
                 elif category_coverage > 0 and broad_only_sections > 0:
                     status, reason = "gap", "some category sections use broad/catch-all purposes without clear category-to-purpose mapping"
                 elif category_coverage == 0 and _contains_any(corpus, {"data category", "categories of personal data"}):
-                    status, reason = "not_assessable", "purpose mapping family triggered but category-level purpose statements are not visible in reviewed excerpts"
+                    status, reason = "referenced_but_unseen", "purpose mapping signals are present, but category-level mapping text appears outside reviewed excerpts"
             elif family == "special_category":
                 text = corpus
                 true_art9_indicators = {
@@ -2806,10 +2806,10 @@ def _build_final_disposition_map(
                     status, reason = "satisfied", "policy states no routine special-category collection (incidental/avoidance posture)"
                     specialist_severity = "low"
                 elif has_ambiguous_sensitive and not has_true_art9:
-                    status, reason = "not_assessable", "only ambiguous sensitive-language is present without clear Article 9-category processing"
+                    status, reason = "referenced_but_unseen", "ambiguous sensitive-language suggests possible special-category context, but reviewed excerpts do not confirm Article 9 processing"
                     specialist_severity = "medium"
         if triggered and status == "satisfied" and family != "special_category":
-            status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
+            status, reason = "referenced_but_unseen", "specialist trigger is visible, but reviewed excerpts do not include enough text to confirm full disclosure outcome"
         families[family] = {
             "status": status,
             "reasoning": reason,
