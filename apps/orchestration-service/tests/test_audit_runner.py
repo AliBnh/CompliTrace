@@ -792,6 +792,46 @@ def test_partner_review_promotes_not_assessable_retention_violation():
         assert updated.artifact_role == "publishable_finding"
 
 
+def test_partner_review_suppresses_controller_missing_when_identity_disclosed():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        identity_row = Finding(
+            audit_id=audit.id,
+            section_id="sec-intro",
+            status="partial",
+            severity="medium",
+            classification="probable_gap",
+            finding_type="local",
+            publish_flag="yes",
+            policy_evidence_excerpt='Orion Data Systems, Inc. ("Company", "we", "us") provides services.',
+            gap_note="context row",
+        )
+        controller_row = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_controller_identity",
+            status="gap",
+            severity="high",
+            classification="systemic_violation",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            gap_note="The notice does not clearly identify the controller legal entity and contact route.",
+        )
+        db.add(identity_row)
+        db.add(controller_row)
+        db.commit()
+        _partner_review_pass(db, audit.id)
+        updated = db.get(Finding, controller_row.id)
+        assert updated.publish_flag == "no"
+        assert updated.classification == "no_issue"
+        assert updated.publication_state == "internal_only"
+
+
 def test_explicit_violation_hits_detect_consent_inferred_from_interactions():
     hits = _explicit_violation_hits("Consent is inferred from interactions and continued usage of the service.")
     assert any(key == "invalid_consent" for key, _ in hits)

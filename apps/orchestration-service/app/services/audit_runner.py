@@ -3822,6 +3822,10 @@ def _final_publication_validator(
 def _partner_review_pass(db: Session, audit_id: str) -> None:
     reviewer_pass_total.inc()
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    corpus_text = " ".join(_norm(f"{r.policy_evidence_excerpt or ''} {r.gap_note or ''} {r.remediation_note or ''}") for r in rows)
+    controller_identity_present_doc = any(
+        t in corpus_text for t in {"inc.", "limited", "llc", "corp", "corporation", "registered office", "registered address"}
+    ) or bool(re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd|limited|corporation|corp)\b", corpus_text))
     systemic_issue_keys = {row.section_id.split("systemic:", 1)[1] for row in rows if row.section_id.startswith("systemic:")}
     seen_root_keys: dict[str, str] = {}
     seen_supporting_pairs: set[tuple[str, str]] = set()
@@ -3868,6 +3872,19 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         ),
     }
     for row in rows:
+        issue_id = _finding_issue_id(row)
+        if issue_id in {"missing_controller_identity", "missing_controller_contact"} and controller_identity_present_doc:
+            row.status = "not applicable"
+            row.classification = "no_issue"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            row.gap_note = "Controller identity is disclosed in the provided document; controller-missing issue suppressed by binding reconciliation."
+            row.remediation_note = None
+            row.confidence = max(row.confidence or 0.8, 0.8)
+            continue
         if row.finding_type is None:
             row.finding_type = "local"
         if row.finding_type == "supporting_evidence":
