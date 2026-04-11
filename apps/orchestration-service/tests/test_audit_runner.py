@@ -567,6 +567,26 @@ def test_final_disposition_purpose_mapping_family_non_silent_for_broad_categorie
     assert purpose["status"] in {"gap", "not_assessable"}
 
 
+def test_final_disposition_article14_source_requires_source_categories_and_timing():
+    sections = [
+        SectionData(
+            id="sec-a14",
+            section_order=1,
+            section_title="Data sources",
+            content=(
+                "We receive data from third parties, including partners, data aggregators, and public records."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    disposition = _build_final_disposition_map([], sections, {})
+    article14 = disposition["article14_source"]
+    assert article14["triggered"] is True
+    assert article14["status"] == "gap"
+    assert "timing duties" in str(article14["reasoning"])
+
+
 def test_final_disposition_special_category_ambiguous_sensitive_language_not_overcalled():
     sections = [
         SectionData(

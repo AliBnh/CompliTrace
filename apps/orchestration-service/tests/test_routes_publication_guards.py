@@ -358,6 +358,62 @@ def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publish
     assert finding.gap_note is not None and "transfer safeguards missing" in finding.gap_note
 
 
+def test_get_findings_uses_blocker_not_absence_when_reasoning_indicates_invalidity(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"invalid safeguards and unlawful model",'
+                '"missing_requirements":["document_evidence_refs","citations"]}}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert len(rows) == 1
+    assert rows[0].classification == "publication_blocked"
+    assert rows[0].publication_blocked is True
+
+
+def test_get_findings_emits_article14_absence_row_for_unmaterialized_article14_family(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{"article14_source":{"status":"gap","publication_recommendation":"publish","reasoning":"source categories missing",'
+                '"missing_requirements":["document_evidence_refs","citations"]}}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert len(rows) == 1
+    assert rows[0].section_id == "systemic:article_14_indirect_collection_gap"
+    assert rows[0].classification == "probable_gap"
+
+
 def test_get_findings_projects_controller_identity_contact_family(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     backing = Finding(

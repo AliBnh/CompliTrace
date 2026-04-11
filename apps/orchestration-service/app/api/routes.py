@@ -985,12 +985,43 @@ def _absence_mode_requirement(issue: str) -> list[str]:
         "missing_controller_contact": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
         "missing_transfer_notice": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)", "GDPR Arts. 44-46"],
         "profiling_disclosure_gap": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)", "GDPR Art. 22"],
-        "article_14_indirect_collection_gap": ["GDPR Art. 14(1)", "GDPR Art. 14(2)", "GDPR Art. 14(3)"],
+        "article_14_indirect_collection_gap": ["GDPR Art. 14(1)", "GDPR Art. 14(2)", "GDPR Art. 14(3)", "GDPR Art. 14(5)"],
         "controller_processor_role_ambiguity": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
         "recipients_disclosure_gap": ["GDPR Art. 13(1)(e)", "GDPR Art. 14(1)(e)"],
         "purpose_specificity_gap": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)", "GDPR Art. 5(1)(b)"],
     }
     return mapping.get(issue, ["GDPR Art. 13", "GDPR Art. 14"])
+
+
+def _absence_proof_is_secondary_eligible(
+    issue: str,
+    reasoning: str,
+    missing_requirements: list[str],
+) -> bool:
+    invalidity_markers = {
+        "inferred consent",
+        "continued use",
+        "indefinite retention",
+        "without human intervention",
+        "similarly significant",
+        "legal effect",
+        "invalid",
+        "unlawful",
+    }
+    if any(marker in reasoning for marker in invalidity_markers):
+        return False
+    # Absence-proof should only backfill evidentiary-linkage style gaps, not legal-qualification failures.
+    non_linkage_fields = {
+        "citations.article_primary_fit",
+        "citations.article_disallowed",
+        "primary_legal_anchor",
+        "legal_requirement",
+        "gap_reasoning.flbc",
+    }
+    if set(missing_requirements) & non_linkage_fields:
+        return False
+    # Keep Article 14 family first-class but still absence-secondary only.
+    return issue in PUBLISHABLE_FALLBACK_ISSUES
 
 
 def _absence_proof_publishable_row(
@@ -1300,7 +1331,12 @@ def _parity_blocker_rows(
                 "citations.source_ref",
             ]
         article_mismatch = {"citations.article_primary_fit", "citations.article_disallowed"} & set(missing_requirements)
-        if issue in PUBLISHABLE_FALLBACK_ISSUES and not article_mismatch:
+        secondary_absence_ok = _absence_proof_is_secondary_eligible(
+            issue,
+            str(item.get("reasoning") or "").lower(),
+            missing_requirements,
+        )
+        if secondary_absence_ok and not article_mismatch:
             blockers.append(
                 _absence_proof_publishable_row(
                     audit_id=audit_id,

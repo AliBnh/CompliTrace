@@ -213,7 +213,7 @@ CORE_DUTY_OBLIGATION_KEYS: dict[str, str] = {
 SPECIALIST_TRIGGER_RULES: dict[str, tuple[set[str], str]] = {
     "missing_transfer_notice": (THIRD_COUNTRY_TRANSFER_SIGNALS, "triggered_transfer_family"),
     "profiling_disclosure_gap": ({"profil", "automated decision", "scoring", "segmentation"}, "triggered_profiling_family"),
-    "article_14_indirect_collection": (
+    "article_14_indirect_collection_gap": (
         {"from third parties", "obtained from third parties", "received from third parties", "from external sources"},
         "triggered_article_14_indirect_collection",
     ),
@@ -2851,6 +2851,48 @@ def _build_final_disposition_map(
                 )
                 if mixed_roles and not clear_allocation:
                     status, reason = "gap", "mixed controller/processor role signals are present without clear allocation wording"
+            elif family == "article14_source":
+                indirect_signals = _contains_any(
+                    corpus,
+                    {
+                        "partner",
+                        "partners",
+                        "data aggregator",
+                        "aggregator",
+                        "public records",
+                        "external datasets",
+                        "third-party source",
+                        "indirectly",
+                        "from other sources",
+                    },
+                )
+                source_category_disclosed = _contains_any(
+                    corpus,
+                    {
+                        "categories of sources",
+                        "source categories",
+                        "sources of personal data",
+                        "obtained from",
+                    },
+                )
+                article14_timing_disclosed = _contains_any(
+                    corpus,
+                    {
+                        "within one month",
+                        "at the latest within one month",
+                        "at first communication",
+                        "before disclosure to another recipient",
+                        "article 14(3)",
+                    },
+                )
+                if indirect_signals and (not source_category_disclosed or not article14_timing_disclosed):
+                    status = "gap"
+                    if not source_category_disclosed and not article14_timing_disclosed:
+                        reason = "indirect collection is visible but source categories and Article 14 timing duties are not clearly disclosed"
+                    elif not source_category_disclosed:
+                        reason = "indirect collection is visible but source categories are not clearly disclosed"
+                    else:
+                        reason = "indirect collection is visible but Article 14 timing duties are not clearly disclosed"
             elif family == "recipients":
                 third_party_mentions = _contains_any(
                     corpus,
