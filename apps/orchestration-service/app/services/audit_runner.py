@@ -1481,6 +1481,39 @@ def _claim_issue_ids(claim_types: set[str]) -> set[str]:
     return {_claim_type_to_issue_id(c) for c in claim_types}
 
 
+def _has_explicit_gdpr_fact(text: str) -> bool:
+    norm = _norm(text)
+    explicit_fact_signals = {
+        "consent",
+        "lawful basis",
+        "legal basis",
+        "retention",
+        "storage period",
+        "kept for",
+        "recipient",
+        "share",
+        "third party",
+        "third-party",
+        "outside the eea",
+        "third country",
+        "international transfer",
+        "profiling",
+        "automated decision",
+        "without human intervention",
+        "data source",
+        "partner",
+        "cookies",
+        "tracking",
+        "supervisory authority",
+        "complaint",
+        "right to access",
+        "rectification",
+        "erasure",
+        "objection",
+    }
+    return any(signal in norm for signal in explicit_fact_signals)
+
+
 def _most_specific_article_for_claim(claim_type: str, available_articles: set[int]) -> int | None:
     preference = {
         "legal_basis": [6, 13, 14, 5],
@@ -1502,7 +1535,8 @@ def _most_specific_article_for_claim(claim_type: str, available_articles: set[in
 def _applicability_memo(section: SectionData, claim_types: set[str], posture: DocumentPosture) -> ApplicabilityMemo:
     mode = _collection_mode(section)
     visibility = "visible"
-    if len(section.content.strip()) < 140:
+    explicit_fact_visible = _has_explicit_gdpr_fact(f"{section.section_title}. {section.content}")
+    if len(section.content.strip()) < 140 and not explicit_fact_visible:
         visibility = "not_assessable"
     elif any(token in _norm(section.content) for token in {"may", "might", "where applicable"}):
         visibility = "inferred"
@@ -4211,12 +4245,24 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             "rights",
             "complaint",
         }:
+            explicit_fact_visible = _has_explicit_gdpr_fact(f"{section.section_title}. {section.content}")
             if f.status in {"gap", "partial"} and any(i["candidate_issue_type"].startswith("missing_") for i in candidate_issues):
                 f.status = "partial"
                 f.severity = "medium"
                 f.gap_note = (
                     "Probable gap: core notice element appears missing, but direct vs indirect source mode is not fully resolved "
                     f"({applicability['unresolved_trigger']})."
+                )
+            elif explicit_fact_visible:
+                f = LlmFinding(
+                    status="partial",
+                    severity="medium",
+                    gap_note=(
+                        "Probable gap from explicit GDPR-relevant disclosure signals, but source-mode applicability remains unresolved "
+                        f"({applicability['unresolved_trigger']})."
+                    ),
+                    remediation_note="Clarify source-collection context and complete the required notice disclosure mapping.",
+                    citations=valid_citations,
                 )
             else:
                 f = LlmFinding(
@@ -4337,10 +4383,20 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     citations=[],
                 )
                 valid_citations = []
-                classification = "not_assessable"
+                classification = "diagnostic_internal_only"
                 confidence = 0.4
             else:
                 seen_signatures[signature] = section.id
+
+        if classification == "not_assessable" and _has_explicit_gdpr_fact(f"{section.section_title}. {section.content}"):
+            classification = "probable_gap"
+            if f.status == "needs review":
+                f.status = "partial"
+                f.severity = f.severity or "medium"
+                f.gap_note = (
+                    "Probable GDPR gap: explicit processing/legal signals are present, so finding is not treated as not-assessable."
+                )
+                f.remediation_note = f.remediation_note or "Provide complete, mapped disclosure text to confirm final legal posture."
 
         finding_row = Finding(
             audit_id=audit.id,
