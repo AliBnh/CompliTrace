@@ -114,6 +114,8 @@ export function FindingsPage() {
   const orderedReviewItems = useMemo(() => {
     return [...reviewItems]
       .filter((item) => !item.section_id.startsWith('ledger:'))
+      .filter((item) => !item.section_id.startsWith('review:'))
+      .filter((item) => Boolean(sectionsById[item.section_id]))
       .filter((item) => {
         if (item.item_kind !== 'review_block') return true
         return (item.final_disposition ?? '').toLowerCase() !== 'satisfied'
@@ -128,7 +130,7 @@ export function FindingsPage() {
         const r = rank(a) - rank(b)
         return r !== 0 ? r : a.id.localeCompare(b.id)
       })
-  }, [reviewItems])
+  }, [reviewItems, sectionsById])
 
   const orderedAnalysisItems = useMemo(() => {
     return [...analysisItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
@@ -298,10 +300,7 @@ export function FindingsPage() {
 
 function displaySectionTitle(finding: { section_id: string }, sectionsById: Record<string, SectionOut>): string {
   const section = sectionsById[finding.section_id]
-  if (section) return section.section_title
-  if (finding.section_id === 'review:core_duties') return 'Review block: Core duties'
-  if (finding.section_id === 'review:specialist_families') return 'Review block: Specialist families'
-  if (finding.section_id.startsWith('review:')) return `Review block: ${humanize(finding.section_id.replace('review:', ''))}`
+  if (section) return section.section_title || `Section ${section.section_order}`
   if (finding.section_id.startsWith('systemic:')) {
     const issueId = finding.section_id.split('systemic:')[1]
     return `Systemic: ${SYSTEMIC_LABELS[issueId] ?? humanize(issueId)}`
