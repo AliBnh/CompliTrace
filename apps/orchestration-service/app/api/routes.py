@@ -1344,6 +1344,31 @@ def _to_audit_ready_view(row: FindingOut) -> FindingOut:
     return row
 
 
+def _to_audit_ready_view(row: FindingOut) -> FindingOut:
+    row.publish_flag = None
+    row.artifact_role = None
+    row.finding_level = None
+    row.publication_state = None
+    row.confidence = None
+    row.confidence_evidence = None
+    row.confidence_applicability = None
+    row.confidence_synthesis = None
+    row.missing_from_section = None
+    row.missing_from_document = None
+    row.not_visible_in_excerpt = None
+    row.obligation_under_review = None
+    row.collection_mode = None
+    row.applicability_status = None
+    row.visibility_status = None
+    row.section_vs_document_scope = None
+    row.missing_fact_if_unresolved = None
+    row.support_complete = None
+    row.omission_basis = None
+    row.source_scope_confidence = None
+    row.referenced_unseen_sections = None
+    return row
+
+
 def _reconciliation_blockers(
     audit: Audit,
     decision_map: dict[str, dict[str, str | bool | list[str] | float]] | None,
