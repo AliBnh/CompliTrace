@@ -549,6 +549,11 @@ def _explicit_violation_library() -> dict[str, dict[str, object]]:
             "articles": ["Art. 13(2)(f)", "Art. 14(2)(g)", "Art. 22"],
             "issue": "profiling_disclosure_gap",
         },
+        "recipient_structure_missing": {
+            "patterns": {"partners and affiliates", "selected partners", "third parties for business purposes"},
+            "articles": ["Art. 13(1)(e)", "Art. 14(1)(e)"],
+            "issue": "recipients_disclosure_gap",
+        },
     }
 
 
@@ -3978,7 +3983,11 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                     row.remediation_note = "Re-map fact pattern to the correct GDPR article family before publication."
                     row.confidence = min(row.confidence or 0.4, 0.4)
                     continue
-        if key in seen_root_keys and not row.section_id.startswith("systemic:"):
+        if (
+            key in seen_root_keys
+            and not row.section_id.startswith("systemic:")
+            and row.classification not in {"clear_non_compliance", "probable_gap"}
+        ):
             row.status = "not applicable"
             row.classification = "supporting_evidence"
             row.finding_type = "supporting_evidence"
@@ -4671,7 +4680,13 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 )
         explicit_after_classification = _explicit_violation_hits(f"{section.section_title}. {section.content} {f.gap_note or ''}")
         if explicit_after_classification:
-            hard_violation_keys = {"invalid_consent", "unlawful_retention_wording"}
+            hard_violation_keys = {
+                "invalid_consent",
+                "unlawful_retention_wording",
+                "weak_transfer_safeguards",
+                "profiling_without_required_explanation",
+                "recipient_structure_missing",
+            }
             first_key = explicit_after_classification[0][0]
             if first_key in hard_violation_keys or classification in {"not_assessable", "diagnostic_internal_only", "retrieval_failure_internal_only"}:
                 classification = "clear_non_compliance"
