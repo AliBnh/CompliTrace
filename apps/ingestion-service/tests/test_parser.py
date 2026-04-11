@@ -172,9 +172,8 @@ def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypa
 
     monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
     sections = parse_pdf_into_sections("dummy.pdf")
-    assert len(sections) == 2
-    assert sections[0].section_title == "1. Introduction and Scope"
-    assert sections[1].section_title == "1.1 Purpose of this Policy"
+    assert len(sections) == 1
+    assert sections[0].section_title == "1.1 Purpose of this Policy"
 
 
 def test_parse_pdf_into_sections_keeps_decimal_subheading_without_extra_dot(monkeypatch):
@@ -270,12 +269,12 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
     titles = [s.section_title for s in sections]
     by_title = {s.section_title: s.content for s in sections}
 
-    assert "1. Introduction" in titles
-    assert "2. Categories of Data Collected" in titles
-    assert "3. Information Processing" in titles
-    assert "4. Legal Basis for Processing" in titles
-    assert "Enterprise Privacy Policy" in titles
-    assert "Open Data Synthesis, Inc." in by_title["Enterprise Privacy Policy"]
+    assert "Open Data Synthesis, Inc." in titles
+    assert "Enterprise Privacy Policy" in by_title["Open Data Synthesis, Inc."]
+    assert "1. Introduction" not in titles
+    assert "2. Categories of Data Collected" not in titles
+    assert "3. Information Processing" not in titles
+    assert "4. Legal Basis for Processing" not in titles
     assert "2.1 Identifiers" in titles
     assert "2.2 Technical Data" in titles
     assert "3.1 Service Delivery" in titles
@@ -289,3 +288,44 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
     assert "This includes system logs" in by_title["2.2 Technical Data"]
     assert "processed to enable authentication and access management" in by_title["3.1 Service Delivery"]
     assert all(". ." not in title for title in titles)
+
+
+def test_parse_pdf_header_preserves_company_first_line_and_metadata_line_breaks(monkeypatch):
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_text(self, _mode: str) -> str:
+            return self._text
+
+    class _FakeDoc(list):
+        pass
+
+    class _FakeFitz:
+        @staticmethod
+        def open(_path: str):
+            return _FakeDoc(
+                [
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "Orion Data Systems, Inc.",
+                                "Enterprise Privacy Policy",
+                                "Effective Date: January 1, 2026 | Last Updated: January 1, 2026",
+                                "Registered Address: 1200 Market Street, Suite 400, San Francisco, CA, USA",
+                                "Contact: privacy@oriondata.com",
+                                "1. Introduction",
+                                "1.1 Overview Orion runs enterprise data services.",
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
+    sections = parse_pdf_into_sections("dummy.pdf")
+    header = sections[0]
+    assert header.section_title == "Orion Data Systems, Inc."
+    assert "Enterprise Privacy Policy" in header.content
+    assert "\n" in header.content
+    assert all(not (s.section_title == "1. Introduction" and s.content == "") for s in sections)

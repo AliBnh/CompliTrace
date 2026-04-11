@@ -282,15 +282,35 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
     refined: list[ParsedSection] = []
 
     for sec in sections:
-        content = _remove_boilerplate_phrases(sec.content, boilerplate_lines)
+        preamble_markers = ("effective date", "last updated", "registered address", "contact:")
+        is_preamble_block = (
+            sec.section_order == 1
+            and not SECTION_NUM_RE.match(sec.section_title)
+            and ("\n" in sec.content or any(marker in sec.content.lower() for marker in preamble_markers))
+        )
+        content = sec.content.strip() if is_preamble_block else _remove_boilerplate_phrases(sec.content, boilerplate_lines)
         title = _normalize_section_title(sec.section_title)
 
         if not content:
+            # Preserve literal-layout intent by avoiding synthetic empty numbered heading objects.
+            if SECTION_NUM_RE.match(title):
+                continue
             refined.append(
                 ParsedSection(
                     section_order=0,
                     section_title=title,
                     content="",
+                    page_start=sec.page_start,
+                    page_end=sec.page_end,
+                )
+            )
+            continue
+        if is_preamble_block:
+            refined.append(
+                ParsedSection(
+                    section_order=0,
+                    section_title=title,
+                    content=content,
                     page_start=sec.page_start,
                     page_end=sec.page_end,
                 )
@@ -372,12 +392,9 @@ def _commit_section(
         header_lines = [_clean_line(line) for line in content_lines if _clean_line(line)]
         if not header_lines:
             return
-        if len(header_lines) >= 2:
-            normalized_title = header_lines[1]
-            content = _clean_line(" ".join([header_lines[0], *header_lines[2:]]))
-        else:
-            normalized_title = header_lines[0]
-            content = ""
+        # Preserve top-line identity literally as first line, and keep metadata lines as line-separated content.
+        normalized_title = header_lines[0]
+        content = "\n".join(header_lines[1:]) if len(header_lines) > 1 else ""
         sections.append(
             ParsedSection(
                 section_order=len(sections) + 1,
