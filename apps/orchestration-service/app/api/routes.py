@@ -424,7 +424,7 @@ def _project_published_findings_from_map(
             )
             for ref in projected_evidence_ids
             for ev in [((evidence_by_id or {}).get(ref))]
-            if ev is not None
+            if _is_allowed_real_quote_evidence(ev)
         ]
         derived_citation_refs = [c.evidence_id for c in (projected_chunk_citations or projected_fallback_citations) if c.evidence_id]
         projected_evidence_ids = list(dict.fromkeys(projected_evidence_ids + [ref for ref in derived_citation_refs if isinstance(ref, str)]))
@@ -717,7 +717,31 @@ def _project_section_level_findings(
 
 def _is_real_evidence_ref(value: str) -> bool:
     token = (value or "").strip().lower()
-    return bool(token) and not token.startswith("systemic-anchor:")
+    return bool(token) and not token.startswith("systemic-anchor:") and not token.startswith("evi:synthetic")
+
+
+def _is_allowed_real_quote_evidence(evidence: EvidenceRecord | None) -> bool:
+    if evidence is None:
+        return False
+    source_type = (evidence.evidence_type or "").strip().lower()
+    if "synthetic" in source_type:
+        return False
+    if source_type == "retrieval_chunk":
+        return True
+    return source_type in {"notice_quote", "section_quote", "policy_quote", "document_quote"}
+
+
+def _citation_has_allowed_evidence_mode(c: CitationOut) -> bool:
+    source_type = (c.source_type or "").strip().lower()
+    evidence_id = (c.evidence_id or "").strip().lower()
+    if not source_type:
+        return False
+    if source_type == "absence_trace":
+        source_ref = (c.source_ref or "").lower()
+        return "sections=" in source_ref and "headings=" in source_ref and "terms=" in source_ref
+    if "synthetic" in source_type or evidence_id.startswith("evi:synthetic"):
+        return False
+    return source_type in {"retrieval_chunk", "notice_quote", "section_quote", "policy_quote", "document_quote"}
 
 
 def _known_evidence_ids(db: Session, audit_id: str) -> set[str]:
@@ -825,6 +849,8 @@ def _missing_hydration_requirements(row: FindingOut) -> list[str]:
             missing.append("citations.source_type")
         if not c.source_ref:
             missing.append("citations.source_ref")
+        if not _citation_has_allowed_evidence_mode(c):
+            missing.append("citations.evidence_mode")
     issue = _infer_issue_from_text(_issue_key_from_section(row.section_id), row.gap_note, row.remediation_note)
     has_primary_article, has_disallowed_article = _citation_article_findings(issue, row.citations)
     if not has_primary_article:
@@ -887,7 +913,7 @@ def _blocker_reason_for_missing_requirements(missing: list[str]) -> str:
     missing_set = set(missing)
     if {"citations.article_primary_fit", "citations.article_disallowed"} & missing_set:
         return "citation article mismatch"
-    if {"document_evidence_refs", "citations", "citations.evidence_id", "citations.source_type", "citations.source_ref"} & missing_set:
+    if {"document_evidence_refs", "citations", "citations.evidence_id", "citations.source_type", "citations.source_ref", "citations.evidence_mode"} & missing_set:
         return "missing evidence linkage"
     if {"source_scope", "assertion_level"} & missing_set:
         return "missing section traceability"
@@ -1456,7 +1482,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         section_level = _project_section_level_findings(backing_rows, known_evidence_ids, evidence_by_chunk)
         combined = projected + [row for row in section_level if row.id not in {p.id for p in projected}]
         combined += _parity_blocker_rows(audit_id, decision_map, combined, backing_rows)
-        if any(r.classification == "publication_blocked" for r in combined) and audit.status == "complete":
+        if any(r.classification == "publication_blocked" for r in combined) and audit.status != "audit_incomplete":
             audit.status = "audit_incomplete"
             db.add(audit)
             db.commit()
@@ -1475,7 +1501,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     ).all()
     if not rows:
         parity_blockers = _parity_blocker_rows(audit_id, decision_map, [], [])
-        if parity_blockers and audit.status == "complete":
+        if parity_blockers and audit.status != "audit_incomplete":
             audit.status = "audit_incomplete"
             db.add(audit)
             db.commit()
@@ -1571,7 +1597,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     blockers = _reconciliation_blockers(audit, decision_map, rows, published)
     if blockers:
         raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-    if any(r.classification == "publication_blocked" for r in published) and audit.status == "complete":
+    if any(r.classification == "publication_blocked" for r in published) and audit.status != "audit_incomplete":
         audit.status = "audit_incomplete"
         db.add(audit)
         db.commit()

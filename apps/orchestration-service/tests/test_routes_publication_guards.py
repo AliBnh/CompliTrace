@@ -324,6 +324,52 @@ def test_get_findings_projects_from_evidence_refs_when_supporting_citations_are_
     assert rows[0].section_id == "systemic:missing_transfer_notice"
 
 
+def test_get_findings_rejects_synthetic_quote_mode_and_falls_back_to_valid_publication_modes(db_session: Session):
+    audit = _create_audit(db_session, status="running")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning=(
+                '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing",'
+                '"positive_evidence_ids":["evi:synthetic:transfer-quote"],"section_ids":["6. Transfers"],'
+                '"searched_headings":["International Transfers"],"searched_terms":["transfer safeguards"]}}'
+            ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:synthetic:transfer-quote",
+            audit_id=audit.id,
+            evidence_type="synthetic_quote",
+            source_ref="engine-self-quote",
+            text_excerpt="synthetic rendering of model output",
+        )
+    )
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert rows
+    first = rows[0]
+    assert all((c.source_type or "").lower() != "synthetic_quote" for c in (first.citations or []))
+    assert first.classification in {"publication_blocked", "probable_gap"}
+    if first.classification == "probable_gap":
+        assert first.citations and first.citations[0].source_type == "absence_trace"
+    else:
+        assert first.blocker_reason in {"missing evidence linkage", "incomplete hydration"}
+    db_session.refresh(audit)
+    if first.classification == "publication_blocked":
+        assert audit.status == "audit_incomplete"
+
+
 def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publishable_family(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
