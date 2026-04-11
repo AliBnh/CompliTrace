@@ -651,6 +651,8 @@ def _extract_legal_facts(text: str) -> list[LegalFact]:
         _add_fact("automated_decisioning", "article22_risk_signal", "automated-decisioning effects/safeguard risk wording detected")
     if any(t in norm for t in {"outside the eea", "third country", "international transfer", "outside jurisdiction"}):
         _add_fact("transfer_scope", "outside_jurisdiction", "international/third-country transfer wording is visible")
+        if any(t in norm for t in {"where necessary", "where appropriate", "when needed", "as applicable"}):
+            _add_fact("transfer_safeguards", "vague", "transfer safeguards wording appears vague/conditional")
     recipient_category_signals = {"categories of recipients", "recipient categories", "types of recipients"}
     recipient_actor_signals = {"third party", "third-party", "partners", "vendors", "processors", "service providers"}
     if any(t in norm for t in recipient_category_signals):
@@ -663,11 +665,37 @@ def _extract_legal_facts(text: str) -> list[LegalFact]:
         purpose_mapped = any(t in norm for t in {"for the purpose of", "for purposes of", "for each purpose", "by purpose"})
         if not purpose_mapped:
             _add_fact("lawful_basis", "present_but_unmapped", "lawful basis is present but not clearly mapped to purposes")
+    profiling_present = any(t in norm for t in {"profiling", "automated decision", "scoring", "segmentation"})
+    profiling_detail_present = any(t in norm for t in {"logic involved", "significance", "envisaged consequences", "human intervention"})
+    if profiling_present and not profiling_detail_present:
+        _add_fact("profiling_transparency", "missing_required_details", "profiling/ADM is present without required transparency detail")
     return facts
 
 
-def _legal_reasoning_step(section: SectionData, issue: CandidateIssue, qualification: LegalQualification) -> tuple[list[LegalFact], str]:
-    facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+def _defect_type_from_facts(issue_name: str, facts: list[LegalFact]) -> str | None:
+    facts_set = {(f["fact_type"], f["value"]) for f in facts}
+    if issue_name == "missing_legal_basis" and ("lawful_basis", "present_but_unmapped") in facts_set:
+        return "present_but_invalid_disclosure"
+    if issue_name == "missing_legal_basis" and ("lawful_basis_model", "consent_inferred_from_use") in facts_set:
+        return "potential_unlawful_practice"
+    if issue_name == "missing_retention" and ("retention_policy", "undefined_duration") in facts_set:
+        return "potential_unlawful_practice"
+    if issue_name == "missing_transfer_notice" and ("transfer_safeguards", "vague") in facts_set:
+        return "present_but_invalid_disclosure"
+    if issue_name == "recipients_disclosure_gap" and ("recipient_categories", "missing") in facts_set:
+        return "present_but_invalid_disclosure"
+    if issue_name == "profiling_disclosure_gap" and ("profiling_transparency", "missing_required_details") in facts_set:
+        return "present_but_invalid_disclosure"
+    return None
+
+
+def _legal_reasoning_step(
+    section: SectionData,
+    issue: CandidateIssue,
+    qualification: LegalQualification,
+    precomputed_facts: list[LegalFact] | None = None,
+) -> tuple[list[LegalFact], str]:
+    facts = precomputed_facts if precomputed_facts is not None else _extract_legal_facts(f"{section.section_title}. {section.content}")
     severity_recommendation = "high" if qualification["priority_bucket"] == "fatal" else "medium"
     narrative = (
         f"Legal reasoning pipeline: facts={facts}; "
@@ -793,10 +821,14 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
     return candidates[:6]
 
 
-def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
+def _legal_qualification_for_issue(issue: CandidateIssue, facts: list[LegalFact] | None = None) -> LegalQualification:
     defect_type = _defect_type_for_issue(issue)
     issue_name = issue["candidate_issue_type"]
     obligation_family = _obligation_family_for_issue(issue_name)
+    if facts:
+        defect_from_facts = _defect_type_from_facts(issue_name, facts)
+        if defect_from_facts:
+            defect_type = defect_from_facts
     mapping: dict[str, tuple[str, list[str], list[str], str, str]] = {
         "missing_controller_identity": ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Controller identity disclosure duty.", "Article 21/22 do not govern identity notice content."),
         "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes and, where consent is relied on, validity conditions must be supportable.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
@@ -3813,8 +3845,9 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             possible_collection_mode=collection_mode,
             is_visible_gap=False,
         )
-        qualification = _legal_qualification_for_issue(primary_issue)
-        legal_facts, legal_pipeline_note = _legal_reasoning_step(section, primary_issue, qualification)
+        legal_facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+        qualification = _legal_qualification_for_issue(primary_issue, legal_facts)
+        legal_facts, legal_pipeline_note = _legal_reasoning_step(section, primary_issue, qualification, legal_facts)
         legal_qualification_calls_total.inc()
         topic = f"{_infer_topic(section)} qualified_issue:{qualification['issue_name']} primary_article:{qualification['primary_article']}"
         query = _build_retrieval_query(section, topic, document_mode)

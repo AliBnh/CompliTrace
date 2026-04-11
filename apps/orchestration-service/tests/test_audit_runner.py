@@ -1613,6 +1613,34 @@ def test_legal_qualification_maps_indefinite_retention_to_storage_limitation_pri
     assert qual["priority_bucket"] == "fatal"
 
 
+def test_legal_qualification_uses_facts_to_mark_lawful_basis_present_but_unmapped():
+    issue = {
+        "candidate_issue_type": "missing_legal_basis",
+        "evidence_text": "Legal basis is listed but not mapped by purpose.",
+        "evidence_strength": 0.8,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    facts = _extract_legal_facts("Our legal basis includes legitimate interests for processing.")
+    qual = _legal_qualification_for_issue(issue, facts)
+    assert qual["defect_type"] == "present_but_invalid_disclosure"
+
+
+def test_legal_qualification_uses_facts_to_mark_recipients_present_but_unstructured():
+    issue = {
+        "candidate_issue_type": "recipients_disclosure_gap",
+        "evidence_text": "We share with partners and vendors.",
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    facts = _extract_legal_facts("We disclose personal data to partners and vendors.")
+    qual = _legal_qualification_for_issue(issue, facts)
+    assert qual["defect_type"] == "present_but_invalid_disclosure"
+
+
 def test_extract_legal_facts_captures_partner_source_and_undefined_retention():
     facts = _extract_legal_facts(
         "We may collect data from partners and external datasets and keep data as long as necessary."
