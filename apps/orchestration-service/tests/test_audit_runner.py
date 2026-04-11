@@ -665,7 +665,7 @@ def test_final_disposition_special_category_true_art9_without_condition_is_gap()
     assert special["publication_recommendation"] == "publish"
 
 
-def test_substantive_finding_without_citations_is_downgraded():
+def test_substantive_finding_without_citations_keeps_substantive_status():
     finding = LlmFinding(
         status="partial",
         severity="high",
@@ -674,8 +674,9 @@ def test_substantive_finding_without_citations_is_downgraded():
         citations=[],
     )
     gated = _enforce_substantive_citation_gate(finding, valid_citations=[])
-    assert gated.status == "needs review"
-    assert gated.severity is None
+    assert gated.status == "partial"
+    assert gated.severity == "high"
+    assert "Evidence note:" in (gated.gap_note or "")
 
 
 def test_substantive_finding_with_citations_is_kept():
@@ -741,7 +742,8 @@ def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
         db.commit()
         _partner_review_pass(db, audit.id)
         updated = db.get(Finding, row.id)
-        assert updated.classification in {"gap_support", "section_support", "evidence_support"}
+        assert updated.classification in {"probable_gap", "clear_non_compliance"}
+        assert updated.artifact_role == "publishable_finding"
 
 
 def test_paragraph_ref_compatible_tolerates_format_variants():

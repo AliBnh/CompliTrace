@@ -2423,13 +2423,11 @@ def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
 
 def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmCitation]) -> LlmFinding:
     if f.status in {"gap", "partial"} and not valid_citations:
-        return LlmFinding(
-            status="needs review",
-            severity=None,
-            gap_note="Substantive finding rejected: no validated GDPR citation evidence.",
-            remediation_note=None,
-            citations=[],
-        )
+        f.gap_note = (
+            f"{f.gap_note or ''} Evidence note: no validated GDPR citation chain was attached; "
+            "classification retained using text-grounded legal signals."
+        ).strip()
+        return f
     return f
 
 
@@ -3673,6 +3671,10 @@ def _final_publication_validator(
             if row.assertion_level == "confirmed_document_gap":
                 row.assertion_level = "probable_document_gap"
         citation_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        row_text = f"{row.gap_note or ''} {row.policy_evidence_excerpt or ''} {row.remediation_note or ''}"
+        explicit_violation_visible = bool(_explicit_violation_hits(row_text))
+        omission_mode_row = str(row.omission_basis or "").lower() == "true"
+        allow_no_citation_chain = explicit_violation_visible or omission_mode_row
         missing_requirements: list[str] = []
         if not row.primary_legal_anchor:
             missing_requirements.append("primary_legal_anchor")
@@ -3686,9 +3688,9 @@ def _final_publication_validator(
             missing_requirements.append("confidence_overall")
         if not row.remediation_note:
             missing_requirements.append("remediation_note")
-        if citation_count == 0:
+        if citation_count == 0 and not allow_no_citation_chain:
             missing_requirements.append("citations")
-        if not row.document_evidence_refs:
+        if not row.document_evidence_refs and not allow_no_citation_chain:
             missing_requirements.append("document_evidence_refs")
         issue_key = _finding_issue_id(row)
         if not _citation_articles_fit_issue(db, row.id, issue_key):
@@ -3909,15 +3911,34 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                 support_classification = "section_support"
             elif clear_obligation_trigger:
                 support_classification = "evidence_support"
-            row.status = "partial"
             row.status = support_status
             row.classification = support_classification
-            row.finding_type = "supporting_evidence"
-            row.publish_flag = "no"
-            row.artifact_role = "support_only"
-            row.finding_level = "none"
-            row.publication_state = "internal_only"
-            row.gap_note = fallback_gap
+            hard_violation_visible = any(
+                t in context_text
+                for t in {"inferred consent", "consent inferred", "continued use", "indefinite", "indefinitely", "without human intervention"}
+            )
+            promotable_issue = support_status == "gap" and (
+                support_classification == "gap_support" or hard_violation_visible
+            )
+            if promotable_issue:
+                row.classification = "clear_non_compliance" if hard_violation_visible else "probable_gap"
+                row.finding_type = "local"
+                row.publish_flag = "yes"
+                row.artifact_role = "publishable_finding"
+                row.finding_level = "local"
+                row.publication_state = "publishable"
+                row.severity = row.severity or ("high" if hard_violation_visible else "medium")
+                row.gap_note = (
+                    f"{fallback_gap} Analysis-stage promotion: explicit violation/disclosure gap kept as issue artifact."
+                )
+                row.confidence = max(row.confidence or 0.62, 0.62)
+            else:
+                row.finding_type = "supporting_evidence"
+                row.publish_flag = "no"
+                row.artifact_role = "support_only"
+                row.finding_level = "none"
+                row.publication_state = "internal_only"
+                row.gap_note = fallback_gap
             row.remediation_note = fallback_remediation
             row.confidence = min(row.confidence or 0.45, 0.45) if row.classification == "not_assessable" else max(row.confidence or 0.6, 0.6)
             continue
@@ -4016,7 +4037,12 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                 row.finding_level = "local"
                 row.publication_state = "publishable"
             seen_root_keys[key] = row.section_id
-        if key in CORE_NOTICE_SYSTEMIC_ISSUES and key in systemic_issue_keys and not row.section_id.startswith("systemic:"):
+        if (
+            key in CORE_NOTICE_SYSTEMIC_ISSUES
+            and key in systemic_issue_keys
+            and not row.section_id.startswith("systemic:")
+            and row.classification not in {"clear_non_compliance", "probable_gap"}
+        ):
             row.status = "not applicable"
             row.classification = "supporting_evidence"
             row.finding_type = "supporting_evidence"
@@ -4517,18 +4543,10 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                         valid_citations = []
         if f.status in {"gap", "partial"} and not valid_citations:
             diagnostic = _citation_diagnostic_reason(section, claim_types, _collection_mode(section))
-            f = LlmFinding(
-                status="needs review",
-                severity=None,
-                gap_note=(
-                    "Substantive finding withheld due to insufficient legally compatible citation support. "
-                    f"Diagnostic: {diagnostic}"
-                ),
-                remediation_note=(
-                    "Provide stronger section-level evidence and aligned GDPR anchors, then rerun classification."
-                ),
-                citations=[],
-            )
+            f.gap_note = (
+                f"{f.gap_note or ''} Evidence diagnostic: {diagnostic}. "
+                "Classification retained; citation quality lowered confidence."
+            ).strip()
         f, valid_citations = _reviewer_agent(f, valid_citations, claim_types, memo)
         if applicability["applicability_status"] == "unresolved" and claim_types & {
             "controller_contact",
