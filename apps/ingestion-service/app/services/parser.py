@@ -284,7 +284,7 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
     for sec in sections:
         preamble_markers = ("effective date", "last updated", "registered address", "contact:")
         is_preamble_block = (
-            sec.section_order == 1
+            sec.section_order <= 2
             and not SECTION_NUM_RE.match(sec.section_title)
             and ("\n" in sec.content or any(marker in sec.content.lower() for marker in preamble_markers))
         )
@@ -292,8 +292,8 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
         title = _normalize_section_title(sec.section_title)
 
         if not content:
-            # Preserve literal-layout intent by avoiding synthetic empty numbered heading objects.
-            if SECTION_NUM_RE.match(title):
+            # Keep top-level numbered headings to preserve document hierarchy; skip empty subsection shells.
+            if SECTION_NUM_RE.match(title) and not SECTION_HEADING_RE.match(title):
                 continue
             refined.append(
                 ParsedSection(
@@ -392,18 +392,36 @@ def _commit_section(
         header_lines = [_clean_line(line) for line in content_lines if _clean_line(line)]
         if not header_lines:
             return
-        # Preserve top-line identity literally as first line, and keep metadata lines as line-separated content.
-        normalized_title = header_lines[0]
-        content = "\n".join(header_lines[1:]) if len(header_lines) > 1 else ""
-        sections.append(
-            ParsedSection(
-                section_order=len(sections) + 1,
-                section_title=normalized_title,
-                content=content,
-                page_start=page_start,
-                page_end=page_end,
+        # Preserve visual hierarchy: company line and policy title are separate header entries.
+        if len(header_lines) >= 2:
+            sections.append(
+                ParsedSection(
+                    section_order=len(sections) + 1,
+                    section_title=header_lines[0],
+                    content="",
+                    page_start=page_start,
+                    page_end=page_end,
+                )
             )
-        )
+            sections.append(
+                ParsedSection(
+                    section_order=len(sections) + 1,
+                    section_title=header_lines[1],
+                    content="\n".join(header_lines[2:]),
+                    page_start=page_start,
+                    page_end=page_end,
+                )
+            )
+        else:
+            sections.append(
+                ParsedSection(
+                    section_order=len(sections) + 1,
+                    section_title=header_lines[0],
+                    content="",
+                    page_start=page_start,
+                    page_end=page_end,
+                )
+            )
         return
 
     content = _clean_line(" ".join(content_lines))
