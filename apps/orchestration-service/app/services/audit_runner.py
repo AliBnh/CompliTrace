@@ -389,6 +389,8 @@ class CandidateIssue(TypedDict):
     local_or_document_level: str
     possible_collection_mode: str
     is_visible_gap: bool
+    legal_posture: str
+    legal_posture_reason: str
 
 
 class LegalQualification(TypedDict):
@@ -609,6 +611,45 @@ def _defect_type_for_issue(issue: CandidateIssue) -> str:
     return "missing_disclosure"
 
 
+def _legal_posture_layer(issue: CandidateIssue, facts: list[LegalFact]) -> tuple[str, str]:
+    """
+    Mandatory legal qualification layer applied after issue spotting.
+    """
+    issue_name = issue["candidate_issue_type"]
+    text = _norm(issue.get("evidence_text") or "")
+    facts_set = {(f["fact_type"], f["value"]) for f in facts}
+
+    if issue_name == "missing_legal_basis" and (
+        ("lawful_basis_model", "consent_inferred_from_use") in facts_set
+        or any(t in text for t in {"consent inferred", "continued use", "inferred consent"})
+    ):
+        return (
+            "present_but_legally_invalid",
+            "Detected inferred/continued-use consent model; treat as present but legally invalid consent basis (Art. 6/7 pathway).",
+        )
+
+    if issue_name == "missing_retention" and ("retention_policy", "undefined_duration") in facts_set:
+        return ("potential_unlawful_practice", "Retention language indicates indefinite or undefined duration.")
+
+    if issue_name == "missing_transfer_notice" and ("transfer_safeguards", "vague") in facts_set:
+        return ("present_but_legally_invalid", "Transfer disclosure is present but safeguards appear vague/conditional.")
+
+    if issue_name == "profiling_disclosure_gap" and ("profiling_transparency", "missing_required_details") in facts_set:
+        return ("incomplete_disclosure", "Profiling appears present, but mandatory transparency details are incomplete.")
+
+    if issue_name == "recipients_disclosure_gap" and ("recipient_categories", "missing") in facts_set:
+        return ("incomplete_disclosure", "Recipient actors are mentioned without required category-level disclosure.")
+
+    defect_type = _defect_type_for_issue(issue)
+    if defect_type == "potential_unlawful_practice":
+        return ("potential_unlawful_practice", "Issue signals indicate a potentially unlawful practice pattern.")
+    if defect_type == "present_but_invalid_disclosure":
+        return ("present_but_legally_invalid", "Disclosure exists but fails legal validity expectations.")
+    if defect_type == "incomplete_disclosure":
+        return ("incomplete_disclosure", "Disclosure appears partial/incomplete for the obligation.")
+    return ("missing_disclosure", "Required disclosure is not visible in the reviewed excerpt.")
+
+
 def _priority_bucket_for_claims(finding: LlmFinding, claim_types: set[str]) -> str:
     text = _norm(f"{finding.gap_note or ''} {finding.remediation_note or ''}")
     fatal_signals = {
@@ -746,6 +787,8 @@ def _legal_reasoning_step(
     severity_recommendation = "high" if qualification["priority_bucket"] == "fatal" else "medium"
     narrative = (
         f"Legal reasoning pipeline: facts={facts}; "
+        f"mandatory_posture={issue.get('legal_posture')}; "
+        f"posture_reason={issue.get('legal_posture_reason')}; "
         f"triggered_obligation_family={qualification['obligation_family']}; "
         f"obligation_validation={validation}; "
         f"legal_validation={qualification['defect_type']}; "
@@ -824,6 +867,8 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
                 local_or_document_level=level,
                 possible_collection_mode=collection_mode,
                 is_visible_gap=hits > 0,
+                legal_posture="missing_disclosure",
+                legal_posture_reason="Initial issue-spotting placeholder; overwritten by mandatory legal posture layer.",
             )
         )
     # Family-first fallback for notice disclosure sections: avoid defaulting to controller identity.
@@ -865,6 +910,8 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
                 local_or_document_level="local",
                 possible_collection_mode=collection_mode,
                 is_visible_gap=False,
+                legal_posture="missing_disclosure",
+                legal_posture_reason="Initial fallback placeholder; overwritten by mandatory legal posture layer.",
             )
         )
     priority = [
@@ -879,17 +926,29 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
         "missing_controller_identity",
     ]
     rank = {name: idx for idx, name in enumerate(priority)}
+    facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+    for candidate in candidates:
+        posture, reason = _legal_posture_layer(candidate, facts)
+        candidate["legal_posture"] = posture
+        candidate["legal_posture_reason"] = reason
     candidates.sort(key=lambda c: (rank.get(c["candidate_issue_type"], 999), -(c["evidence_strength"] or 0.0)))
     return candidates[:6]
 
 
 def _legal_qualification_for_issue(issue: CandidateIssue, facts: list[LegalFact] | None = None) -> LegalQualification:
-    defect_type = _defect_type_for_issue(issue)
+    posture_to_defect = {
+        "missing_disclosure": "missing_disclosure",
+        "incomplete_disclosure": "incomplete_disclosure",
+        "present_but_legally_invalid": "present_but_invalid_disclosure",
+        "potential_unlawful_practice": "potential_unlawful_practice",
+    }
+    posture = issue.get("legal_posture")
+    defect_type = posture_to_defect[posture] if posture in posture_to_defect else _defect_type_for_issue(issue)
     issue_name = issue["candidate_issue_type"]
     obligation_family = _obligation_family_for_issue(issue_name)
     if facts:
         defect_from_facts = _defect_type_from_facts(issue_name, facts)
-        if defect_from_facts:
+        if defect_from_facts and defect_type not in {"present_but_invalid_disclosure", "potential_unlawful_practice"}:
             defect_type = defect_from_facts
     primary, secondary, rejected = FAMILY_ARTICLE_MAP.get(
         obligation_family,
@@ -3923,6 +3982,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             local_or_document_level="local",
             possible_collection_mode=collection_mode,
             is_visible_gap=False,
+            legal_posture="missing_disclosure",
+            legal_posture_reason="Fallback due to no spotted issue candidates.",
         )
         legal_facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
         qualification = _legal_qualification_for_issue(primary_issue, legal_facts)

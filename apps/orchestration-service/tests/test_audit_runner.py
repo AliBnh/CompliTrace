@@ -1577,6 +1577,21 @@ def test_spot_candidate_issues_fact_fallback_prefers_article14_for_third_party_s
     assert issues[0]["candidate_issue_type"] == "article_14_indirect_collection_gap"
 
 
+def test_spot_candidate_issues_applies_mandatory_legal_posture_layer_for_invalid_consent():
+    section = SectionData(
+        id="q2c",
+        section_order=3,
+        section_title="Lawful basis",
+        content="Consent is inferred from continued use of the service.",
+        page_start=3,
+        page_end=3,
+    )
+    issues = _spot_candidate_issues(section, "direct")
+    legal_basis_issue = next(i for i in issues if i["candidate_issue_type"] == "missing_legal_basis")
+    assert legal_basis_issue["legal_posture"] == "present_but_legally_invalid"
+    assert "Art. 6/7" in legal_basis_issue["legal_posture_reason"]
+
+
 def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     issue = {
         "candidate_issue_type": "missing_transfer_notice",
