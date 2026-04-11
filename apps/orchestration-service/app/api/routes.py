@@ -154,6 +154,8 @@ def _sanitize_published_text(text: str | None) -> str | None:
     if not text:
         return text
     cleaned = INTERNAL_MARKER_RE.sub(" ", text)
+    cleaned = re.sub(r"coverage_check:[^\s,;]+", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"not_visible_in_reviewed_sections", " ", cleaned, flags=re.IGNORECASE)
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
@@ -188,7 +190,7 @@ def _infer_issue_from_text(issue: str | None, gap_note: str | None, remediation_
     text = ((gap_note or "") + " " + (remediation_note or "")).lower()
     if "controller" in text and "contact" in text:
         return "missing_controller_contact"
-    if "transfer" in text:
+    if any(t in text for t in {"transfer", "third country", "safeguard", "adequacy", "scc"}):
         return "missing_transfer_notice"
     if "profil" in text:
         return "profiling_disclosure_gap"
