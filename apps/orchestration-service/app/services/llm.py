@@ -12,7 +12,8 @@ from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk
 
 SYSTEM_PROMPT = (
     "You are a GDPR compliance analyst. Return strict JSON with keys: "
-    "status, severity, gap_note, remediation_note, citations, candidate_publishability. "
+    "status, severity, gap_note, remediation_note, policy_evidence_excerpt, legal_requirement, "
+    "gap_reasoning, confidence_level, assessment_type, severity_rationale, citations, candidate_publishability. "
     "Allowed status: compliant, partial, gap, needs review. "
     "Citations must only reference provided chunks and include chunk_id + article_number. "
     "If status is partial or gap, include at least one concrete citation. "
@@ -62,6 +63,8 @@ def _build_user_prompt(section_title: str, section_content: str, chunks: list[Re
         f"Section-specific legal guidance: {guidance or 'None'}\n\n"
         "Apply frozen rubric. If uncertain, return needs review. "
         "For gap/partial provide non-empty gap_note and remediation_note with at least one citation tied to a retrieved chunk. "
+        "For substantive outputs include policy_evidence_excerpt, legal_requirement, gap_reasoning, confidence_level, "
+        "assessment_type, and severity_rationale. "
         "Do not cite GDPR articles not present in retrieved chunks."
     )
 
@@ -109,6 +112,12 @@ def _coerce_finding_from_parsed(parsed: dict[str, Any]) -> LlmFinding:
         severity=_safe_text(parsed.get("severity")),
         gap_note=_safe_text(parsed.get("gap_note")),
         remediation_note=_safe_text(parsed.get("remediation_note")),
+        policy_evidence_excerpt=_safe_text(parsed.get("policy_evidence_excerpt")),
+        legal_requirement=_safe_text(parsed.get("legal_requirement")),
+        gap_reasoning=_safe_text(parsed.get("gap_reasoning")),
+        confidence_level=_safe_text(parsed.get("confidence_level")),
+        assessment_type=_safe_text(parsed.get("assessment_type")),
+        severity_rationale=_safe_text(parsed.get("severity_rationale")),
         citations=_coerce_citations(parsed.get("citations")),
         candidate_publishability=_safe_text(parsed.get("candidate_publishability")),
     )
