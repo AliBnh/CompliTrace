@@ -184,6 +184,25 @@ def _sanitize_external_reasoning(text: str | None) -> str | None:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+def _clean_absence_statement(issue: str | None) -> str:
+    mapping = {
+        "missing_legal_basis": "No explicit legal basis is described for the listed processing activities.",
+        "missing_retention_period": "No explicit retention period or objective retention criteria is described for the listed processing activities.",
+        "missing_transfer_notice": "No explicit international transfer mechanism or safeguard is described for the listed processing activities.",
+        "profiling_disclosure_gap": "No explicit profiling logic, significance, or consequences are described for the listed processing activities.",
+        "recipients_disclosure_gap": "No explicit recipient categories are described for the listed processing activities.",
+        "purpose_specificity_gap": "No explicit purpose-to-data-category mapping is described for the listed processing activities.",
+        "missing_controller_contact": "No explicit controller contact route is described for the listed processing activities.",
+        "missing_controller_identity": "No explicit controller legal identity is described for the listed processing activities.",
+    }
+    return mapping.get(issue or "", "No explicit required disclosure is described for the listed processing activities.")
+
+
+def _is_clean_absence_statement(text: str | None) -> bool:
+    cleaned = (text or "").strip()
+    return cleaned.lower().startswith("no explicit ") and cleaned.endswith(".")
+
+
 def _infer_issue_from_text(issue: str | None, gap_note: str | None, remediation_note: str | None) -> str | None:
     if issue:
         return issue
@@ -450,12 +469,7 @@ def _project_published_findings_from_map(
         resolved_severity, resolved_rationale = _severity_rule(inferred_issue, "gap", f"systemic:{issue}", reason)
         policy_excerpt = _sanitize_published_text(backing.policy_evidence_excerpt) if backing and backing.policy_evidence_excerpt else None
         if not policy_excerpt:
-            policy_excerpt = (
-                f"Reviewed sections {', '.join(searched_sections or ([backing.section_id] if backing else ['review-scope-not-captured']))}, "
-                f"headings {', '.join(searched_headings or ['privacy notice', 'data use', 'your rights'])}, "
-                f"and terms {', '.join(searched_terms or issue_search_terms.get(issue, ['gdpr disclosure duty']))}; "
-                f"required disclosure for {issue} was not found."
-            )
+            policy_excerpt = _clean_absence_statement(inferred_issue)
         projected = FindingOut(
                 id=f"projected:{audit_id}:{family}",
                 section_id=f"systemic:{issue}",
@@ -1040,10 +1054,7 @@ def _publication_blocker_row(
         f"Searched terms: {', '.join(normalized_terms)}. "
         "Result: required disclosure not evidenced with a fully linked citation package."
     )
-    scoped_absence_statement = (
-        f"No explicit disclosure text found in reviewed sections ({', '.join(normalized_sections)}) "
-        f"for issue {issue}."
-    )
+    scoped_absence_statement = _clean_absence_statement(issue)
     return FindingOut(
         id=f"publication_blocked:{audit_id}:{family}",
         section_id=f"systemic:{issue}",
@@ -1101,10 +1112,7 @@ def _scoped_absence_publishable_row(
     headings = searched_headings or sections
     terms = searched_terms or [issue.replace("_", " ")]
     anchors = _anchors_for_issue(issue, None)
-    excerpt = (
-        f"No explicit disclosure text found in reviewed sections ({', '.join(sections)}), "
-        f"headings ({', '.join(headings)}), for terms ({', '.join(terms)})."
-    )
+    excerpt = _clean_absence_statement(issue)
     return FindingOut(
         id=f"projected_scoped_absence:{audit_id}:{family}",
         section_id=f"systemic:{issue}",
@@ -1389,13 +1397,9 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         if quote:
             excerpt = quote
     if not excerpt:
-        scope_sections = row.affected_sections or [row.section_id]
-        scope_headings = row.where_disclosure_missing or scope_sections
-        scope_terms = [issue or "required disclosure"]
-        excerpt = (
-            f"No explicit disclosure text found in reviewed sections ({', '.join(scope_sections)}), "
-            f"headings ({', '.join(scope_headings)}), for terms ({', '.join(scope_terms)})."
-        )
+        excerpt = _clean_absence_statement(issue)
+    if not row.citations and not _is_clean_absence_statement(excerpt):
+        excerpt = _clean_absence_statement(issue)
     row.policy_evidence_excerpt = excerpt
     row.document_evidence = _sanitize_published_text(row.policy_evidence_excerpt)
     row.legal_rule = _sanitize_published_text(row.legal_requirement)
