@@ -3231,7 +3231,7 @@ def _build_final_disposition_map(
             citation_refs = [
                 f"evi:chunk:{c.chunk_id}"
                 for c in (r.citations or [])
-                if c.chunk_id and not str(c.chunk_id).startswith("absence-proof:")
+                if c.chunk_id
             ]
             policy_ref = [f"evi:policy:{r.section_id}"] if r.section_id and not r.section_id.startswith("systemic:") else []
             refs = list(dict.fromkeys([*refs, *citation_refs, *policy_ref]))
@@ -4281,6 +4281,13 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             if ranked and ranked[0][1] > 0:
                 unmet_duty_issue = ranked[0][0]
         if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
+            controller_globally_present = (
+                obligation_map.get("controller_identity_present") is True
+                and obligation_map.get("controller_contact_present") is True
+            )
+            if unmet_duty_issue in {"missing_controller_identity", "missing_controller_contact"} and controller_globally_present:
+                unmet_duty_issue = None
+        if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
             candidate_issues.insert(
                 0,
                 CandidateIssue(
@@ -4295,14 +4302,14 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 ),
             )
         primary_issue = candidate_issues[0] if candidate_issues else CandidateIssue(
-            candidate_issue_type="missing_controller_identity",
+            candidate_issue_type="purpose_specificity_gap",
             evidence_text=section.content[:180],
             evidence_strength=0.35,
             local_or_document_level="local",
             possible_collection_mode=collection_mode,
             is_visible_gap=False,
             legal_posture="missing_disclosure",
-            legal_posture_reason="Fallback due to no spotted issue candidates.",
+            legal_posture_reason="Fallback to non-controller placeholder when no issue candidates are spotted.",
         )
         legal_facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
         qualification = _legal_qualification_for_issue(primary_issue, legal_facts)
@@ -4666,28 +4673,41 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         )
         if not consistency_ok:
             controller_issue = qualification["issue_name"] in {"missing_controller_identity", "missing_controller_contact"}
-            contradictory_disclosure = _has_positive_controller_contradiction(section.content)
-            if controller_issue and not contradictory_disclosure:
-                classification = classification or "probable_gap"
-                f.gap_note = (
-                    f"{f.gap_note or ''} Fact: controller-related processing context is visible. "
-                    "Law: GDPR Articles 13(1)(a)/14(1)(a) require controller identity and contact-route disclosure. "
-                    f"Breach: {consistency_reason or 'controller-contact disclosure remains unclear'}. "
-                    "Conclusion: keep as publishable controller identity/contact gap absent contradictory disclosure."
-                ).strip()
-                confidence = max(confidence or 0.55, 0.55)
-            else:
-                contradiction_fail_total.inc()
-                classification = "contradiction_internal_only"
-                f.status = "needs review"
+            controller_globally_present = (
+                obligation_map.get("controller_identity_present") is True
+                and obligation_map.get("controller_contact_present") is True
+            )
+            if controller_issue and controller_globally_present:
+                classification = "no_issue"
+                f.status = "compliant"
                 f.severity = None
-                f.gap_note = (
-                    "Internal QA consistency gate rejected this draft finding. "
-                    f"Reason: {consistency_reason or 'mismatch'}."
-                )
+                f.gap_note = "Controller identity/contact is disclosed at document level; missing-controller issue suppressed at generation."
                 f.remediation_note = None
                 valid_citations = []
-                confidence = min(confidence or 0.35, 0.35)
+                confidence = max(confidence or 0.75, 0.75)
+            else:
+                contradictory_disclosure = _has_positive_controller_contradiction(section.content)
+                if controller_issue and not contradictory_disclosure:
+                    classification = classification or "probable_gap"
+                    f.gap_note = (
+                        f"{f.gap_note or ''} Fact: controller-related processing context is visible. "
+                        "Law: GDPR Articles 13(1)(a)/14(1)(a) require controller identity and contact-route disclosure. "
+                        f"Breach: {consistency_reason or 'controller-contact disclosure remains unclear'}. "
+                        "Conclusion: keep as publishable controller identity/contact gap absent contradictory disclosure."
+                    ).strip()
+                    confidence = max(confidence or 0.55, 0.55)
+                else:
+                    contradiction_fail_total.inc()
+                    classification = "contradiction_internal_only"
+                    f.status = "needs review"
+                    f.severity = None
+                    f.gap_note = (
+                        "Internal QA consistency gate rejected this draft finding. "
+                        f"Reason: {consistency_reason or 'mismatch'}."
+                    )
+                    f.remediation_note = None
+                    valid_citations = []
+                    confidence = min(confidence or 0.35, 0.35)
 
         if f.status in {"gap", "partial"}:
             signature = _finding_signature(f, valid_citations)
