@@ -348,7 +348,7 @@ def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publish
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     finding = rows[0]
-    assert finding.classification == "clear_non_compliance"
+    assert finding.classification == "probable_gap"
     assert finding.publication_blocked is not True
     assert finding.issue_key == "missing_transfer_notice"
     assert finding.document_evidence_refs is not None
