@@ -262,6 +262,33 @@ def test_build_final_disposition_map_splits_controller_identity_from_contact_whe
     assert controller["issue_key"] == "missing_controller_identity"
 
 
+def test_build_final_disposition_map_marks_retention_gap_when_obligation_not_visible():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="7. Retention",
+            content="Archived datasets may be retained indefinitely for historical analysis.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {
+        "controller_identity": True,
+        "controller_contact": True,
+        "controller_identity_contact": True,
+        "legal_basis": True,
+        "retention": False,
+        "rights": True,
+        "complaint": True,
+    }
+    out = _build_final_disposition_map([], sections, obligation_map)
+    retention = out["retention"]
+    assert retention["status"] == "gap"
+    assert retention["publication_recommendation"] == "publish"
+    assert retention["severity"] == "high"
+
+
 def test_final_publication_validator_blocks_publishable_row_without_flbc_reasoning():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(bind=engine)

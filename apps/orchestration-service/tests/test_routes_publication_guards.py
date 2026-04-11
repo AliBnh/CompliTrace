@@ -1463,6 +1463,68 @@ def test_published_evidence_excerpt_uses_quote_or_absence_mode_not_generic_phras
     assert ("no explicit statement" in excerpt) or len(excerpt) > 0
 
 
+def test_publishable_projection_with_positive_evidence_has_traceable_citation_and_refs(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            legal_requirement="suppression_validator=final_disposition_map",
+                gap_reasoning=(
+                    '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing",'
+                    '"positive_evidence_ids":["evi:chunk:transfer-positive"]}}'
+                ),
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.add(
+        EvidenceRecord(
+            evidence_id="evi:chunk:transfer-positive",
+            audit_id=audit.id,
+            evidence_type="retrieval_chunk",
+            source_ref="transfer-positive",
+            text_excerpt="Transfers rely on safeguards where practical.",
+            article_number="13",
+            paragraph_ref="1(f)",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    row = next(r for r in rows if r.section_id == "systemic:missing_transfer_notice")
+    assert row.citations
+    assert row.document_evidence_refs
+    assert "no explicit evidence refs from final map" not in (row.citation_summary_text or "").lower()
+
+
+def test_publishable_without_citations_uses_clean_absence_statement(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"legal_basis":{"status":"gap","publication_recommendation":"publish","reasoning":"legal basis missing"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+    rows = get_findings(audit.id, db_session)
+    row = next(r for r in rows if r.section_id == "systemic:missing_legal_basis")
+    assert row.citations == []
+    assert row.policy_evidence_excerpt == "No explicit legal basis is described for the listed processing activities."
+    assert row.document_evidence == row.policy_evidence_excerpt
+
+
 def test_get_review_grouped_returns_expected_sections(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
