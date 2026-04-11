@@ -58,6 +58,7 @@ from app.services.audit_runner import (
     _legal_reasoning_step,
     _validate_family_obligations,
     _not_assessable_allowed,
+    _issue_relevance_score,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -1524,6 +1525,20 @@ def test_applicability_memo_keeps_explicit_consent_excerpt_assessable_even_if_sh
 def test_not_assessable_gate_forbids_explicit_unlawful_patterns():
     text = "Consent inferred from continued use and retained indefinitely."
     assert _not_assessable_allowed(text, "needs review", "not_assessable") is False
+
+
+def test_issue_relevance_score_prefers_retention_over_transfer_for_retention_section():
+    section = SectionData(
+        id="ret-sec",
+        section_order=1,
+        section_title="Data Retention",
+        content="We retain personal data for 24 months and then delete it.",
+        page_start=1,
+        page_end=1,
+    )
+    retention_score = _issue_relevance_score("missing_retention", section)
+    transfer_score = _issue_relevance_score("missing_transfer_notice", section)
+    assert retention_score > transfer_score
 
 
 def test_applicability_decision_direct_allows_article_13():

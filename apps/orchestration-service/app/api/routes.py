@@ -385,6 +385,10 @@ def _project_published_findings_from_map(
             projected_evidence_ids.append(f"evi:policy:{backing.section_id}")
         projected_evidence_ids = list(dict.fromkeys(e for e in projected_evidence_ids if isinstance(e, str) and e.startswith("evi:")))
         inferred_issue = _infer_issue_from_text(issue, backing.gap_note if backing else reason, backing.remediation_note if backing else None)
+        if inferred_issue == "missing_controller_identity" and _controller_identity_disclosed_in_document(backing_rows):
+            item["blocker_reason"] = "document-wide reconciliation found controller identity/contact disclosure"
+            item["missing_requirements"] = ["document_wide_reconciliation.override"]
+            continue
         if _document_wide_duty_satisfied_elsewhere(inferred_issue, backing_rows):
             item["blocker_reason"] = "document-wide reconciliation satisfied duty elsewhere"
             item["missing_requirements"] = ["document_wide_reconciliation.override"]
@@ -538,6 +542,18 @@ def _document_wide_duty_satisfied_elsewhere(issue: str, rows: list[Finding] | No
         if _issue_family(row_issue) != target_family:
             continue
         if row.status == "compliant" and row.publish_flag == "yes":
+            return True
+    return False
+
+
+def _controller_identity_disclosed_in_document(rows: list[Finding] | None) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        text = _sanitize_external_reasoning(f"{row.policy_evidence_excerpt or ''} {row.gap_note or ''} {row.remediation_note or ''}").lower()
+        has_identity = any(t in text for t in {"controller", "registered office", "registered address", "company"})
+        has_contact = any(t in text for t in {"privacy@", "email", "contact", "address", "webform"})
+        if has_identity and has_contact:
             return True
     return False
 
@@ -1118,7 +1134,7 @@ def _absence_proof_publishable_row(
     anchor = _absence_mode_requirement(issue)
     legal_requirement = ", ".join(anchor)
     absence_proof = (
-        f"Absence-proof mode. Sections checked: {', '.join(sections)}. "
+        f"No explicit statement for the required disclosure was found after full-document review. Sections checked: {', '.join(sections)}. "
         f"Headings checked: {', '.join(headings)}. "
         f"Terms searched: {', '.join(terms)}. "
         "Result: required disclosure language absent in reviewed notice excerpts."
@@ -1279,19 +1295,16 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         first = row.citations[0]
         quote = _sanitize_published_text(first.excerpt) or ""
         if quote:
-            excerpt = (
-                f'Quote mode. Source={first.source_ref or first.chunk_id}. '
-                f'Section={row.section_id}. Quote="{quote}"'
-            )
+            excerpt = quote
     if not excerpt:
         scope_sections = row.affected_sections or [row.section_id]
         scope_headings = row.where_disclosure_missing or scope_sections
         scope_terms = [issue or "required disclosure"]
         excerpt = (
-            f"Absence-proof mode. Sections checked: {', '.join(scope_sections)}. "
+            f"No explicit statement for the required disclosure was found after full-document review. "
+            f"Sections checked: {', '.join(scope_sections)}. "
             f"Headings checked: {', '.join(scope_headings)}. "
-            f"Terms searched: {', '.join(scope_terms)}. "
-            "Result: required disclosure absent."
+            f"Terms checked: {', '.join(scope_terms)}."
         )
     row.policy_evidence_excerpt = excerpt
     row.document_evidence = _sanitize_published_text(row.policy_evidence_excerpt)
@@ -1316,31 +1329,6 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.final_legal_outcome = "non_compliant"
     if row.final_legal_outcome == "not_assessable_from_provided_text" and row.status in {"gap", "partial"}:
         row.final_legal_outcome = "partially_compliant" if row.status == "partial" else "non_compliant"
-    return row
-
-
-def _to_audit_ready_view(row: FindingOut) -> FindingOut:
-    row.publish_flag = None
-    row.artifact_role = None
-    row.finding_level = None
-    row.publication_state = None
-    row.confidence = None
-    row.confidence_evidence = None
-    row.confidence_applicability = None
-    row.confidence_synthesis = None
-    row.missing_from_section = None
-    row.missing_from_document = None
-    row.not_visible_in_excerpt = None
-    row.obligation_under_review = None
-    row.collection_mode = None
-    row.applicability_status = None
-    row.visibility_status = None
-    row.section_vs_document_scope = None
-    row.missing_fact_if_unresolved = None
-    row.support_complete = None
-    row.omission_basis = None
-    row.source_scope_confidence = None
-    row.referenced_unseen_sections = None
     return row
 
 

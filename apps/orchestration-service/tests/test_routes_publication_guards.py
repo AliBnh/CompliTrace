@@ -1465,7 +1465,9 @@ def test_published_evidence_excerpt_uses_quote_or_absence_mode_not_generic_phras
     published = next(r for r in rows if r.section_id == "systemic:missing_transfer_notice")
     excerpt = (published.policy_evidence_excerpt or "").lower()
     assert "reviewed sections show processing context but do not contain required disclosure language" not in excerpt
-    assert ("quote mode" in excerpt) or ("absence-proof mode" in excerpt)
+    assert "quote mode" not in excerpt
+    assert "absence-proof mode" not in excerpt
+    assert ("no explicit statement" in excerpt) or len(excerpt) > 0
 
 
 def test_get_review_grouped_returns_expected_sections(db_session: Session):

@@ -578,6 +578,24 @@ def _duty_registry_key_for_issue(issue_name: str) -> str | None:
     return mapping.get(issue_name)
 
 
+def _issue_relevance_score(issue_name: str, section: SectionData) -> int:
+    text = _norm(f"{section.section_title} {section.content}")
+    signals: dict[str, set[str]] = {
+        "missing_controller_contact": {"controller", "contact", "email", "address", "privacy@"},
+        "purpose_specificity_gap": {"purpose", "why we process", "processing purpose"},
+        "missing_legal_basis": {"legal basis", "lawful basis", "consent", "legitimate interests", "contract"},
+        "recipients_disclosure_gap": {"recipient", "third party", "vendor", "partner", "share"},
+        "missing_transfer_notice": {"transfer", "third country", "outside eea", "safeguard", "scc", "adequacy"},
+        "missing_retention": {"retention", "retain", "storage period", "kept for"},
+        "missing_rights_information": {"right to access", "rectification", "erasure", "objection", "portability"},
+        "missing_complaint_right": {"complaint", "supervisory authority"},
+        "article_14_indirect_collection_gap": {"source", "third-party source", "obtained from"},
+        "profiling_disclosure_gap": {"profiling", "automated decision", "logic involved", "significance", "effects"},
+    }
+    tokens = signals.get(issue_name, set())
+    return sum(1 for token in tokens if token in text)
+
+
 def _validate_duty_outcome(duty: GdprDutySpec, sections: list[SectionData]) -> str:
     corpus = _norm(" ".join(f"{s.section_title} {s.content}" for s in sections))
     if len(corpus) < 80:
@@ -4218,25 +4236,31 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         collection_mode = _collection_mode(section)
         issue_spotting_calls_total.inc()
         candidate_issues = _spot_candidate_issues(section, collection_mode)
-        unmet_duty_issue = next(
-            (
-                issue_name
-                for issue_name in [
-                    "missing_controller_contact",
-                    "purpose_specificity_gap",
-                    "missing_legal_basis",
-                    "recipients_disclosure_gap",
-                    "missing_transfer_notice",
-                    "missing_retention",
-                    "missing_rights_information",
-                    "missing_complaint_right",
-                    "article_14_indirect_collection_gap",
-                    "profiling_disclosure_gap",
-                ]
-                if duty_validation.get(_duty_registry_key_for_issue(issue_name) or "", "compliant") in {"non_compliant", "partially_compliant"}
-            ),
-            None,
-        )
+        unmet_candidates = [
+            issue_name
+            for issue_name in [
+                "missing_controller_contact",
+                "purpose_specificity_gap",
+                "missing_legal_basis",
+                "recipients_disclosure_gap",
+                "missing_transfer_notice",
+                "missing_retention",
+                "missing_rights_information",
+                "missing_complaint_right",
+                "article_14_indirect_collection_gap",
+                "profiling_disclosure_gap",
+            ]
+            if duty_validation.get(_duty_registry_key_for_issue(issue_name) or "", "compliant") in {"non_compliant", "partially_compliant"}
+        ]
+        unmet_duty_issue = None
+        if unmet_candidates:
+            ranked = sorted(
+                ((issue_name, _issue_relevance_score(issue_name, section)) for issue_name in unmet_candidates),
+                key=lambda pair: pair[1],
+                reverse=True,
+            )
+            if ranked and ranked[0][1] > 0:
+                unmet_duty_issue = ranked[0][0]
         if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
             candidate_issues.insert(
                 0,
@@ -4601,6 +4625,15 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 f.gap_note = (
                     "Substantive disclosure signal detected; not-assessable is disallowed by strict legal gate."
                 )
+        explicit_after_classification = _explicit_violation_hits(f"{section.section_title}. {section.content} {f.gap_note or ''}")
+        if explicit_after_classification and classification in {"not_assessable", "diagnostic_internal_only", "retrieval_failure_internal_only"}:
+            classification = "clear_non_compliance"
+            f.status = "gap"
+            f.severity = "high"
+            f.gap_note = (
+                f"Explicit violation validator matched ({explicit_after_classification[0][0]}). "
+                "Finding promoted to substantive non-compliance."
+            )
         consistency_ok, consistency_reason = _pre_persist_consistency_gate(
             qualification["issue_name"],
             claim_types,
