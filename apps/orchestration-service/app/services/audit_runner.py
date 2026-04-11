@@ -690,11 +690,11 @@ def _obligation_family_for_issue(issue_name: str) -> str:
 
 FAMILY_ARTICLE_MAP: dict[str, tuple[str, list[str], list[str]]] = {
     "identity_contact_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["21", "22"]),
-    "lawful_basis_and_validity": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(a)"]),
-    "retention_transparency_and_storage_limitation": ("13(2)(a)", ["14(2)(a)", "5(1)(e)"], ["6(1)"]),
+    "lawful_basis_and_validity": ("13(1)(c)", ["14(1)(c)"], ["13(1)(a)"]),
+    "retention_transparency_and_storage_limitation": ("13(2)(a)", ["14(2)(a)"], ["6(1)"]),
     "rights_and_complaints": ("13(2)(b)", ["13(2)(d)", "14(2)(c)", "14(2)(e)", "77"], ["5(1)(a)"]),
     "international_transfers": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"]),
-    "profiling_and_article22": ("13(2)(f)", ["14(2)(g)", "22"], ["21"]),
+    "profiling_and_article22": ("13(2)(f)", ["14(2)(g)"], ["21"]),
     "recipients_transparency": ("13(1)(e)", ["14(1)(e)", "12(1)"], ["21", "22"]),
     "purpose_specification": ("13(1)(c)", ["14(1)(c)", "5(1)(b)"], ["21"]),
     "indirect_collection_article14": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"]),
@@ -954,8 +954,23 @@ def _legal_qualification_for_issue(issue: CandidateIssue, facts: list[LegalFact]
         obligation_family,
         ("13(1)(a)", ["14(1)(a)"], ["21", "22"]),
     )
+    secondary = list(secondary)
     reason_fit = f"Article set selected from obligation family '{obligation_family}' rather than snippet-level matching."
     reason_reject = "Rejected articles are outside the triggered obligation family for this finding."
+    facts_set = {(f["fact_type"], f["value"]) for f in (facts or [])}
+
+    if obligation_family == "lawful_basis_and_validity" and defect_type in {"present_but_invalid_disclosure", "potential_unlawful_practice"}:
+        secondary = [*secondary, "6(1)", "7(1)"]
+        reason_fit = "Lawful-basis issue kept in Article 13/14 notice family, with Articles 6/7 added because validity is implicated."
+    if obligation_family == "retention_transparency_and_storage_limitation" and defect_type == "potential_unlawful_practice":
+        secondary = [*secondary, "5(1)(e)"]
+        reason_fit = "Retention issue mapped to Articles 13/14, with Article 5(1)(e) added due to excessive/indefinite retention pattern."
+    if obligation_family == "profiling_and_article22" and (
+        defect_type == "potential_unlawful_practice" or ("automated_decisioning", "article22_risk_signal") in facts_set
+    ):
+        secondary = [*secondary, "22"]
+        reason_fit = "Profiling issue mapped to Articles 13/14 with Article 22 added because legal/similarly-significant effects are indicated."
+
     if defect_type == "potential_unlawful_practice":
         if issue_name == "missing_legal_basis":
             primary = "6(1)"
@@ -1516,13 +1531,13 @@ def _has_explicit_gdpr_fact(text: str) -> bool:
 
 def _most_specific_article_for_claim(claim_type: str, available_articles: set[int]) -> int | None:
     preference = {
-        "legal_basis": [6, 13, 14, 5],
+        "legal_basis": [13, 14, 6, 7, 5],
         "retention": [13, 14, 5],
         "rights": [13, 14, 12, 21, 22, 15, 16, 17, 18, 19, 20],
         "right_to_object": [21, 13, 14, 12],
         "controller_contact": [13, 14, 12],
         "complaint": [13, 14, 77, 12],
-        "transfer": [13, 14, 46, 45, 44, 47, 49],
+        "transfer": [13, 14, 44, 45, 46, 47, 49],
         "sensitive_data": [9, 13, 14, 6],
         "profiling": [13, 14, 22, 21],
     }

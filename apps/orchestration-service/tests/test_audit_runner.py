@@ -1623,6 +1623,22 @@ def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     assert qual["defect_type"] == "missing_disclosure"
 
 
+def test_legal_qualification_keeps_legal_basis_in_notice_family_without_validity_signal():
+    issue = {
+        "candidate_issue_type": "missing_legal_basis",
+        "evidence_text": "We process personal data for service delivery.",
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue, [])
+    assert qual["primary_article"] == "13(1)(c)"
+    assert "14(1)(c)" in qual["secondary_articles"]
+    assert "6(1)" not in qual["secondary_articles"]
+    assert "7(1)" not in qual["secondary_articles"]
+
+
 def test_forbidden_matrix_rejects_article_21_for_complaint():
     citations = [LlmCitation(chunk_id="z1", article_number="21")]
     assert _violates_forbidden_article_matrix({"complaint"}, citations) is True
@@ -1657,6 +1673,23 @@ def test_legal_qualification_maps_indefinite_retention_to_storage_limitation_pri
     assert qual["defect_type"] == "potential_unlawful_practice"
     assert qual["primary_article"] == "5(1)(e)"
     assert qual["priority_bucket"] == "fatal"
+
+
+def test_legal_qualification_adds_article_22_only_when_profiling_is_truly_triggered():
+    issue = {
+        "candidate_issue_type": "profiling_disclosure_gap",
+        "evidence_text": "We use profiling for service optimization.",
+        "evidence_strength": 0.6,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    qual_plain = _legal_qualification_for_issue(issue, [])
+    assert "22" not in qual_plain["secondary_articles"]
+
+    facts = _extract_legal_facts("Automated decisions may produce legal effects without human intervention.")
+    qual_triggered = _legal_qualification_for_issue(issue, facts)
+    assert "22" in qual_triggered["secondary_articles"]
 
 
 def test_legal_qualification_uses_facts_to_mark_lawful_basis_present_but_unmapped():
