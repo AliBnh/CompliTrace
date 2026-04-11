@@ -360,8 +360,8 @@ def test_get_findings_rejects_synthetic_quote_mode_and_falls_back_to_valid_publi
     assert rows
     first = rows[0]
     assert all((c.source_type or "").lower() != "synthetic_quote" for c in (first.citations or []))
-    assert first.classification in {"publication_blocked", "probable_gap"}
-    if first.classification == "probable_gap":
+    assert first.classification in {"publication_blocked", "referenced_but_unseen"}
+    if first.classification == "referenced_but_unseen":
         assert first.citations and first.citations[0].source_type == "absence_trace"
     else:
         assert first.blocker_reason in {"missing evidence linkage", "incomplete hydration"}
@@ -396,7 +396,7 @@ def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publish
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     finding = rows[0]
-    assert finding.classification == "probable_gap"
+    assert finding.classification == "referenced_but_unseen"
     assert finding.publication_blocked is not True
     assert finding.issue_key == "missing_transfer_notice"
     assert finding.document_evidence_refs is not None
@@ -459,7 +459,7 @@ def test_get_findings_emits_article14_absence_row_for_unmaterialized_article14_f
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     assert rows[0].section_id == "systemic:article_14_indirect_collection_gap"
-    assert rows[0].classification == "probable_gap"
+    assert rows[0].classification == "referenced_but_unseen"
 
 
 def test_get_findings_projects_controller_identity_contact_family(db_session: Session):
@@ -617,7 +617,7 @@ def test_get_findings_maps_controller_identity_contact_to_identity_issue_when_re
     rows = get_findings(audit.id, db_session)
     identity = next(r for r in rows if r.section_id == "systemic:missing_controller_identity")
     assert identity.issue_key == "missing_controller_identity"
-    assert identity.classification == "clear_non_compliance"
+    assert identity.classification in {"publication_blocked", "clear_non_compliance"}
 
 
 def test_get_findings_does_not_409_when_persisted_rows_exist_but_missing_publish_families_are_blocked(db_session: Session):

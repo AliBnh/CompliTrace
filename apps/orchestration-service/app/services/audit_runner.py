@@ -418,8 +418,189 @@ class LegalFact(TypedDict):
     evidence: str
 
 
+class GdprDutySpec(TypedDict):
+    duty_id: str
+    document_types: list[str]
+    primary_articles: list[str]
+    secondary_articles: list[str]
+    trigger_conditions: list[str]
+    satisfaction_requirements: list[str]
+    clear_failure_patterns: list[str]
+    allowed_outcomes: list[str]
+
+
+GDPR_DUTY_REGISTRY: dict[str, GdprDutySpec] = {
+    "controller_identity_contact": {
+        "duty_id": "controller_identity_contact",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(a)", "Art. 14(1)(a)"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["controller identity", "contact route (email/webform/address)"],
+        "clear_failure_patterns": ["controller not named", "no contact route", "contact missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "purposes_notice": {
+        "duty_id": "purposes_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(c)", "Art. 14(1)(c)"],
+        "secondary_articles": ["Art. 5(1)(b)"],
+        "trigger_conditions": ["document presents processing purposes"],
+        "satisfaction_requirements": ["specific purpose statements"],
+        "clear_failure_patterns": ["generic business purposes only", "purpose categories not specific"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "legal_basis_notice": {
+        "duty_id": "legal_basis_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(c)", "Art. 14(1)(c)"],
+        "secondary_articles": ["Art. 6", "Art. 7"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["lawful basis disclosed", "mapped to purpose where needed"],
+        "clear_failure_patterns": ["consent inferred from use", "legal basis not mapped", "implied consent only"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "recipients_notice": {
+        "duty_id": "recipients_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(e)", "Art. 14(1)(e)"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["document mentions sharing/disclosure"],
+        "satisfaction_requirements": ["recipient categories or specific recipients"],
+        "clear_failure_patterns": ["partners/vendors mentioned without categories"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "transfers_notice": {
+        "duty_id": "transfers_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(f)", "Art. 14(1)(f)"],
+        "secondary_articles": ["Art. 44", "Art. 45", "Art. 46"],
+        "trigger_conditions": ["international transfer signal present"],
+        "satisfaction_requirements": ["transfer disclosed", "safeguard/mechanism disclosed"],
+        "clear_failure_patterns": ["safeguards where practical", "no specific mechanism disclosed"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "retention_notice": {
+        "duty_id": "retention_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(a)", "Art. 14(2)(a)"],
+        "secondary_articles": ["Art. 5(1)(e)"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["specific retention period or objective criteria"],
+        "clear_failure_patterns": ["retained indefinitely", "retained for business needs", "extended periods"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "rights_notice": {
+        "duty_id": "rights_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(b)", "Art. 14(2)(c)"],
+        "secondary_articles": ["Art. 12", "Art. 15-22"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["rights listed and actionable"],
+        "clear_failure_patterns": ["rights not disclosed"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "complaint_right_notice": {
+        "duty_id": "complaint_right_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(d)", "Art. 14(2)(e)"],
+        "secondary_articles": ["Art. 77"],
+        "trigger_conditions": ["document presents data-subject rights"],
+        "satisfaction_requirements": ["supervisory authority complaint right disclosed"],
+        "clear_failure_patterns": ["complaint right missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "profiling_notice": {
+        "duty_id": "profiling_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(f)", "Art. 14(2)(g)"],
+        "secondary_articles": ["Art. 22"],
+        "trigger_conditions": ["profiling or automated decision signal present"],
+        "satisfaction_requirements": ["logic involved", "significance", "effects/safeguards where relevant"],
+        "clear_failure_patterns": ["automated profiling without logic", "automated decision without explanation"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+}
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _explicit_violation_library() -> dict[str, dict[str, object]]:
+    return {
+        "invalid_consent": {
+            "patterns": {"consent inferred from use", "consent inferred from continued", "consent via browsing", "implied consent"},
+            "articles": ["Art. 6", "Art. 7", "Art. 4(11)"],
+            "issue": "missing_legal_basis",
+        },
+        "unlawful_retention_wording": {
+            "patterns": {"retained indefinitely", "retained long-term for business needs", "archived indefinitely", "operational constraints"},
+            "articles": ["Art. 13(2)(a)", "Art. 14(2)(a)", "Art. 5(1)(e)"],
+            "issue": "missing_retention",
+        },
+        "weak_transfer_safeguards": {
+            "patterns": {"safeguards where practical", "protection may vary", "operational needs", "no specific mechanism disclosed"},
+            "articles": ["Art. 13(1)(f)", "Art. 14(1)(f)", "Art. 44", "Art. 45", "Art. 46"],
+            "issue": "missing_transfer_notice",
+        },
+        "profiling_without_required_explanation": {
+            "patterns": {"automated profiling", "risk scores", "service availability influenced", "without logic explanation"},
+            "articles": ["Art. 13(2)(f)", "Art. 14(2)(g)", "Art. 22"],
+            "issue": "profiling_disclosure_gap",
+        },
+    }
+
+
+def _explicit_violation_hits(text: str) -> list[tuple[str, dict[str, object]]]:
+    norm = _norm(text)
+    hits: list[tuple[str, dict[str, object]]] = []
+    for key, cfg in _explicit_violation_library().items():
+        patterns = cfg.get("patterns", set())
+        if any(p in norm for p in patterns if isinstance(p, str)):
+            hits.append((key, cfg))
+    return hits
+
+
+def _duty_registry_key_for_issue(issue_name: str) -> str | None:
+    mapping = {
+        "missing_controller_identity": "controller_identity_contact",
+        "missing_controller_contact": "controller_identity_contact",
+        "missing_legal_basis": "legal_basis_notice",
+        "missing_retention": "retention_notice",
+        "missing_rights_information": "rights_notice",
+        "missing_complaint_right": "complaint_right_notice",
+        "missing_transfer_notice": "transfers_notice",
+        "profiling_disclosure_gap": "profiling_notice",
+        "recipients_disclosure_gap": "recipients_notice",
+        "purpose_specificity_gap": "purposes_notice",
+    }
+    return mapping.get(issue_name)
+
+
+def _validate_duty_outcome(duty: GdprDutySpec, sections: list[SectionData]) -> str:
+    corpus = _norm(" ".join(f"{s.section_title} {s.content}" for s in sections))
+    if len(corpus) < 80:
+        return "not_assessable_from_provided_text"
+    failure_patterns = {p for p in duty["clear_failure_patterns"]}
+    if any(p in corpus for p in failure_patterns):
+        return "non_compliant"
+    requirements = {r for r in duty["satisfaction_requirements"]}
+    req_hits = sum(1 for r in requirements if any(token in corpus for token in _norm(r).split()[:2]))
+    if req_hits == 0:
+        return "non_compliant"
+    if req_hits < len(requirements):
+        return "partially_compliant"
+    return "compliant"
+
+
+def _document_wide_duty_validation(sections: list[SectionData], document_type: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for duty_id, duty in GDPR_DUTY_REGISTRY.items():
+        if not any(t in document_type for t in duty["document_types"]):
+            continue
+        out[duty_id] = _validate_duty_outcome(duty, sections)
+    return out
 
 
 def _is_not_applicable(section: SectionData) -> bool:
@@ -3935,6 +4116,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     )
     document_mode = _infer_document_mode(sections)
     posture = _document_posture_agent(sections, document_mode)
+    duty_validation = _document_wide_duty_validation(sections, posture["document_type"])
     obligation_map = _build_document_obligation_map(sections)
     llm_budget_cap = _effective_llm_budget(len(sections), settings.max_llm_calls_per_audit)
     llm_rate_limited = False
@@ -4024,6 +4206,39 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         collection_mode = _collection_mode(section)
         issue_spotting_calls_total.inc()
         candidate_issues = _spot_candidate_issues(section, collection_mode)
+        unmet_duty_issue = next(
+            (
+                issue_name
+                for issue_name in [
+                    "missing_controller_contact",
+                    "purpose_specificity_gap",
+                    "missing_legal_basis",
+                    "recipients_disclosure_gap",
+                    "missing_transfer_notice",
+                    "missing_retention",
+                    "missing_rights_information",
+                    "missing_complaint_right",
+                    "article_14_indirect_collection_gap",
+                    "profiling_disclosure_gap",
+                ]
+                if duty_validation.get(_duty_registry_key_for_issue(issue_name) or "", "compliant") in {"non_compliant", "partially_compliant"}
+            ),
+            None,
+        )
+        if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
+            candidate_issues.insert(
+                0,
+                CandidateIssue(
+                    candidate_issue_type=unmet_duty_issue,
+                    evidence_text=section.content[:200],
+                    evidence_strength=0.6,
+                    local_or_document_level="document",
+                    possible_collection_mode=collection_mode,
+                    is_visible_gap=True,
+                    legal_posture="missing_disclosure",
+                    legal_posture_reason="Injected from obligation-first document-wide duty validation.",
+                ),
+            )
         primary_issue = candidate_issues[0] if candidate_issues else CandidateIssue(
             candidate_issue_type="missing_controller_identity",
             evidence_text=section.content[:180],
@@ -4310,6 +4525,18 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 )
 
         f = _enforce_substantive_citation_gate(f, valid_citations)
+        violation_hits = _explicit_violation_hits(f"{section.section_title}. {section.content} {f.gap_note or ''}")
+        if violation_hits and f.status in {"needs review", "not applicable"}:
+            first_key, first_cfg = violation_hits[0]
+            f.status = "gap"
+            f.severity = "high"
+            f.gap_note = (
+                f"Explicit violation validator matched: {first_key}. "
+                "Substantive finding forced by deterministic violation library."
+            )
+            f.remediation_note = f.remediation_note or "Provide explicit compliant disclosure aligned to cited GDPR duties."
+            issue_hint = str(first_cfg.get("issue") or qualification["issue_name"])
+            claim_types = _claim_types_from_text(issue_hint) or claim_types
         f.severity = _normalize_severity(f.status, f.severity, claim_types)
         if qualification["priority_bucket"] == "fatal" and f.status in {"gap", "partial"}:
             f.severity = "high"

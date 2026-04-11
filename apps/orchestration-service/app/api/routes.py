@@ -385,6 +385,10 @@ def _project_published_findings_from_map(
             projected_evidence_ids.append(f"evi:policy:{backing.section_id}")
         projected_evidence_ids = list(dict.fromkeys(e for e in projected_evidence_ids if isinstance(e, str) and e.startswith("evi:")))
         inferred_issue = _infer_issue_from_text(issue, backing.gap_note if backing else reason, backing.remediation_note if backing else None)
+        if _document_wide_duty_satisfied_elsewhere(inferred_issue, backing_rows):
+            item["blocker_reason"] = "document-wide reconciliation satisfied duty elsewhere"
+            item["missing_requirements"] = ["document_wide_reconciliation.override"]
+            continue
         primary_anchor = _anchors_for_issue(
             inferred_issue,
             _deserialize_json_list(backing.primary_legal_anchor) if backing and backing.primary_legal_anchor else None,
@@ -506,6 +510,25 @@ def _project_published_findings_from_map(
             continue
         out.append(projected)
     return out
+
+
+def _document_wide_duty_satisfied_elsewhere(issue: str, rows: list[Finding] | None) -> bool:
+    if not rows:
+        return False
+    target_family = _issue_family(issue)
+    if not target_family:
+        return False
+    for row in rows:
+        if row.section_id.startswith("ledger:") or row.section_id.startswith("systemic:"):
+            continue
+        row_issue = _issue_from_finding_section(row.section_id) or _infer_issue_from_text(
+            _issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note
+        )
+        if _issue_family(row_issue) != target_family:
+            continue
+        if row.status == "compliant" and row.publish_flag == "yes":
+            return True
+    return False
 
 
 def _issue_family(issue: str | None) -> str | None:
@@ -1079,17 +1102,17 @@ def _absence_proof_publishable_row(
         f"Fact: {absence_proof} "
         f"Law: {legal_requirement} requires explicit disclosure for {issue}. "
         "Breach: the required disclosure is not present in the reviewed notice text. "
-        "Conclusion: probable transparency gap; absence-proof is secondary support pending full legal-qualification evidence."
+        "Conclusion: this is a traceable absence record supporting obligation validation; legal conclusion is determined by duty-level reconciliation."
     )
     return FindingOut(
         id=f"published_absence:{audit_id}:{family}",
         section_id=f"systemic:{issue}",
         status="gap",
         severity="high" if issue in {"missing_controller_contact", "missing_transfer_notice", "profiling_disclosure_gap"} else "medium",
-        classification="probable_gap",
-        finding_type="systemic",
+        classification="referenced_but_unseen",
+        finding_type="supporting_evidence",
         publish_flag="yes",
-        artifact_role="final",
+        artifact_role="support_only",
         finding_level="systemic",
         publication_state="publishable",
         confidence=0.64,
