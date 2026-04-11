@@ -45,6 +45,7 @@ from app.services.audit_runner import (
     _legal_qualification_for_issue,
     _violates_forbidden_article_matrix,
     _systemic_evidence_refs,
+    _systemic_summary_text,
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
     _build_final_disposition_map,
@@ -102,7 +103,7 @@ def test_evidence_sufficient_true_case():
     assert _evidence_sufficient(chunks) is True
 
 
-def test_final_disposition_maps_controller_contact_gap_instead_of_unresolved_error():
+def test_final_disposition_keeps_controller_family_satisfied_when_identity_and_contact_are_present():
     sections = [
         SectionData(
             id="sec-1",
@@ -113,14 +114,20 @@ def test_final_disposition_maps_controller_contact_gap_instead_of_unresolved_err
             page_end=1,
         )
     ]
-    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    obligation_map = {
+        "controller_identity": True,
+        "controller_contact": True,
+        "legal_basis": True,
+        "retention": True,
+        "rights": True,
+        "complaint": True,
+    }
 
     disposition = _build_final_disposition_map([], sections, obligation_map)
 
     controller = disposition["controller_identity_contact"]
-    assert controller["status"] == "gap"
-    assert controller["issue_key"] == "missing_controller_contact"
-    assert controller["publication_recommendation"] == "publish"
+    assert controller["status"] == "satisfied"
+    assert controller["publication_recommendation"] == "internal_only"
 
 
 def test_upsert_evidence_records_creates_policy_and_chunk_entries():
@@ -905,7 +912,7 @@ def test_collection_mode_unknown_when_no_source_signals():
     assert _collection_mode(section) == "unknown"
 
 
-def test_systemic_evidence_refs_include_obligation_map_omission_marker():
+def test_systemic_evidence_refs_use_section_refs_and_omission_flag():
     sections = [
         SectionData(
             id="s1",
@@ -925,7 +932,12 @@ def test_systemic_evidence_refs_include_obligation_map_omission_marker():
     )
     assert omission_basis is True
     assert any(ref.startswith("section:") for ref in refs)
-    assert "coverage_check:legal_basis_present=not_visible_in_reviewed_sections" in refs
+    assert all(not ref.startswith("coverage_check:") for ref in refs)
+
+
+def test_systemic_summary_text_uses_scoped_absence_statement_without_internal_tokens():
+    summary = _systemic_summary_text("missing_legal_basis", ["section:s1:Data We Collect"], True)
+    assert summary == "No explicit required disclosure was found in the provided notice text for this obligation."
 
 
 def test_coverage_to_support_validator_requires_required_obligation_absence():

@@ -2596,6 +2596,11 @@ def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict
     }
     to_add: list[tuple[str, str]] = []
     for token, (issue_id, severity) in mandatory.items():
+        if issue_id == "missing_controller_identity":
+            identity_present = obligation_map.get("controller_identity_present") is True
+            contact_present = obligation_map.get("controller_contact_present") is True
+            if identity_present and contact_present:
+                continue
         if issue_id == "missing_legal_basis":
             has_legal_basis_issue = ("legal basis" in corpus) or ("legal_basis" in existing_obligations) or obligation_map.get("legal_basis_present", False)
             if not has_legal_basis_issue:
@@ -2888,12 +2893,8 @@ def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligati
             break
     obligation_key = SYSTEMIC_REQUIRED_OBLIGATION_KEYS.get(issue_id)
     omission_basis = False
-    if obligation_key:
-        if obligation_map.get(obligation_key) is False:
-            matched_sections.append(f"coverage_check:{obligation_key}=not_visible_in_reviewed_sections")
-            omission_basis = True
-        else:
-            matched_sections.append(f"coverage_check:{obligation_key}=visible_in_reviewed_sections")
+    if obligation_key and obligation_map.get(obligation_key) is False:
+        omission_basis = True
     return list(dict.fromkeys(matched_sections)), omission_basis
 
 
@@ -2908,11 +2909,7 @@ def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool)
         "profiling_disclosure_gap": "The notice references profiling-like processing but does not provide required profiling transparency details.",
     }.get(issue_id, "The notice-level evidence indicates a missing transparency obligation.")
     if omission_basis:
-        section_scope = ", ".join(refs[:5]) if refs else "all reviewed notice sections"
-        return (
-            f"{base} Absence-proof mode: sections reviewed={section_scope}; result=required disclosure absent. "
-            "Legal effect: GDPR transparency obligation is unmet because no explicit compliant disclosure text was found."
-        )
+        return "No explicit required disclosure was found in the provided notice text for this obligation."
     if refs:
         return f"{base} Evidence sections reviewed: {', '.join(refs[:3])}."
     return base
@@ -2961,20 +2958,6 @@ def _copy_supporting_citations(db: Session, audit_id: str, systemic_row: Finding
     return copied
 
 
-def _add_anchor_citations(db: Session, systemic_row: Finding, anchors: list[str], summary: str) -> None:
-    for idx, anchor in enumerate(anchors, start=1):
-        db.add(
-            FindingCitation(
-                finding_id=systemic_row.id,
-                chunk_id=f"coverage_check:{systemic_row.section_id}:{idx}",
-                article_number=anchor,
-                paragraph_ref=None,
-                article_title="Derived systemic legal anchor",
-                excerpt=summary,
-            )
-        )
-
-
 def _build_systemic_support(
     db: Session,
     audit_id: str,
@@ -3017,13 +3000,9 @@ def _build_systemic_support(
         existing_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
         if existing_count == 0:
             copied = _copy_supporting_citations(db, audit_id, row, issue_id)
-            if copied == 0 and primary:
-                _add_anchor_citations(db, row, primary, summary)
-                existing_count = len(primary)
-            else:
-                existing_count = copied
+            existing_count = copied
 
-        publishable = bool(primary) and bool(refs) and bool(summary.strip()) and support_valid and existing_count > 0
+        publishable = bool(primary) and bool(summary.strip()) and support_valid and (existing_count > 0 or omission_basis)
         unseen_reference_for_issue = _issue_has_unseen_reference(issue_id, cross_references)
         excerpt_limited = source_scope in {"partial_notice_excerpt", "uncertain_scope"}
         # Cross-reference contradiction gate: unseen references block confirmed-document assertions.
@@ -3292,7 +3271,7 @@ def _build_final_disposition_map(
                 elif contact_present is False:
                     status, reason = "gap", "controller contact route disclosure is missing or unclear"
                     issue = "missing_controller_contact"
-                elif identity_present is None or contact_present is None or not _has_positive_core_evidence(rows, "controller_identity_contact"):
+                elif identity_present is None or contact_present is None:
                     status, reason = "gap", "controller identity/contact transparency is missing or not explicit"
                     issue = "missing_controller_contact"
             elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
@@ -4666,14 +4645,17 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     "Substantive disclosure signal detected; not-assessable is disallowed by strict legal gate."
                 )
         explicit_after_classification = _explicit_violation_hits(f"{section.section_title}. {section.content} {f.gap_note or ''}")
-        if explicit_after_classification and classification in {"not_assessable", "diagnostic_internal_only", "retrieval_failure_internal_only"}:
-            classification = "clear_non_compliance"
-            f.status = "gap"
-            f.severity = "high"
-            f.gap_note = (
-                f"Explicit violation validator matched ({explicit_after_classification[0][0]}). "
-                "Finding promoted to substantive non-compliance."
-            )
+        if explicit_after_classification:
+            hard_violation_keys = {"invalid_consent", "unlawful_retention_wording"}
+            first_key = explicit_after_classification[0][0]
+            if first_key in hard_violation_keys or classification in {"not_assessable", "diagnostic_internal_only", "retrieval_failure_internal_only"}:
+                classification = "clear_non_compliance"
+                f.status = "gap"
+                f.severity = "high"
+                f.gap_note = (
+                    f"Explicit violation validator matched ({first_key}). "
+                    "Finding promoted to substantive non-compliance."
+                )
         consistency_ok, consistency_reason = _pre_persist_consistency_gate(
             qualification["issue_name"],
             claim_types,

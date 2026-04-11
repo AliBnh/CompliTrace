@@ -1284,18 +1284,10 @@ def _absence_proof_publishable_row(
     searched_terms: list[str] | None = None,
     review_reasoning: str | None = None,
 ) -> FindingOut:
-    sections = searched_sections or ["all reviewed privacy-notice sections"]
-    headings = searched_headings or ["privacy notice", "data we collect", "how we use data", "your rights"]
-    terms = searched_terms or [issue.replace("_", " ")]
-    evidence_id = f"evi:absence-proof:{issue}"
+    sections = searched_sections or ["provided privacy-notice text"]
     anchor = _absence_mode_requirement(issue)
     legal_requirement = ", ".join(anchor)
-    absence_proof = (
-        f"No explicit statement for the required disclosure was found after full-document review. Sections checked: {', '.join(sections)}. "
-        f"Headings checked: {', '.join(headings)}. "
-        f"Terms searched: {', '.join(terms)}. "
-        "Result: required disclosure language absent in reviewed notice excerpts."
-    )
+    absence_proof = "No explicit required disclosure was found in the provided notice text for this obligation."
     reasoning = (
         f"Fact: {absence_proof} "
         f"Law: {legal_requirement} requires explicit disclosure for {issue}. "
@@ -1332,7 +1324,7 @@ def _absence_proof_publishable_row(
         ),
         primary_legal_anchor=anchor,
         secondary_legal_anchors=None,
-        document_evidence_refs=[evidence_id],
+        document_evidence_refs=None,
         citation_summary_text=absence_proof,
         support_complete=False,
         omission_basis=True,
@@ -1346,18 +1338,7 @@ def _absence_proof_publishable_row(
         where_disclosure_missing=sections,
         gap_note=_sanitize_published_text(review_reasoning) or f"Required disclosure for {issue} is absent from reviewed notice sections.",
         remediation_note="Add explicit disclosure language mapped to the cited GDPR notice obligations.",
-        citations=[
-            CitationOut(
-                chunk_id=f"absence-proof:{issue}",
-                evidence_id=evidence_id,
-                source_type="absence_trace",
-                source_ref=f"sections={';'.join(sections)}|headings={';'.join(headings)}|terms={';'.join(terms)}",
-                article_number=anchor[0].replace("GDPR Art. ", "").split(",")[0],
-                paragraph_ref=None,
-                article_title="Traceable absence proof",
-                excerpt=absence_proof,
-            )
-        ],
+        citations=[],
     )
 
 
