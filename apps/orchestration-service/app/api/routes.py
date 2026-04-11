@@ -1020,6 +1020,9 @@ def _absence_proof_is_secondary_eligible(
     }
     if set(missing_requirements) & non_linkage_fields:
         return False
+    absence_markers = {"missing", "absent", "not disclosed", "not visible", "not clearly disclosed"}
+    if not any(marker in reasoning for marker in absence_markers):
+        return False
     # Keep Article 14 family first-class but still absence-secondary only.
     return issue in PUBLISHABLE_FALLBACK_ISSUES
 

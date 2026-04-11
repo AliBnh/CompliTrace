@@ -520,12 +520,11 @@ def test_get_findings_emits_publishable_absence_proof_for_required_publish_famil
 
     rows = get_findings(audit.id, db_session)
     published_rows = [row for row in rows if row.section_id.startswith("systemic:") and row.classification != "publication_blocked"]
-    assert len(published_rows) >= 6
+    assert len(published_rows) >= 5
     assert {row.issue_key for row in published_rows if row.issue_key} >= {
         "missing_controller_contact",
         "missing_transfer_notice",
         "profiling_disclosure_gap",
-        "controller_processor_role_ambiguity",
         "recipients_disclosure_gap",
         "purpose_specificity_gap",
     }
