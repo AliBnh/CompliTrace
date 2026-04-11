@@ -410,6 +410,12 @@ class CrossReference(TypedDict):
     section_present_in_reviewed_source: str
 
 
+class LegalFact(TypedDict):
+    fact_type: str
+    value: str
+    evidence: str
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
 
@@ -625,6 +631,56 @@ def _obligation_family_for_issue(issue_name: str) -> str:
         "purpose_specificity_gap": "purpose_specification",
     }
     return family_map.get(issue_name, "general_transparency")
+
+
+def _extract_legal_facts(text: str) -> list[LegalFact]:
+    norm = _norm(text)
+    facts: list[LegalFact] = []
+    if any(t in norm for t in {"from partners", "from third parties", "data aggregators", "public records", "external datasets"}):
+        facts.append(
+            LegalFact(
+                fact_type="data_source",
+                value="third_party",
+                evidence="collect/obtain data from partners/third parties/external sources",
+            )
+        )
+    if any(t in norm for t in {"as long as necessary", "indefinite", "indefinitely", "extended period"}):
+        facts.append(
+            LegalFact(
+                fact_type="retention_policy",
+                value="undefined_duration",
+                evidence="retention period wording indicates indefinite or undefined duration",
+            )
+        )
+    if any(t in norm for t in {"inferred consent", "continued use", "consent inferred"}):
+        facts.append(
+            LegalFact(
+                fact_type="lawful_basis_model",
+                value="consent_inferred_from_use",
+                evidence="consent model appears inferred from continued use",
+            )
+        )
+    if any(t in norm for t in {"without human intervention", "legal effect", "similarly significant"}):
+        facts.append(
+            LegalFact(
+                fact_type="automated_decisioning",
+                value="article22_risk_signal",
+                evidence="automated-decisioning effects/safeguard risk wording detected",
+            )
+        )
+    return facts
+
+
+def _legal_reasoning_step(section: SectionData, issue: CandidateIssue, qualification: LegalQualification) -> tuple[list[LegalFact], str]:
+    facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+    severity_recommendation = "high" if qualification["priority_bucket"] == "fatal" else "medium"
+    narrative = (
+        f"Legal reasoning pipeline: facts={facts}; "
+        f"triggered_obligation_family={qualification['obligation_family']}; "
+        f"legal_validation={qualification['defect_type']}; "
+        f"severity_recommendation={severity_recommendation}."
+    )
+    return facts, narrative
 
 
 def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
@@ -3763,6 +3819,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             is_visible_gap=False,
         )
         qualification = _legal_qualification_for_issue(primary_issue)
+        legal_facts, legal_pipeline_note = _legal_reasoning_step(section, primary_issue, qualification)
         legal_qualification_calls_total.inc()
         topic = f"{_infer_topic(section)} qualified_issue:{qualification['issue_name']} primary_article:{qualification['primary_article']}"
         query = _build_retrieval_query(section, topic, document_mode)
@@ -4049,6 +4106,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 f"Primary fit: {qualification['reason_primary_article_fits']} "
                 f"Rejected rationale: {qualification['reason_rejected_articles_do_not_fit']}"
             )
+            if legal_facts:
+                f.gap_note = f"{f.gap_note} {legal_pipeline_note}"
             specialized_bits = [v for v in specialized_review.values() if v]
             if specialized_bits:
                 f.gap_note = f"{f.gap_note} Specialized legal review: {' '.join(specialized_bits)}"

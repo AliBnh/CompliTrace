@@ -54,6 +54,8 @@ from app.services.audit_runner import (
     _source_scope_qualification,
     _issue_has_unseen_reference,
     _has_positive_contradictory_disclosure,
+    _extract_legal_facts,
+    _legal_reasoning_step,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -1609,6 +1611,38 @@ def test_legal_qualification_maps_indefinite_retention_to_storage_limitation_pri
     assert qual["defect_type"] == "potential_unlawful_practice"
     assert qual["primary_article"] == "5(1)(e)"
     assert qual["priority_bucket"] == "fatal"
+
+
+def test_extract_legal_facts_captures_partner_source_and_undefined_retention():
+    facts = _extract_legal_facts(
+        "We may collect data from partners and external datasets and keep data as long as necessary."
+    )
+    fact_types = {f["fact_type"] for f in facts}
+    assert "data_source" in fact_types
+    assert "retention_policy" in fact_types
+
+
+def test_legal_reasoning_step_outputs_text_to_fact_to_family_flow():
+    section = SectionData(
+        id="sec-flow",
+        section_order=1,
+        section_title="Data sources",
+        content="We may collect data from partners and public records.",
+        page_start=1,
+        page_end=1,
+    )
+    issue = {
+        "candidate_issue_type": "article_14_indirect_collection_gap",
+        "evidence_text": section.content,
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "indirect",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    facts, narrative = _legal_reasoning_step(section, issue, qual)
+    assert any(f["fact_type"] == "data_source" and f["value"] == "third_party" for f in facts)
+    assert "triggered_obligation_family=indirect_collection_article14" in narrative
 
 
 def test_classify_finding_quality_uses_visible_violation_rule_without_citations():
