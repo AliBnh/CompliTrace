@@ -174,7 +174,7 @@ def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypa
     sections = parse_pdf_into_sections("dummy.pdf")
     assert len(sections) == 2
     assert sections[0].section_title == "1. Introduction and Scope"
-    assert sections[0].content == ""
+    assert sections[0].content == "1. Introduction and Scope"
     assert sections[1].section_title == "1.1 Purpose of this Policy"
 
 
@@ -271,9 +271,8 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
     titles = [s.section_title for s in sections]
     by_title = {s.section_title: s.content for s in sections}
 
-    assert "Open Data Synthesis, Inc." in titles
     assert "Enterprise Privacy Policy" in titles
-    assert by_title["Open Data Synthesis, Inc."] == ""
+    assert "Open Data Synthesis, Inc." in by_title["Enterprise Privacy Policy"]
     assert "1. Introduction" in titles
     assert "2. Categories of Data Collected" in titles
     assert "3. Information Processing" in titles
@@ -327,9 +326,8 @@ def test_parse_pdf_header_preserves_company_first_line_and_metadata_line_breaks(
 
     monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
     sections = parse_pdf_into_sections("dummy.pdf")
-    assert sections[0].section_title == "Orion Data Systems, Inc."
-    assert sections[0].content == ""
-    assert sections[1].section_title == "Enterprise Privacy Policy"
-    assert "Effective Date: January 1, 2026" in sections[1].content
-    assert "\n" in sections[1].content
-    assert any(s.section_title == "1. Introduction" and s.content == "" for s in sections)
+    assert sections[0].section_title == "Enterprise Privacy Policy"
+    assert "Orion Data Systems, Inc." in sections[0].content
+    assert "Effective Date: January 1, 2026" in sections[0].content
+    assert "\n" in sections[0].content
+    assert any(s.section_title == "1. Introduction" and s.content == "1. Introduction" for s in sections)

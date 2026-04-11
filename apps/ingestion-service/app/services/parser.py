@@ -295,11 +295,12 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
             # Keep top-level numbered headings to preserve document hierarchy; skip empty subsection shells.
             if SECTION_NUM_RE.match(title) and not SECTION_HEADING_RE.match(title):
                 continue
+            heading_content = title if SECTION_HEADING_RE.match(title) else ""
             refined.append(
                 ParsedSection(
                     section_order=0,
                     section_title=title,
-                    content="",
+                    content=heading_content,
                     page_start=sec.page_start,
                     page_end=sec.page_end,
                 )
@@ -392,22 +393,13 @@ def _commit_section(
         header_lines = [_clean_line(line) for line in content_lines if _clean_line(line)]
         if not header_lines:
             return
-        # Preserve visual hierarchy: company line and policy title are separate header entries.
+        # Preserve title block as one section while keeping each original header line distinct.
         if len(header_lines) >= 2:
             sections.append(
                 ParsedSection(
                     section_order=len(sections) + 1,
-                    section_title=header_lines[0],
-                    content="",
-                    page_start=page_start,
-                    page_end=page_end,
-                )
-            )
-            sections.append(
-                ParsedSection(
-                    section_order=len(sections) + 1,
                     section_title=header_lines[1],
-                    content="\n".join(header_lines[2:]),
+                    content="\n".join([header_lines[0], *header_lines[2:]]),
                     page_start=page_start,
                     page_end=page_end,
                 )
