@@ -146,18 +146,35 @@ SYSTEMIC_ANCHOR_MAP: dict[str, dict[str, list[str]]] = {
         "primary": ["GDPR Art. 13(2)(d)", "GDPR Art. 14(2)(e)"],
         "secondary": ["GDPR Art. 77"],
     },
+    "missing_controller_contact": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
     "missing_transfer_notice": {
         "primary": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)"],
-        "secondary": ["GDPR Art. 44"],
+        "secondary": ["GDPR Art. 44", "GDPR Art. 45", "GDPR Art. 46"],
     },
     "profiling_disclosure_gap": {
         "primary": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)"],
         "secondary": ["GDPR Art. 22"],
     },
+    "recipients_disclosure_gap": {
+        "primary": ["GDPR Art. 13(1)(e)", "GDPR Art. 14(1)(e)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "purpose_specificity_gap": {
+        "primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+        "secondary": ["GDPR Art. 5(1)(b)"],
+    },
+    "controller_processor_role_ambiguity": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 5(1)(a)"],
+    },
 }
 
 SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
     "missing_controller_identity": "controller_identity_present",
+    "missing_controller_contact": "controller_contact_present",
     "missing_legal_basis": "legal_basis_present",
     "missing_retention_period": "retention_present",
     "missing_rights_notice": "rights_present",
@@ -166,6 +183,7 @@ SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
 
 SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
     "missing_controller_identity": {"controller", "company", "contact", "privacy notice", "personal data"},
+    "missing_controller_contact": {"contact", "email", "privacy@", "webform", "address", "data subject"},
     "missing_legal_basis": {"purpose", "process", "collect", "use", "personal data"},
     "missing_retention_period": {"retain", "retention", "storage", "personal data", "process"},
     "missing_rights_notice": {"right", "data subject", "access", "rectification", "erasure", "process"},
@@ -176,7 +194,7 @@ SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
 
 CORE_DUTY_TO_ISSUE: dict[str, str] = {
     "controller_identity": "missing_controller_identity",
-    "controller_contact": "missing_controller_identity",
+    "controller_contact": "missing_controller_contact",
     "legal_basis": "missing_legal_basis",
     "retention": "missing_retention_period",
     "rights": "missing_rights_notice",
@@ -296,21 +314,16 @@ PRIVACY_NOTICE_SCOPE_PRIMARY = {5, 6, 9, 12, 13, 14, 21, 22, 44, 45, 46, 47, 49,
 
 CLAIM_ARTICLE_RULES: dict[str, dict[str, set[int]]] = {
     "missing_controller_identity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
-    "missing_dpo_contact": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
-    "missing_legal_basis": {"primary": {6, 13, 14}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
-    "missing_purposes": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 44, 45, 46, 47, 49}},
-    "missing_recipients": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
-    "missing_transfer_disclosure": {"primary": {13, 14}, "support": {44, 45, 46, 47, 49}, "disallowed": {15, 21}},
-    "missing_transfer_safeguard_mechanism": {
-        "primary": {44, 45, 46, 47, 49},
-        "support": {13, 14},
-        "disallowed": {15, 21},
-    },
+    "missing_controller_contact": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_legal_basis": {"primary": {13, 14, 6}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
     "missing_retention_period": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
     "missing_rights_notice": {"primary": {13, 14, 12, 15, 16, 17, 18, 19, 20, 21, 22}, "support": {5}, "disallowed": set()},
     "missing_complaint_right": {"primary": {13, 14, 77}, "support": {12}, "disallowed": {21, 22}},
-    "missing_profiling_logic": {"primary": {13, 14}, "support": {22, 21}, "disallowed": {15}},
-    "missing_special_category_basis": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
+    "missing_transfer_notice": {"primary": {13, 14, 44, 45, 46}, "support": {47, 49}, "disallowed": {15, 21}},
+    "profiling_disclosure_gap": {"primary": {13, 14}, "support": {22}, "disallowed": {15}},
+    "recipients_disclosure_gap": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+    "purpose_specificity_gap": {"primary": {13, 14, 5}, "support": {12, 6}, "disallowed": {21, 22}},
+    "special_category_basis_unclear": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
     "controller_processor_role_ambiguity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
 }
 
@@ -380,6 +393,8 @@ class CandidateIssue(TypedDict):
 
 class LegalQualification(TypedDict):
     issue_name: str
+    defect_type: str
+    priority_bucket: str
     primary_article: str
     secondary_articles: list[str]
     rejected_articles: list[str]
@@ -514,6 +529,23 @@ def _confidence_level_for(confidence: float | None) -> str:
 
 
 def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
+    high_policy_claims = {"controller_identity", "controller_contact", "controller_identity_contact", "legal_basis", "rights", "complaint"}
+    medium_policy_claims = {"retention", "recipients", "purpose_mapping", "role_ambiguity"}
+    conditional_high_claims = {"transfer", "profiling"}
+
+    if _priority_bucket_for_claims(finding, claim_types) == "fatal":
+        return "Fatal severity: explicit text indicates potentially unlawful processing model requiring immediate remediation."
+    if claim_types & high_policy_claims:
+        return "High severity under policy for core identity/legal-basis/rights/complaint transparency duties."
+    if claim_types & medium_policy_claims:
+        return "Medium severity under policy for bounded transparency gaps (retention/recipients/purpose/role clarity)."
+    if claim_types & conditional_high_claims:
+        text = _norm(finding.gap_note or "")
+        explicit_activity = any(t in text for t in {"transfer", "third country", "profiling", "automated decision", "logic involved"})
+        if explicit_activity:
+            return "High severity under policy because activity is explicit and required disclosure is absent."
+        return "Medium severity under policy pending explicit transfer/profiling activity confirmation."
+
     if finding.severity == "high":
         return "High severity due to central GDPR transparency obligation impact and broad rights exposure."
     if finding.severity == "medium":
@@ -525,6 +557,46 @@ def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
     if "transfer" in claim_types:
         return "Severity calibrated to transfer disclosure context and safeguard visibility."
     return "Severity calibrated from obligation criticality, scope, and evidence confidence."
+
+
+def _defect_type_for_issue(issue: CandidateIssue) -> str:
+    issue_name = issue["candidate_issue_type"]
+    text = _norm(issue.get("evidence_text") or "")
+    if issue_name in {"missing_controller_identity", "missing_rights_information", "missing_complaint_right"}:
+        return "missing_disclosure"
+
+    invalidity_signals_by_issue: dict[str, set[str]] = {
+        "missing_legal_basis": {"inferred consent", "continued use", "implied consent", "consent inferred", "legitimate interests for all"},
+        "missing_retention": {"indefinite", "indefinitely", "extended period", "as long as necessary"},
+        "missing_transfer_notice": {"where practical", "as appropriate", "when needed", "case by case"},
+        "profiling_disclosure_gap": {"automated decision", "without human intervention", "similarly significant", "legal effect"},
+        "recipients_disclosure_gap": {"selected partners", "affiliates and partners"},
+    }
+    issue_signals = invalidity_signals_by_issue.get(issue_name, set())
+    if any(signal in text for signal in issue_signals):
+        return "present_but_invalid_disclosure"
+    if issue_name == "article_14_indirect_collection_gap":
+        return "incomplete_disclosure"
+    return "missing_disclosure"
+
+
+def _priority_bucket_for_claims(finding: LlmFinding, claim_types: set[str]) -> str:
+    text = _norm(f"{finding.gap_note or ''} {finding.remediation_note or ''}")
+    fatal_signals = {
+        "inferred consent",
+        "continued use",
+        "indefinite",
+        "indefinitely",
+        "without human intervention",
+        "similarly significant",
+        "legal effect",
+    }
+    material_claims = {"rights", "complaint", "recipients", "purpose_mapping", "retention", "legal_basis", "transfer", "profiling"}
+    if any(signal in text for signal in fatal_signals):
+        return "fatal"
+    if claim_types & material_claims:
+        return "material"
+    return "secondary"
 
 
 def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
@@ -643,16 +715,17 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
 
 
 def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
+    defect_type = _defect_type_for_issue(issue)
     mapping: dict[str, tuple[str, list[str], list[str], str, str]] = {
         "missing_controller_identity": ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Controller identity disclosure duty.", "Article 21/22 do not govern identity notice content."),
-        "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
-        "missing_retention": ("13(2)(a)", ["14(2)(a)"], ["5(1)(e)"], "Retention period/criteria is explicit notice content duty.", "Article 5 principle alone is not the primary notice anchor."),
+        "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes and, where consent is relied on, validity conditions must be supportable.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
+        "missing_retention": ("13(2)(a)", ["14(2)(a)", "5(1)(e)"], ["6(1)"], "Retention period/criteria is explicit notice content duty and excessive/indefinite retention implicates storage limitation.", "Lawful basis provisions are not retention disclosure anchors."),
         "missing_rights_information": ("13(2)(b)", ["13(2)(c)", "13(2)(d)", "14(2)(c)", "14(2)(d)", "14(2)(e)"], ["5(1)(a)"], "Rights notice obligations are in Articles 13(2)/14(2).", "Article 5 principle is supporting, not primary rights notice basis."),
         "missing_complaint_right": ("13(2)(d)", ["14(2)(e)"], ["21"], "Complaint-right disclosure is explicit in 13(2)(d)/14(2)(e).", "Article 21 is objection right, not complaint-right anchor."),
-        "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V support.", "Article 15 access right is not transfer notice anchor."),
-        "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "21"], ["22"], "Profiling transparency starts with notice disclosure paragraphs.", "Article 22 is conditional on effects threshold."),
+        "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V safeguards.", "Article 15 access right is not transfer notice anchor."),
+        "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "22"], ["21"], "Profiling transparency starts with notice disclosure paragraphs and escalates to Article 22 where effects are significant.", "Article 21 is not a substitute anchor for automated-decision safeguards."),
         "special_category_basis_unclear": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"], "Special-category processing requires Article 9 condition.", "Article 21 is not lawful condition for special-category processing."),
-        "article_14_indirect_collection_gap": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"], "Indirect collection must be disclosed under Article 14 obligations.", "Article 13 applies to direct collection context."),
+        "article_14_indirect_collection_gap": ("14(1)", ["14(1)(d)", "14(2)", "14(3)", "14(5)"], ["13(1)"], "Indirect collection and source disclosures are Article 14-first obligations.", "Article 13 applies to direct collection context."),
         "controller_processor_role_ambiguity": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"], "Role clarity is transparency duty in notice context.", "Article 28 only applies where processor-contract obligations are in scope."),
     }
     primary, secondary, rejected, reason_fit, reason_reject = mapping.get(
@@ -661,6 +734,8 @@ def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
     )
     return LegalQualification(
         issue_name=issue["candidate_issue_type"],
+        defect_type=defect_type,
+        priority_bucket="fatal" if defect_type == "present_but_invalid_disclosure" else "material",
         primary_article=primary,
         secondary_articles=secondary,
         rejected_articles=rejected,
@@ -931,7 +1006,8 @@ def _issue_has_unseen_reference(issue_id: str, refs: list[CrossReference]) -> bo
         "missing_retention_period": "retention",
         "missing_rights_notice": "rights",
         "missing_complaint_right": "rights",
-        "missing_controller_identity": "controller_contact",
+        "missing_controller_identity": "controller_identity",
+        "missing_controller_contact": "controller_contact",
         "missing_transfer_notice": "transfer",
     }
     wanted = topic_map.get(issue_id, "general")
@@ -1143,14 +1219,14 @@ def _claim_has_primary_anchor(claim_types: set[str], citations: list[LlmCitation
 
 def _claim_type_to_issue_id(claim_type: str) -> str:
     mapping = {
-        "controller_contact": "missing_controller_identity",
+        "controller_contact": "missing_controller_contact",
         "legal_basis": "missing_legal_basis",
         "retention": "missing_retention_period",
         "rights": "missing_rights_notice",
         "complaint": "missing_complaint_right",
-        "transfer": "missing_transfer_disclosure",
-        "profiling": "missing_profiling_logic",
-        "sensitive_data": "missing_special_category_basis",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "sensitive_data": "special_category_basis_unclear",
         "right_to_object": "missing_rights_notice",
     }
     return mapping.get(claim_type, claim_type)
@@ -1838,9 +1914,18 @@ def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmC
 def _normalize_severity(status: str, severity: str | None, claim_types: set[str]) -> str | None:
     if status not in {"gap", "partial"}:
         return None
-    high_claims = {"legal_basis", "rights", "retention", "complaint", "transfer"}
+
+    high_claims = {"controller_identity", "controller_contact", "controller_identity_contact", "legal_basis", "rights", "complaint"}
+    medium_claims = {"retention", "recipients", "purpose_mapping", "role_ambiguity"}
+    conditional_high_claims = {"transfer", "profiling"}
+
     if claim_types & high_claims:
         return "high"
+    if claim_types & medium_claims:
+        return "medium"
+    if claim_types & conditional_high_claims:
+        text = _norm((severity or "") + " " + " ".join(sorted(claim_types)))
+        return "high" if "transfer" in text or "profiling" in text else "medium"
     if severity in {"high", "medium", "low"}:
         return severity
     return "medium"
@@ -1858,14 +1943,17 @@ def _ensure_reasoning_chain(f: LlmFinding, section: SectionData, citations: list
     if f.status not in {"gap", "partial"}:
         return f
     gap = f.gap_note or ""
-    if "Evidence:" in gap and "Requirement:" in gap and "Assessment:" in gap:
+    if all(token in gap for token in {"Fact:", "Law:", "Breach:", "Conclusion:"}):
         return f
     evidence = _norm(section.content)[:220]
     requirement_articles = ", ".join(sorted({c.article_number for c in citations})) or "validated GDPR disclosure obligations"
     claim_text = ", ".join(sorted(claim_types)) if claim_types else "identified transparency obligations"
+    breach = gap or "Policy language appears incomplete against cited obligations."
     f.gap_note = (
-        f"Evidence: {evidence}. Requirement: {requirement_articles} ({claim_text}). "
-        f"Assessment: {gap or 'Policy language appears incomplete against cited obligations.'}"
+        f"Fact: {evidence}. "
+        f"Law: {requirement_articles} ({claim_text}). "
+        f"Breach: {breach}. "
+        "Conclusion: the notice should be remediated to satisfy the applicable GDPR disclosure duty."
     )
     return f
 
@@ -1876,18 +1964,48 @@ def _classify_finding_quality(
     claim_types: set[str],
     source_mode: str,
 ) -> tuple[str | None, float | None]:
+    presumptively_assessable_claims = CORE_NOTICE_CLAIMS | {
+        "profiling",
+        "transfer",
+        "recipients",
+        "sensitive_data",
+        "controller_identity",
+        "controller_contact",
+        "role_ambiguity",
+        "purpose_mapping",
+    }
+    fragmentary_markers = {"fragmentary", "truncated", "insufficient excerpt", "unseen section", "outside notice"}
+    gap_text = _norm(f.gap_note or "")
+    is_fragmentary = any(m in gap_text for m in fragmentary_markers)
+    visible_violation_markers = {
+        "inferred consent",
+        "continued use",
+        "indefinite retention",
+        "retained indefinitely",
+        "without human intervention",
+        "automated decision-making affecting",
+        "data aggregators",
+        "external datasets",
+        "where practical safeguards",
+    }
+    has_visible_violation = any(marker in gap_text for marker in visible_violation_markers)
+
     if f.status == "needs review":
-        if claim_types & CORE_NOTICE_CLAIMS:
+        if claim_types & presumptively_assessable_claims and not is_fragmentary:
             return "probable_gap", 0.55
         return "not_assessable", 0.2
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
-        if claim_types & CORE_NOTICE_CLAIMS:
+        if has_visible_violation and not is_fragmentary:
+            return "probable_gap", 0.62
+        if claim_types & presumptively_assessable_claims and not is_fragmentary:
             return "probable_gap", 0.58
         return "not_assessable", 0.2
     has_primary = _claim_has_primary_anchor(claim_types, citations)
     if not has_primary:
+        if claim_types:
+            return "probable_gap", 0.52
         return "not_assessable", 0.25
     contradiction_penalty = 0.2 if _has_claim_citation_contradiction(claim_types, citations) else 0.0
     source_bonus = 0.1 if source_mode in {"direct", "indirect"} else 0.0
@@ -1910,6 +2028,13 @@ def _classify_finding_quality(
 
 def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
     return (now_monotonic - started_monotonic) > budget_seconds
+
+
+def _has_positive_controller_contradiction(text: str) -> bool:
+    norm = _norm(text)
+    has_entity = any(t in norm for t in {"controller", "legal entity", "company", "we are"})
+    has_contact = any(t in norm for t in {"privacy@", "contact us", "email", "postal address", "webform", "dpo@"})
+    return has_entity and has_contact
 
 
 def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
@@ -2056,6 +2181,51 @@ def _finding_issue_id(row: Finding) -> str | None:
     return None
 
 
+def _has_flbc_reasoning(text: str | None) -> bool:
+    normalized = _norm(text or "")
+    return all(token in normalized for token in ("fact:", "law:", "breach:", "conclusion:"))
+
+
+def _citation_articles_fit_issue(db: Session, finding_id: str, issue_key: str | None) -> bool:
+    if not issue_key or issue_key not in CLAIM_ARTICLE_RULES:
+        return True
+    rows = db.query(FindingCitation.article_number).filter(FindingCitation.finding_id == finding_id).all()
+    article_numbers = {_article_int(article) for (article,) in rows if _article_int(article) is not None}
+    if not article_numbers:
+        return False
+    rule = CLAIM_ARTICLE_RULES[issue_key]
+    has_primary_or_support = bool(article_numbers & (rule["primary"] | rule["support"]))
+    has_disallowed = bool(article_numbers & rule["disallowed"])
+    return has_primary_or_support and not has_disallowed
+
+
+def _has_positive_contradictory_disclosure(db: Session, row: Finding, issue_key: str | None) -> bool:
+    contradiction_signals = {"contradict", "conflict", "inconsistent", "already disclosed", "actually disclosed"}
+    rationale = _norm(f"{row.gap_reasoning or ''} {row.gap_note or ''}")
+    if not any(token in rationale for token in contradiction_signals):
+        return False
+    issue_terms = {
+        "missing_legal_basis": {"legal basis", "article 6", "lawful basis"},
+        "missing_transfer_notice": {"transfer", "third country", "safeguard", "adequacy", "scc"},
+        "missing_controller_contact": {"contact", "email", "address", "webform"},
+        "missing_controller_identity": {"controller", "company", "entity"},
+        "missing_retention_period": {"retention", "retain", "storage period"},
+        "missing_rights_notice": {"right", "access", "erasure", "rectification", "restriction"},
+        "missing_complaint_right": {"complaint", "supervisory authority"},
+    }.get(issue_key or "", set())
+    citation_rows = db.query(FindingCitation.excerpt).filter(FindingCitation.finding_id == row.id).all()
+    positive_disclosure_markers = {"we provide", "we disclose", "you can contact", "you may contact", "we retain", "you have the right"}
+    for (excerpt,) in citation_rows:
+        text = _norm(excerpt or "")
+        if not text:
+            continue
+        if issue_terms and not any(term in text for term in issue_terms):
+            continue
+        if any(marker in text for marker in positive_disclosure_markers):
+            return True
+    return False
+
+
 def _section_ref(section: SectionData) -> str:
     short_title = section.section_title.strip() if section.section_title.strip() else f"Section {section.section_order}"
     return f"section:{section.id}:{short_title}"
@@ -2071,13 +2241,20 @@ def _analysis_anchor_templates(issue: str | None) -> list[str]:
         "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
         "missing_controller_identity": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
         "missing_transfer_notice": ["GDPR Article 13(1)(f)", "GDPR Article 14(1)(f)", "GDPR Article 44", "GDPR Article 46"],
-        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)"],
+        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)", "GDPR Article 22"],
         "recipients_disclosure_gap": ["GDPR Article 13(1)(e)", "GDPR Article 14(1)(e)"],
         "purpose_specificity_gap": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)", "GDPR Article 5(1)(b)"],
         "missing_legal_basis": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)"],
         "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
-        "missing_rights_notice": ["GDPR Article 13(2)(b)", "GDPR Article 14(2)(c)"],
-        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)"],
+        "missing_rights_notice": [
+            "GDPR Article 13(2)(b)",
+            "GDPR Article 13(2)(c)",
+            "GDPR Article 13(2)(d)",
+            "GDPR Article 14(2)(c)",
+            "GDPR Article 14(2)(d)",
+            "GDPR Article 14(2)(e)",
+        ],
+        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)", "GDPR Article 77"],
     }
     return templates.get(issue or "", [])
 
@@ -2183,10 +2360,10 @@ def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligati
     omission_basis = False
     if obligation_key:
         if obligation_map.get(obligation_key) is False:
-            matched_sections.append(f"obligation_map:{obligation_key}=not_visible")
+            matched_sections.append(f"coverage_check:{obligation_key}=not_visible_in_reviewed_sections")
             omission_basis = True
         else:
-            matched_sections.append(f"obligation_map:{obligation_key}=visible")
+            matched_sections.append(f"coverage_check:{obligation_key}=visible_in_reviewed_sections")
     return list(dict.fromkeys(matched_sections)), omission_basis
 
 
@@ -2201,7 +2378,11 @@ def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool)
         "profiling_disclosure_gap": "The notice references profiling-like processing but does not provide required profiling transparency details.",
     }.get(issue_id, "The notice-level evidence indicates a missing transparency obligation.")
     if omission_basis:
-        return f"{base} Omission basis confirmed via document obligation map and section-level processing references."
+        section_scope = ", ".join(refs[:5]) if refs else "all reviewed notice sections"
+        return (
+            f"{base} Absence-proof mode: sections reviewed={section_scope}; result=required disclosure absent. "
+            "Legal effect: GDPR transparency obligation is unmet because no explicit compliant disclosure text was found."
+        )
     if refs:
         return f"{base} Evidence sections reviewed: {', '.join(refs[:3])}."
     return base
@@ -2255,10 +2436,10 @@ def _add_anchor_citations(db: Session, systemic_row: Finding, anchors: list[str]
         db.add(
             FindingCitation(
                 finding_id=systemic_row.id,
-                chunk_id=f"systemic-anchor:{systemic_row.section_id}:{idx}",
+                chunk_id=f"coverage_check:{systemic_row.section_id}:{idx}",
                 article_number=anchor,
                 paragraph_ref=None,
-                article_title="Deterministic systemic legal anchor",
+                article_title="Derived systemic legal anchor",
                 excerpt=summary,
             )
         )
@@ -2486,6 +2667,7 @@ def _enforce_core_and_specialist_completeness(
 def _issue_to_family(issue: str | None) -> str | None:
     mapping = {
         "missing_controller_identity": "controller_identity_contact",
+        "missing_controller_contact": "controller_identity_contact",
         "missing_legal_basis": "legal_basis",
         "missing_retention_period": "retention",
         "missing_rights_notice": "rights_notice",
@@ -2495,7 +2677,10 @@ def _issue_to_family(issue: str | None) -> str | None:
         "profiling_disclosure_gap": "profiling",
         "controller_processor_role_ambiguity": "role_ambiguity",
         "article_14_indirect_collection_gap": "article14_source",
+        "recipients_disclosure_gap": "recipients",
+        "purpose_specificity_gap": "purpose_mapping",
         "special_category_basis_unclear": "special_category",
+        "dpo_contact_gap": "dpo_contact",
     }
     return mapping.get(issue or "")
 
@@ -2503,11 +2688,11 @@ def _issue_to_family(issue: str | None) -> str | None:
 def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, str]:
     matched = [r for r in rows if _finding_issue_id(r) == issue]
     if any(r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap"} and r.publish_flag == "yes" for r in matched):
-        return "gap", "publishable gap/systemic violation present"
+        return "gap", "Fact: reviewed notice text indicates processing context. Law: GDPR transparency duties for this issue apply. Breach: required disclosure remains missing or unclear. Conclusion: publishable compliance gap."
     if any(r.classification == "referenced_but_unseen" for r in matched):
-        return "referenced_but_unseen", "cross-reference to unseen sections prevents full confirmation"
+        return "referenced_but_unseen", "Fact: referenced sections are not visible in reviewed excerpts. Law: duty may apply but full verification needs cited sections. Breach: confirmation blocked by unseen material. Conclusion: referenced but unseen."
     if any(r.classification == "not_assessable" for r in matched):
-        return "not_assessable", "insufficient material quality/coverage"
+        return "not_assessable", "Fact: available excerpt is fragmentary for this issue. Law: GDPR conclusion requires complete context. Breach: evidence scope is insufficient for legal confirmation. Conclusion: not assessable."
     return "satisfied", "no unresolved issue artifact survived gates"
 
 
@@ -2549,7 +2734,7 @@ def _build_final_disposition_map(
         "complaint_right": "missing_complaint_right",
     }
     core_obligation_key_by_family = {
-        "controller_identity_contact": "controller_contact",
+        "controller_identity_contact": "controller_identity_contact",
         "legal_basis": "legal_basis",
         "retention": "retention",
         "rights_notice": "rights",
@@ -2559,8 +2744,20 @@ def _build_final_disposition_map(
         status, reason = _final_disposition_for_issue(rows, issue)
         obligation_key = core_obligation_key_by_family.get(family)
         if status == "satisfied":
-            if obligation_key and obligation_map.get(obligation_key) is False:
+            if family != "controller_identity_contact" and obligation_key and obligation_map.get(obligation_key) is False:
                 status, reason = "not_assessable", f"{obligation_key}=not_visible and no publishable issue found"
+            elif family == "controller_identity_contact":
+                identity_present = obligation_map.get("controller_identity")
+                contact_present = obligation_map.get("controller_contact")
+                if identity_present is False:
+                    status, reason = "gap", "controller legal identity disclosure is missing or unclear"
+                    issue = "missing_controller_identity"
+                elif contact_present is False:
+                    status, reason = "gap", "controller contact route disclosure is missing or unclear"
+                    issue = "missing_controller_contact"
+                elif identity_present is None or contact_present is None or not _has_positive_core_evidence(rows, "controller_identity_contact"):
+                    status, reason = "gap", "controller identity/contact transparency is missing or not explicit"
+                    issue = "missing_controller_contact"
             elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
                 if family == "controller_identity_contact":
                     status, reason = "gap", "controller identity may be visible but controller contact disclosure is missing or unclear"
@@ -2717,7 +2914,7 @@ def _build_final_disposition_map(
                 elif category_coverage > 0 and broad_only_sections > 0:
                     status, reason = "gap", "some category sections use broad/catch-all purposes without clear category-to-purpose mapping"
                 elif category_coverage == 0 and _contains_any(corpus, {"data category", "categories of personal data"}):
-                    status, reason = "not_assessable", "purpose mapping family triggered but category-level purpose statements are not visible in reviewed excerpts"
+                    status, reason = "referenced_but_unseen", "purpose mapping signals are present, but category-level mapping text appears outside reviewed excerpts"
             elif family == "special_category":
                 text = corpus
                 true_art9_indicators = {
@@ -2786,10 +2983,10 @@ def _build_final_disposition_map(
                     status, reason = "satisfied", "policy states no routine special-category collection (incidental/avoidance posture)"
                     specialist_severity = "low"
                 elif has_ambiguous_sensitive and not has_true_art9:
-                    status, reason = "not_assessable", "only ambiguous sensitive-language is present without clear Article 9-category processing"
+                    status, reason = "referenced_but_unseen", "ambiguous sensitive-language suggests possible special-category context, but reviewed excerpts do not confirm Article 9 processing"
                     specialist_severity = "medium"
         if triggered and status == "satisfied" and family != "special_category":
-            status, reason = "not_assessable", "specialist family triggered but no resolved publishable outcome"
+            status, reason = "referenced_but_unseen", "specialist trigger is visible, but reviewed excerpts do not include enough text to confirm full disclosure outcome"
         families[family] = {
             "status": status,
             "reasoning": reason,
@@ -2935,6 +3132,11 @@ def _final_publication_validator(
             missing_requirements.append("citations")
         if not row.document_evidence_refs:
             missing_requirements.append("document_evidence_refs")
+        issue_key = _finding_issue_id(row)
+        if not _citation_articles_fit_issue(db, row.id, issue_key):
+            missing_requirements.append("citations.article_matrix")
+        if _has_positive_contradictory_disclosure(db, row, issue_key):
+            missing_requirements.append("contradictory_text_present")
 
         should_publish = (
             row.publish_flag == "yes"
@@ -2945,7 +3147,14 @@ def _final_publication_validator(
             and bool(row.remediation_note)
             and not missing_requirements
         )
-        issue_key = _finding_issue_id(row)
+        if should_publish and (row.confidence_overall or 0.0) < 0.55:
+            rationale = _norm(row.gap_reasoning or "")
+            if "confidence" not in rationale and "evidence" not in rationale:
+                missing_requirements.append("confidence_explanation")
+                should_publish = False
+        if should_publish and not _has_flbc_reasoning(row.gap_reasoning):
+            missing_requirements.append("gap_reasoning.flbc")
+            should_publish = False
         requires_strong_hydration = issue_key in {
             "missing_legal_basis",
             "missing_retention_period",
@@ -2982,6 +3191,42 @@ def _final_publication_validator(
             )
     for message in _state_invariant_validator(rows):
         _record_suppression_ledger(db, audit_id, message, "invariant violation", "state_invariant_validator", message)
+    if audit is not None and audit.status != "review_required":
+        family_issue = {
+            "controller_identity_contact": {"missing_controller_identity", "missing_controller_contact"},
+            "transfer": {"missing_transfer_notice"},
+            "profiling": {"profiling_disclosure_gap"},
+            "role_ambiguity": {"controller_processor_role_ambiguity"},
+            "recipients": {"recipients_disclosure_gap"},
+            "purpose_mapping": {"purpose_specificity_gap"},
+        }
+        missing_publishable: list[str] = []
+        for family, issues in family_issue.items():
+            item = disposition_map.get(family, {}) if isinstance(disposition_map.get(family, {}), dict) else {}
+            if str(item.get("status") or "") not in {"gap", "referenced_but_unseen"}:
+                continue
+            if str(item.get("publication_recommendation") or "") != "publish":
+                continue
+            has_publishable = any(
+                _finding_issue_id(r) in issues
+                and r.publish_flag == "yes"
+                and r.publication_state == "publishable"
+                and r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap", "referenced_but_unseen"}
+                for r in rows
+            )
+            if not has_publishable:
+                missing_publishable.append(family)
+        if missing_publishable:
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                "audit_incomplete_missing_publishable_families",
+                "final publication completeness gate failed",
+                "final_publication_completeness_gate",
+                ",".join(sorted(missing_publishable)),
+            )
     db.commit()
 
 
@@ -3113,6 +3358,28 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             if issue.replace("_", " ") in text:
                 key = issue
                 break
+        if key in CLAIM_ARTICLE_RULES and row.primary_legal_anchor:
+            anchors = _decode_json_list(row.primary_legal_anchor)
+            anchor_articles = {_article_int(a) for a in anchors if _article_int(a) is not None}
+            rule = CLAIM_ARTICLE_RULES[key]
+            if anchor_articles:
+                has_primary_or_support = bool(anchor_articles & (rule["primary"] | rule["support"]))
+                has_disallowed = bool(anchor_articles & rule["disallowed"])
+                if not has_primary_or_support or has_disallowed:
+                    row.status = "not applicable"
+                    row.classification = "diagnostic_internal_only"
+                    row.finding_type = "supporting_evidence"
+                    row.publish_flag = "no"
+                    row.artifact_role = "support_only"
+                    row.finding_level = "none"
+                    row.publication_state = "internal_only"
+                    row.gap_note = (
+                        f"Issue/article family mismatch rejected for issue '{key}'. "
+                        f"Anchors={sorted(anchor_articles)}; expected primary/support={sorted(rule['primary'] | rule['support'])}."
+                    )
+                    row.remediation_note = "Re-map fact pattern to the correct GDPR article family before publication."
+                    row.confidence = min(row.confidence or 0.4, 0.4)
+                    continue
         if key in seen_root_keys and not row.section_id.startswith("systemic:"):
             row.status = "not applicable"
             row.classification = "supporting_evidence"
@@ -3707,17 +3974,29 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             classification,
         )
         if not consistency_ok:
-            contradiction_fail_total.inc()
-            classification = "contradiction_internal_only"
-            f.status = "needs review"
-            f.severity = None
-            f.gap_note = (
-                "Internal QA consistency gate rejected this draft finding. "
-                f"Reason: {consistency_reason or 'mismatch'}."
-            )
-            f.remediation_note = None
-            valid_citations = []
-            confidence = min(confidence or 0.35, 0.35)
+            controller_issue = qualification["issue_name"] in {"missing_controller_identity", "missing_controller_contact"}
+            contradictory_disclosure = _has_positive_controller_contradiction(section.content)
+            if controller_issue and not contradictory_disclosure:
+                classification = classification or "probable_gap"
+                f.gap_note = (
+                    f"{f.gap_note or ''} Fact: controller-related processing context is visible. "
+                    "Law: GDPR Articles 13(1)(a)/14(1)(a) require controller identity and contact-route disclosure. "
+                    f"Breach: {consistency_reason or 'controller-contact disclosure remains unclear'}. "
+                    "Conclusion: keep as publishable controller identity/contact gap absent contradictory disclosure."
+                ).strip()
+                confidence = max(confidence or 0.55, 0.55)
+            else:
+                contradiction_fail_total.inc()
+                classification = "contradiction_internal_only"
+                f.status = "needs review"
+                f.severity = None
+                f.gap_note = (
+                    "Internal QA consistency gate rejected this draft finding. "
+                    f"Reason: {consistency_reason or 'mismatch'}."
+                )
+                f.remediation_note = None
+                valid_citations = []
+                confidence = min(confidence or 0.35, 0.35)
 
         if f.status in {"gap", "partial"}:
             signature = _finding_signature(f, valid_citations)
@@ -3766,15 +4045,21 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 else "missing_from_section_only"
             ),
             missing_fact_if_unresolved=applicability["unresolved_trigger"],
-            policy_evidence_excerpt=(primary_issue["evidence_text"] or section.content[:220]).strip(),
-            legal_requirement=(
-                f"Primary legal anchor: GDPR Article {qualification['primary_article']} for issue "
-                f"{qualification['issue_name']}."
+            policy_evidence_excerpt=(
+                f.policy_evidence_excerpt
+                or (primary_issue["evidence_text"] or section.content[:220]).strip()
             ),
-            gap_reasoning=f.gap_note,
-            confidence_level=_confidence_level_for(confidence),
-            assessment_type=_assessment_type_for(f, classification),
-            severity_rationale=_severity_rationale(f, claim_types),
+            legal_requirement=(
+                f.legal_requirement
+                or (
+                    f"Primary legal anchor: GDPR Article {qualification['primary_article']} for issue "
+                    f"{qualification['issue_name']}."
+                )
+            ),
+            gap_reasoning=f.gap_reasoning or f.gap_note,
+            confidence_level=f.confidence_level or _confidence_level_for(confidence),
+            assessment_type=f.assessment_type or _assessment_type_for(f, classification),
+            severity_rationale=f.severity_rationale or _severity_rationale(f, claim_types),
             gap_note=f.gap_note,
             remediation_note=f.remediation_note,
         )
