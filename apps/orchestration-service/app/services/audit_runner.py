@@ -530,12 +530,28 @@ def _norm(text: str) -> str:
 def _explicit_violation_library() -> dict[str, dict[str, object]]:
     return {
         "invalid_consent": {
-            "patterns": {"consent inferred from use", "consent inferred from continued", "consent via browsing", "implied consent"},
+            "patterns": {
+                "consent inferred from use",
+                "consent inferred from continued",
+                "consent inferred from interactions",
+                "consent is inferred from interactions",
+                "consent inferred from continued usage",
+                "continued usage",
+                "consent via browsing",
+                "implied consent",
+            },
             "articles": ["Art. 6", "Art. 7", "Art. 4(11)"],
             "issue": "missing_legal_basis",
         },
         "unlawful_retention_wording": {
-            "patterns": {"retained indefinitely", "retained long-term for business needs", "archived indefinitely", "operational constraints"},
+            "patterns": {
+                "retained indefinitely",
+                "retained for extended periods",
+                "archived datasets may be retained indefinitely",
+                "retained long-term for business needs",
+                "archived indefinitely",
+                "operational constraints",
+            },
             "articles": ["Art. 13(2)(a)", "Art. 14(2)(a)", "Art. 5(1)(e)"],
             "issue": "missing_retention",
         },
@@ -2645,7 +2661,7 @@ def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict
         db.commit()
 
 
-def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
+def _add_systemic_issue_synthesis(db: Session, audit_id: str, obligation_map: dict[str, bool]) -> None:
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     by_issue: dict[str, list[Finding]] = {}
     for finding in rows:
@@ -2661,6 +2677,12 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str) -> None:
 
     for issue_id, group in by_issue.items():
         if issue_id == "general_transparency_gap":
+            continue
+        if (
+            issue_id in {"missing_controller_identity", "missing_controller_contact"}
+            and obligation_map.get("controller_identity_present") is True
+            and obligation_map.get("controller_contact_present") is True
+        ):
             continue
         if len(group) < 2:
             continue
@@ -4346,6 +4368,49 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             legal_posture="missing_disclosure",
             legal_posture_reason="Fallback to non-controller placeholder when no issue candidates are spotted.",
         )
+        controller_globally_present = (
+            obligation_map.get("controller_identity_present") is True
+            and obligation_map.get("controller_contact_present") is True
+        )
+        if (
+            primary_issue["candidate_issue_type"] in {"missing_controller_identity", "missing_controller_contact"}
+            and controller_globally_present
+        ):
+            replacement_issue = next(
+                (
+                    c
+                    for c in candidate_issues
+                    if c["candidate_issue_type"] not in {"missing_controller_identity", "missing_controller_contact"}
+                ),
+                None,
+            )
+            if replacement_issue is not None:
+                primary_issue = replacement_issue
+            else:
+                db.add(
+                    Finding(
+                        audit_id=audit.id,
+                        section_id=section.id,
+                        status="compliant",
+                        severity=None,
+                        classification="no_issue",
+                        confidence=0.8,
+                        confidence_evidence=0.7,
+                        confidence_applicability=0.8,
+                        confidence_article_fit=0.8,
+                        confidence_synthesis=0.75,
+                        confidence_overall=0.8,
+                        finding_type="local",
+                        publish_flag="no",
+                        artifact_role="support_only",
+                        finding_level="none",
+                        publication_state="internal_only",
+                        gap_note="Controller identity/contact is present at document level; controller-missing issue suppressed before generation.",
+                        remediation_note=None,
+                    )
+                )
+                db.commit()
+                continue
         legal_facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
         qualification = _legal_qualification_for_issue(primary_issue, legal_facts)
         legal_facts, legal_pipeline_note = _legal_reasoning_step(section, primary_issue, qualification, legal_facts)
@@ -4901,7 +4966,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
     if document_mode == "privacy_notice":
         _add_notice_level_synthesis(db, audit.id, obligation_map)
-    _add_systemic_issue_synthesis(db, audit.id)
+    _add_systemic_issue_synthesis(db, audit.id, obligation_map)
     _build_systemic_support(
         db,
         audit.id,

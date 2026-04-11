@@ -56,6 +56,7 @@ from app.services.audit_runner import (
     _issue_has_unseen_reference,
     _has_positive_contradictory_disclosure,
     _extract_legal_facts,
+    _explicit_violation_hits,
     _legal_reasoning_step,
     _validate_family_obligations,
     _not_assessable_allowed,
@@ -744,6 +745,16 @@ def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
         updated = db.get(Finding, row.id)
         assert updated.classification in {"probable_gap", "clear_non_compliance"}
         assert updated.artifact_role == "publishable_finding"
+
+
+def test_explicit_violation_hits_detect_consent_inferred_from_interactions():
+    hits = _explicit_violation_hits("Consent is inferred from interactions and continued usage of the service.")
+    assert any(key == "invalid_consent" for key, _ in hits)
+
+
+def test_explicit_violation_hits_detect_extended_indefinite_retention():
+    hits = _explicit_violation_hits("Data may be retained for extended periods; archived datasets may be retained indefinitely.")
+    assert any(key == "unlawful_retention_wording" for key, _ in hits)
 
 
 def test_paragraph_ref_compatible_tolerates_format_variants():
