@@ -1551,8 +1551,36 @@ def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     }
     qual = _legal_qualification_for_issue(issue)
     assert qual["primary_article"] == "13(1)(f)"
+    assert qual["defect_type"] == "missing_disclosure"
 
 
 def test_forbidden_matrix_rejects_article_21_for_complaint():
     citations = [LlmCitation(chunk_id="z1", article_number="21")]
     assert _violates_forbidden_article_matrix({"complaint"}, citations) is True
+
+
+def test_legal_qualification_marks_invalid_consent_wording_as_present_but_invalid():
+    issue = {
+        "candidate_issue_type": "missing_legal_basis",
+        "evidence_text": "Consent is inferred from continued use of the service.",
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    assert qual["defect_type"] == "present_but_invalid_disclosure"
+    assert qual["priority_bucket"] == "fatal"
+
+
+def test_classify_finding_quality_uses_visible_violation_rule_without_citations():
+    finding = LlmFinding(
+        status="gap",
+        severity="high",
+        gap_note="The policy states retention is indefinite retention for all account data.",
+        remediation_note="Define bounded retention periods.",
+        citations=[],
+    )
+    klass, conf = _classify_finding_quality(finding, [], {"retention"}, "direct")
+    assert klass == "probable_gap"
+    assert (conf or 0) >= 0.6

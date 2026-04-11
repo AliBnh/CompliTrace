@@ -308,33 +308,6 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
             )
             continue
 
-        if not content:
-            # Keep top-level numbered headings to preserve document hierarchy; skip empty subsection shells.
-            if SECTION_NUM_RE.match(title) and not SECTION_HEADING_RE.match(title):
-                continue
-            heading_content = title if SECTION_HEADING_RE.match(title) else ""
-            refined.append(
-                ParsedSection(
-                    section_order=0,
-                    section_title=title,
-                    content=heading_content,
-                    page_start=sec.page_start,
-                    page_end=sec.page_end,
-                )
-            )
-            continue
-        if is_preamble_block:
-            refined.append(
-                ParsedSection(
-                    section_order=0,
-                    section_title=title,
-                    content=content,
-                    page_start=sec.page_start,
-                    page_end=sec.page_end,
-                )
-            )
-            continue
-
         # Fix weak parent titles where body immediately starts with numbered heading.
         if not SECTION_NUM_RE.match(title):
             leading = split_numbered_heading_and_body(content)

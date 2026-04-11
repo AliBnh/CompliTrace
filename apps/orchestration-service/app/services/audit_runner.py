@@ -393,6 +393,8 @@ class CandidateIssue(TypedDict):
 
 class LegalQualification(TypedDict):
     issue_name: str
+    defect_type: str
+    priority_bucket: str
     primary_article: str
     secondary_articles: list[str]
     rejected_articles: list[str]
@@ -531,6 +533,8 @@ def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
     medium_policy_claims = {"retention", "recipients", "purpose_mapping", "role_ambiguity"}
     conditional_high_claims = {"transfer", "profiling"}
 
+    if _priority_bucket_for_claims(finding, claim_types) == "fatal":
+        return "Fatal severity: explicit text indicates potentially unlawful processing model requiring immediate remediation."
     if claim_types & high_policy_claims:
         return "High severity under policy for core identity/legal-basis/rights/complaint transparency duties."
     if claim_types & medium_policy_claims:
@@ -553,6 +557,46 @@ def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
     if "transfer" in claim_types:
         return "Severity calibrated to transfer disclosure context and safeguard visibility."
     return "Severity calibrated from obligation criticality, scope, and evidence confidence."
+
+
+def _defect_type_for_issue(issue: CandidateIssue) -> str:
+    issue_name = issue["candidate_issue_type"]
+    text = _norm(issue.get("evidence_text") or "")
+    if issue_name in {"missing_controller_identity", "missing_rights_information", "missing_complaint_right"}:
+        return "missing_disclosure"
+
+    invalidity_signals_by_issue: dict[str, set[str]] = {
+        "missing_legal_basis": {"inferred consent", "continued use", "implied consent", "consent inferred", "legitimate interests for all"},
+        "missing_retention": {"indefinite", "indefinitely", "extended period", "as long as necessary"},
+        "missing_transfer_notice": {"where practical", "as appropriate", "when needed", "case by case"},
+        "profiling_disclosure_gap": {"automated decision", "without human intervention", "similarly significant", "legal effect"},
+        "recipients_disclosure_gap": {"selected partners", "affiliates and partners"},
+    }
+    issue_signals = invalidity_signals_by_issue.get(issue_name, set())
+    if any(signal in text for signal in issue_signals):
+        return "present_but_invalid_disclosure"
+    if issue_name == "article_14_indirect_collection_gap":
+        return "incomplete_disclosure"
+    return "missing_disclosure"
+
+
+def _priority_bucket_for_claims(finding: LlmFinding, claim_types: set[str]) -> str:
+    text = _norm(f"{finding.gap_note or ''} {finding.remediation_note or ''}")
+    fatal_signals = {
+        "inferred consent",
+        "continued use",
+        "indefinite",
+        "indefinitely",
+        "without human intervention",
+        "similarly significant",
+        "legal effect",
+    }
+    material_claims = {"rights", "complaint", "recipients", "purpose_mapping", "retention", "legal_basis", "transfer", "profiling"}
+    if any(signal in text for signal in fatal_signals):
+        return "fatal"
+    if claim_types & material_claims:
+        return "material"
+    return "secondary"
 
 
 def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
@@ -671,16 +715,17 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
 
 
 def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
+    defect_type = _defect_type_for_issue(issue)
     mapping: dict[str, tuple[str, list[str], list[str], str, str]] = {
         "missing_controller_identity": ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Controller identity disclosure duty.", "Article 21/22 do not govern identity notice content."),
-        "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
-        "missing_retention": ("13(2)(a)", ["14(2)(a)"], ["5(1)(e)"], "Retention period/criteria is explicit notice content duty.", "Article 5 principle alone is not the primary notice anchor."),
+        "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes and, where consent is relied on, validity conditions must be supportable.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
+        "missing_retention": ("13(2)(a)", ["14(2)(a)", "5(1)(e)"], ["6(1)"], "Retention period/criteria is explicit notice content duty and excessive/indefinite retention implicates storage limitation.", "Lawful basis provisions are not retention disclosure anchors."),
         "missing_rights_information": ("13(2)(b)", ["13(2)(c)", "13(2)(d)", "14(2)(c)", "14(2)(d)", "14(2)(e)"], ["5(1)(a)"], "Rights notice obligations are in Articles 13(2)/14(2).", "Article 5 principle is supporting, not primary rights notice basis."),
         "missing_complaint_right": ("13(2)(d)", ["14(2)(e)"], ["21"], "Complaint-right disclosure is explicit in 13(2)(d)/14(2)(e).", "Article 21 is objection right, not complaint-right anchor."),
-        "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V support.", "Article 15 access right is not transfer notice anchor."),
-        "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "21"], ["22"], "Profiling transparency starts with notice disclosure paragraphs.", "Article 22 is conditional on effects threshold."),
+        "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V safeguards.", "Article 15 access right is not transfer notice anchor."),
+        "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "22"], ["21"], "Profiling transparency starts with notice disclosure paragraphs and escalates to Article 22 where effects are significant.", "Article 21 is not a substitute anchor for automated-decision safeguards."),
         "special_category_basis_unclear": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"], "Special-category processing requires Article 9 condition.", "Article 21 is not lawful condition for special-category processing."),
-        "article_14_indirect_collection_gap": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"], "Indirect collection must be disclosed under Article 14 obligations.", "Article 13 applies to direct collection context."),
+        "article_14_indirect_collection_gap": ("14(1)", ["14(1)(d)", "14(2)", "14(3)", "14(5)"], ["13(1)"], "Indirect collection and source disclosures are Article 14-first obligations.", "Article 13 applies to direct collection context."),
         "controller_processor_role_ambiguity": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"], "Role clarity is transparency duty in notice context.", "Article 28 only applies where processor-contract obligations are in scope."),
     }
     primary, secondary, rejected, reason_fit, reason_reject = mapping.get(
@@ -689,6 +734,8 @@ def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
     )
     return LegalQualification(
         issue_name=issue["candidate_issue_type"],
+        defect_type=defect_type,
+        priority_bucket="fatal" if defect_type == "present_but_invalid_disclosure" else "material",
         primary_article=primary,
         secondary_articles=secondary,
         rejected_articles=rejected,
@@ -1930,6 +1977,18 @@ def _classify_finding_quality(
     fragmentary_markers = {"fragmentary", "truncated", "insufficient excerpt", "unseen section", "outside notice"}
     gap_text = _norm(f.gap_note or "")
     is_fragmentary = any(m in gap_text for m in fragmentary_markers)
+    visible_violation_markers = {
+        "inferred consent",
+        "continued use",
+        "indefinite retention",
+        "retained indefinitely",
+        "without human intervention",
+        "automated decision-making affecting",
+        "data aggregators",
+        "external datasets",
+        "where practical safeguards",
+    }
+    has_visible_violation = any(marker in gap_text for marker in visible_violation_markers)
 
     if f.status == "needs review":
         if claim_types & presumptively_assessable_claims and not is_fragmentary:
@@ -1938,6 +1997,8 @@ def _classify_finding_quality(
     if f.status not in {"gap", "partial"}:
         return None, None
     if not citations:
+        if has_visible_violation and not is_fragmentary:
+            return "probable_gap", 0.62
         if claim_types & presumptively_assessable_claims and not is_fragmentary:
             return "probable_gap", 0.58
         return "not_assessable", 0.2
