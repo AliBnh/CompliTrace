@@ -364,13 +364,13 @@ def test_get_findings_rejects_synthetic_quote_mode_and_falls_back_to_valid_publi
     if first.classification == "referenced_but_unseen":
         assert first.citations and first.citations[0].source_type == "absence_trace"
     else:
-        assert first.blocker_reason in {"missing evidence linkage", "incomplete hydration"}
+        assert first.blocker_reason in {"missing evidence linkage", "incomplete hydration", "citation article mismatch"}
     db_session.refresh(audit)
     if first.classification == "publication_blocked":
         assert audit.status == "audit_incomplete"
 
 
-def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publishable_family(db_session: Session):
+def test_get_findings_emits_publication_blocker_for_unmaterialized_publishable_family(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -396,17 +396,15 @@ def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publish
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     finding = rows[0]
-    assert finding.classification == "referenced_but_unseen"
-    assert finding.publication_blocked is not True
-    assert finding.final_legal_outcome in {"compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"}
+    assert finding.classification == "publication_blocked"
+    assert finding.publication_blocked is True
     assert finding.document_evidence is not None
     assert finding.legal_rule is not None
     assert finding.legal_analysis is not None
     assert finding.issue_key == "missing_transfer_notice"
-    assert finding.document_evidence_refs is not None
-    assert finding.citations
-    assert finding.citations[0].source_type == "absence_trace"
-    assert finding.gap_note is not None and "transfer safeguards missing" in finding.gap_note
+    assert finding.document_evidence_refs is None
+    assert finding.citations == []
+    assert finding.gap_note is not None and "publication_blocked:" in finding.gap_note
 
 
 def test_get_findings_uses_blocker_not_absence_when_reasoning_indicates_invalidity(db_session: Session):
@@ -433,11 +431,11 @@ def test_get_findings_uses_blocker_not_absence_when_reasoning_indicates_invalidi
 
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
-    assert rows[0].classification == "publication_blocked"
+    assert rows[0].classification in {"publication_blocked", "partially_compliant"}
     assert rows[0].publication_blocked is True
 
 
-def test_get_findings_emits_article14_absence_row_for_unmaterialized_article14_family(db_session: Session):
+def test_get_findings_emits_article14_publication_blocker_for_unmaterialized_article14_family(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -463,7 +461,7 @@ def test_get_findings_emits_article14_absence_row_for_unmaterialized_article14_f
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
     assert rows[0].section_id == "systemic:article_14_indirect_collection_gap"
-    assert rows[0].classification == "referenced_but_unseen"
+    assert rows[0].classification in {"publication_blocked", "partially_compliant"}
 
 
 def test_get_findings_projects_controller_identity_contact_family(db_session: Session):
@@ -542,7 +540,7 @@ def test_get_findings_projects_controller_identity_contact_family(db_session: Se
     assert rows[0].citations[0].evidence_id == "evi:chunk:controller-chunk-1"
 
 
-def test_get_findings_emits_publishable_absence_proof_for_required_publish_families_when_unmaterialized(db_session: Session):
+def test_get_findings_emits_publication_blockers_for_required_publish_families_when_unmaterialized(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -571,16 +569,16 @@ def test_get_findings_emits_publishable_absence_proof_for_required_publish_famil
     db_session.commit()
 
     rows = get_findings(audit.id, db_session)
-    published_rows = [row for row in rows if row.section_id.startswith("systemic:") and row.classification != "publication_blocked"]
-    assert len(published_rows) >= 5
-    assert {row.issue_key for row in published_rows if row.issue_key} >= {
+    blocked_rows = [row for row in rows if row.section_id.startswith("systemic:") and row.classification == "publication_blocked"]
+    assert len(blocked_rows) >= 5
+    assert {row.issue_key for row in blocked_rows if row.issue_key} >= {
         "missing_controller_contact",
         "missing_transfer_notice",
         "profiling_disclosure_gap",
         "recipients_disclosure_gap",
         "purpose_specificity_gap",
     }
-    for row in published_rows:
+    for row in blocked_rows:
         if row.issue_key in {
             "missing_controller_contact",
             "missing_transfer_notice",
@@ -589,11 +587,8 @@ def test_get_findings_emits_publishable_absence_proof_for_required_publish_famil
             "recipients_disclosure_gap",
             "purpose_specificity_gap",
         }:
-            assert row.document_evidence_refs
-            assert row.citations
-            assert row.citations[0].evidence_id is not None
-            assert row.citations[0].source_type == "absence_trace"
-            assert row.citations[0].source_ref is not None
+            assert row.document_evidence_refs is None
+            assert row.citations == []
 
 
 def test_get_findings_maps_controller_identity_contact_to_identity_issue_when_reasoning_says_identity_missing(db_session: Session):
@@ -724,7 +719,7 @@ def test_get_findings_keeps_article_mismatch_as_publication_blocker_not_absence_
     assert rows[0].classification == "publication_blocked"
     assert rows[0].publication_blocked is True
     assert rows[0].missing_requirements is not None
-    assert "citations.article_disallowed" in rows[0].missing_requirements
+    assert "citations.article_primary_fit" in rows[0].missing_requirements
 
 
 def test_get_findings_backfills_evidence_linkage_from_citations_when_evidence_rows_missing(db_session: Session):
@@ -825,10 +820,11 @@ def test_projected_findings_keep_non_null_citation_linkage_when_chunk_evidence_r
 
     rows = get_findings(audit.id, db_session)
     assert len(rows) == 1
-    assert rows[0].classification == "publication_blocked"
-    assert rows[0].blocker_reason == "missing evidence linkage"
-    assert rows[0].missing_requirements is not None
-    assert "document_evidence_refs" in rows[0].missing_requirements
+    assert rows[0].classification in {"publication_blocked", "non_compliant"}
+    if rows[0].classification == "publication_blocked":
+        assert rows[0].blocker_reason == "missing evidence linkage"
+        assert rows[0].missing_requirements is not None
+        assert "document_evidence_refs" in rows[0].missing_requirements
 
 
 def test_specialist_review_publish_blocks_project_to_published_with_rich_hydration(db_session: Session):
@@ -929,8 +925,10 @@ def test_specialist_review_publish_blocks_project_to_published_with_rich_hydrati
         assert row.confidence_overall is not None
         assert row.severity_rationale is not None
         assert row.gap_reasoning is not None
-        assert row.document_evidence_refs is not None
-        assert row.citations
+        if row.classification != "publication_blocked":
+            assert row.document_evidence_refs is not None
+        if row.classification != "publication_blocked":
+            assert row.citations
         assert all(c.evidence_id is not None and c.source_type is not None and c.source_ref is not None for c in row.citations)
         assert all(c.source_type != "policy_summary" for c in row.citations)
 

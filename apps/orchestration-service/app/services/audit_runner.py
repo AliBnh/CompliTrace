@@ -626,11 +626,28 @@ def _not_assessable_allowed(text: str, status: str, classification: str | None) 
     explicit_unlawful = bool(_explicit_violation_hits(text))
     clearly_partial = status == "partial" or any(t in norm for t in {"partially", "incomplete", "not mapped"})
     clearly_missing = status == "gap" or any(t in norm for t in {"missing", "not disclosed", "absent"})
+    explicitly_assessable_context = any(
+        t in norm
+        for t in {
+            "legal basis",
+            "lawful basis",
+            "retention",
+            "transfer",
+            "third country",
+            "profil",
+            "recipient",
+            "purpose",
+            "cookies",
+            "controller",
+        }
+    )
     if explicit_unlawful or clearly_partial or clearly_missing:
+        return False
+    if explicitly_assessable_context:
         return False
     if classification in {"diagnostic_internal_only", "retrieval_failure_internal_only"}:
         return True
-    return len(norm) < 120 or "excerpt" in norm
+    return len(norm) < 80 and "excerpt" in norm
 
 
 def _is_not_applicable(section: SectionData) -> bool:
@@ -3974,17 +3991,33 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
         else:
             if row.section_id.startswith("systemic:"):
                 row.finding_type = "systemic"
+                issue_id = _finding_issue_id(row)
+                substantive_systemic_issue = issue_id in {
+                    "missing_legal_basis",
+                    "missing_retention_period",
+                    "missing_transfer_notice",
+                    "profiling_disclosure_gap",
+                    "recipients_disclosure_gap",
+                    "purpose_specificity_gap",
+                }
                 support_ready = (
                     row.support_complete == "true"
                     and bool(row.primary_legal_anchor)
                     and bool(row.document_evidence_refs)
                     and bool((row.citation_summary_text or "").strip())
                 )
+                if substantive_systemic_issue and row.status in {"gap", "partial"}:
+                    support_ready = support_ready or bool(row.primary_legal_anchor)
                 row.publish_flag = "yes" if support_ready else "no"
                 if not support_ready:
-                    row.classification = "diagnostic_internal_only"
-                    row.artifact_role = "support_only"
-                    row.finding_level = "none"
+                    if substantive_systemic_issue and row.status in {"gap", "partial"}:
+                        row.classification = "probable_gap" if row.classification in {"diagnostic_internal_only", "not_assessable"} else row.classification
+                        row.artifact_role = "publishable_finding"
+                        row.finding_level = "systemic"
+                    else:
+                        row.classification = "diagnostic_internal_only"
+                        row.artifact_role = "support_only"
+                        row.finding_level = "none"
                     row.publication_state = "blocked"
                 else:
                     row.artifact_role = "publishable_finding"
