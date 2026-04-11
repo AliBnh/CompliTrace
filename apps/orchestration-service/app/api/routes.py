@@ -1339,7 +1339,8 @@ def _parity_blocker_rows(
             str(item.get("reasoning") or "").lower(),
             missing_requirements,
         )
-        if secondary_absence_ok and not article_mismatch:
+        has_traceable_search = bool(searched_sections) and bool(searched_terms)
+        if secondary_absence_ok and has_traceable_search and not article_mismatch:
             blockers.append(
                 _absence_proof_publishable_row(
                     audit_id=audit_id,

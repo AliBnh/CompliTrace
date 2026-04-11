@@ -1563,6 +1563,20 @@ def test_spot_candidate_issues_returns_notice_missing_candidates():
     assert any(i["candidate_issue_type"] == "missing_legal_basis" for i in issues)
 
 
+def test_spot_candidate_issues_fact_fallback_prefers_article14_for_third_party_source():
+    section = SectionData(
+        id="q2b",
+        section_order=2,
+        section_title="Data sources",
+        content="We obtain personal data from third parties and external datasets.",
+        page_start=2,
+        page_end=2,
+    )
+    issues = _spot_candidate_issues(section, "indirect")
+    assert issues
+    assert issues[0]["candidate_issue_type"] == "article_14_indirect_collection_gap"
+
+
 def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     issue = {
         "candidate_issue_type": "missing_transfer_notice",

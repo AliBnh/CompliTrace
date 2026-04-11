@@ -754,180 +754,6 @@ def _legal_reasoning_step(
     return facts, narrative
 
 
-def _defect_type_for_issue(issue: CandidateIssue) -> str:
-    issue_name = issue["candidate_issue_type"]
-    text = _norm(issue.get("evidence_text") or "")
-    if issue_name in {"missing_controller_identity", "missing_rights_information", "missing_complaint_right"}:
-        return "missing_disclosure"
-
-    invalidity_signals_by_issue: dict[str, set[str]] = {
-        "missing_legal_basis": {"inferred consent", "continued use", "implied consent", "consent inferred", "legitimate interests for all"},
-        "missing_retention": {"extended period", "as long as necessary"},
-        "missing_transfer_notice": {"where practical", "as appropriate", "when needed", "case by case"},
-        "profiling_disclosure_gap": {"automated decision", "without human intervention"},
-        "recipients_disclosure_gap": {"selected partners", "affiliates and partners"},
-    }
-    unlawful_practice_signals_by_issue: dict[str, set[str]] = {
-        "missing_legal_basis": {"inferred consent", "consent inferred", "continued use"},
-        "missing_retention": {"indefinite", "indefinitely", "retain forever"},
-        "profiling_disclosure_gap": {"similarly significant", "legal effect"},
-    }
-    unlawful_signals = unlawful_practice_signals_by_issue.get(issue_name, set())
-    if any(signal in text for signal in unlawful_signals):
-        return "potential_unlawful_practice"
-    issue_signals = invalidity_signals_by_issue.get(issue_name, set())
-    if any(signal in text for signal in issue_signals):
-        return "present_but_invalid_disclosure"
-    if issue_name == "article_14_indirect_collection_gap":
-        return "incomplete_disclosure"
-    return "missing_disclosure"
-
-
-def _priority_bucket_for_claims(finding: LlmFinding, claim_types: set[str]) -> str:
-    text = _norm(f"{finding.gap_note or ''} {finding.remediation_note or ''}")
-    fatal_signals = {
-        "inferred consent",
-        "continued use",
-        "indefinite",
-        "indefinitely",
-        "without human intervention",
-        "similarly significant",
-        "legal effect",
-    }
-    material_claims = {"rights", "complaint", "recipients", "purpose_mapping", "retention", "legal_basis", "transfer", "profiling"}
-    if any(signal in text for signal in fatal_signals):
-        return "fatal"
-    if claim_types & material_claims:
-        return "material"
-    return "secondary"
-
-
-def _obligation_family_for_issue(issue_name: str) -> str:
-    family_map = {
-        "missing_controller_identity": "identity_contact_transparency",
-        "missing_controller_contact": "identity_contact_transparency",
-        "missing_legal_basis": "lawful_basis_and_validity",
-        "missing_retention": "retention_transparency_and_storage_limitation",
-        "missing_rights_information": "rights_and_complaints",
-        "missing_complaint_right": "rights_and_complaints",
-        "missing_transfer_notice": "international_transfers",
-        "profiling_disclosure_gap": "profiling_and_article22",
-        "special_category_basis_unclear": "special_category_processing",
-        "article_14_indirect_collection_gap": "indirect_collection_article14",
-        "controller_processor_role_ambiguity": "role_allocation_transparency",
-        "recipients_disclosure_gap": "recipients_transparency",
-        "purpose_specificity_gap": "purpose_specification",
-    }
-    return family_map.get(issue_name, "general_transparency")
-
-
-FAMILY_ARTICLE_MAP: dict[str, tuple[str, list[str], list[str]]] = {
-    "identity_contact_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["21", "22"]),
-    "lawful_basis_and_validity": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(a)"]),
-    "retention_transparency_and_storage_limitation": ("13(2)(a)", ["14(2)(a)", "5(1)(e)"], ["6(1)"]),
-    "rights_and_complaints": ("13(2)(b)", ["13(2)(d)", "14(2)(c)", "14(2)(e)", "77"], ["5(1)(a)"]),
-    "international_transfers": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"]),
-    "profiling_and_article22": ("13(2)(f)", ["14(2)(g)", "22"], ["21"]),
-    "recipients_transparency": ("13(1)(e)", ["14(1)(e)", "12(1)"], ["21", "22"]),
-    "purpose_specification": ("13(1)(c)", ["14(1)(c)", "5(1)(b)"], ["21"]),
-    "indirect_collection_article14": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"]),
-    "role_allocation_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"]),
-    "special_category_processing": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"]),
-}
-
-
-def _validate_family_obligations(family: str, text: str, facts: list[LegalFact]) -> dict[str, object]:
-    norm = _norm(text)
-    missing: list[str] = []
-    if family == "indirect_collection_article14":
-        checks = {
-            "source_identity_or_category": any(t in norm for t in {"source categories", "sources of personal data", "obtained from", "from third parties"}),
-            "purposes": any(t in norm for t in {"purpose", "we use", "for the purpose"}),
-            "legal_basis": any(f["fact_type"] == "lawful_basis" and f["value"] == "present" for f in facts),
-            "rights": any(t in norm for t in {"right of access", "rectification", "erasure", "objection", "portability"}),
-            "retention": any(t in norm for t in {"retention", "kept for", "storage period"}),
-            "complaint_right": any(t in norm for t in {"supervisory authority", "complaint"}),
-        }
-        missing = [name for name, ok in checks.items() if not ok]
-    satisfied = len(missing) == 0
-    return {"family": family, "satisfied": satisfied, "missing": missing}
-
-
-def _extract_legal_facts(text: str) -> list[LegalFact]:
-    norm = _norm(text)
-    facts: list[LegalFact] = []
-    def _add_fact(fact_type: str, value: str, evidence: str) -> None:
-        if any(f["fact_type"] == fact_type and f["value"] == value for f in facts):
-            return
-        facts.append(LegalFact(fact_type=fact_type, value=value, evidence=evidence))
-
-    if any(t in norm for t in {"from partners", "from third parties", "data aggregators", "public records", "external datasets"}):
-        _add_fact("data_source", "third_party", "collect/obtain data from partners/third parties/external sources")
-    if any(t in norm for t in {"as long as necessary", "indefinite", "indefinitely", "extended period"}):
-        _add_fact("retention_policy", "undefined_duration", "retention period wording indicates indefinite or undefined duration")
-    if any(t in norm for t in {"inferred consent", "continued use", "consent inferred"}):
-        _add_fact("lawful_basis_model", "consent_inferred_from_use", "consent model appears inferred from continued use")
-    if any(t in norm for t in {"without human intervention", "legal effect", "similarly significant"}):
-        _add_fact("automated_decisioning", "article22_risk_signal", "automated-decisioning effects/safeguard risk wording detected")
-    if any(t in norm for t in {"outside the eea", "third country", "international transfer", "outside jurisdiction"}):
-        _add_fact("transfer_scope", "outside_jurisdiction", "international/third-country transfer wording is visible")
-        if any(t in norm for t in {"where necessary", "where appropriate", "when needed", "as applicable"}):
-            _add_fact("transfer_safeguards", "vague", "transfer safeguards wording appears vague/conditional")
-    recipient_category_signals = {"categories of recipients", "recipient categories", "types of recipients"}
-    recipient_actor_signals = {"third party", "third-party", "partners", "vendors", "processors", "service providers"}
-    if any(t in norm for t in recipient_category_signals):
-        _add_fact("recipient_categories", "present", "structured recipient-category disclosure is present")
-    elif any(t in norm for t in recipient_actor_signals):
-        _add_fact("recipient_categories", "missing", "recipient actors are mentioned without structured categories")
-    has_lawful_basis = any(t in norm for t in {"legal basis", "lawful basis", "article 6"})
-    if has_lawful_basis:
-        _add_fact("lawful_basis", "present", "lawful basis disclosure language is present")
-        purpose_mapped = any(t in norm for t in {"for the purpose of", "for purposes of", "for each purpose", "by purpose"})
-        if not purpose_mapped:
-            _add_fact("lawful_basis", "present_but_unmapped", "lawful basis is present but not clearly mapped to purposes")
-    profiling_present = any(t in norm for t in {"profiling", "automated decision", "scoring", "segmentation"})
-    profiling_detail_present = any(t in norm for t in {"logic involved", "significance", "envisaged consequences", "human intervention"})
-    if profiling_present and not profiling_detail_present:
-        _add_fact("profiling_transparency", "missing_required_details", "profiling/ADM is present without required transparency detail")
-    return facts
-
-
-def _defect_type_from_facts(issue_name: str, facts: list[LegalFact]) -> str | None:
-    facts_set = {(f["fact_type"], f["value"]) for f in facts}
-    if issue_name == "missing_legal_basis" and ("lawful_basis", "present_but_unmapped") in facts_set:
-        return "present_but_invalid_disclosure"
-    if issue_name == "missing_legal_basis" and ("lawful_basis_model", "consent_inferred_from_use") in facts_set:
-        return "potential_unlawful_practice"
-    if issue_name == "missing_retention" and ("retention_policy", "undefined_duration") in facts_set:
-        return "potential_unlawful_practice"
-    if issue_name == "missing_transfer_notice" and ("transfer_safeguards", "vague") in facts_set:
-        return "present_but_invalid_disclosure"
-    if issue_name == "recipients_disclosure_gap" and ("recipient_categories", "missing") in facts_set:
-        return "present_but_invalid_disclosure"
-    if issue_name == "profiling_disclosure_gap" and ("profiling_transparency", "missing_required_details") in facts_set:
-        return "present_but_invalid_disclosure"
-    return None
-
-
-def _legal_reasoning_step(
-    section: SectionData,
-    issue: CandidateIssue,
-    qualification: LegalQualification,
-    precomputed_facts: list[LegalFact] | None = None,
-) -> tuple[list[LegalFact], str]:
-    facts = precomputed_facts if precomputed_facts is not None else _extract_legal_facts(f"{section.section_title}. {section.content}")
-    validation = _validate_family_obligations(qualification["obligation_family"], f"{section.section_title}. {section.content}", facts)
-    severity_recommendation = "high" if qualification["priority_bucket"] == "fatal" else "medium"
-    narrative = (
-        f"Legal reasoning pipeline: facts={facts}; "
-        f"triggered_obligation_family={qualification['obligation_family']}; "
-        f"obligation_validation={validation}; "
-        f"legal_validation={qualification['defect_type']}; "
-        f"severity_recommendation={severity_recommendation}."
-    )
-    return facts, narrative
-
-
 def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
     if section_id.startswith("__"):
         return False
@@ -1001,8 +827,22 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
             )
         )
     # Family-first fallback for notice disclosure sections: avoid defaulting to controller identity.
-    if not candidates and _is_notice_disclosure_section(section):
+    facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+    if not candidates and (_is_notice_disclosure_section(section) or bool(facts)):
+        fact_set = {(f["fact_type"], f["value"]) for f in facts}
         fallback_issue = "missing_legal_basis"
+        if ("data_source", "third_party") in fact_set:
+            fallback_issue = "article_14_indirect_collection_gap"
+        elif ("transfer_scope", "outside_jurisdiction") in fact_set:
+            fallback_issue = "missing_transfer_notice"
+        elif ("profiling_transparency", "missing_required_details") in fact_set or ("automated_decisioning", "article22_risk_signal") in fact_set:
+            fallback_issue = "profiling_disclosure_gap"
+        elif ("recipient_categories", "missing") in fact_set:
+            fallback_issue = "recipients_disclosure_gap"
+        elif ("retention_policy", "undefined_duration") in fact_set:
+            fallback_issue = "missing_retention"
+        elif ("lawful_basis_model", "consent_inferred_from_use") in fact_set or ("lawful_basis", "present_but_unmapped") in fact_set:
+            fallback_issue = "missing_legal_basis"
         if any(t in text for t in {"profil", "automated", "score", "segmentation"}):
             fallback_issue = "profiling_disclosure_gap"
         elif any(t in text for t in {"transfer", "third country", "outside the eea"}):
@@ -3721,7 +3561,26 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
                 "missing_complaint_right",
             }
             visible_omission = any(t in context_text for t in {"missing", "not disclosed", "not clearly", "without", "does not"})
+            visible_problematic_fact = any(
+                t in context_text
+                for t in {
+                    "inferred consent",
+                    "continued use",
+                    "indefinite",
+                    "indefinitely",
+                    "outside the eea",
+                    "third country",
+                    "data aggregators",
+                    "partners",
+                    "risk scoring",
+                    "automated decision",
+                    "without human intervention",
+                }
+            )
             if explicit_context and clear_obligation_trigger and visible_omission:
+                support_classification = "gap_support"
+                support_status = "gap"
+            elif explicit_context and clear_obligation_trigger and visible_problematic_fact:
                 support_classification = "gap_support"
                 support_status = "gap"
             elif explicit_context and clear_obligation_trigger:

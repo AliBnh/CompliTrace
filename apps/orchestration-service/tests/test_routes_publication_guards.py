@@ -333,10 +333,11 @@ def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publish
             status="not applicable",
             severity=None,
             legal_requirement="suppression_validator=final_disposition_map",
-            gap_reasoning=(
-                '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing",'
-                '"blocker_reason":"missing evidence linkage","missing_requirements":["document_evidence_refs","citations"]}}'
-            ),
+                gap_reasoning=(
+                    '{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer safeguards missing",'
+                    '"blocker_reason":"missing evidence linkage","missing_requirements":["document_evidence_refs","citations"],'
+                    '"section_ids":["6. Transfers"],"searched_terms":["transfer safeguards","third country"]}}'
+                ),
             publish_flag="no",
             publication_state="internal_only",
             finding_type="supporting_evidence",
@@ -395,10 +396,11 @@ def test_get_findings_emits_article14_absence_row_for_unmaterialized_article14_f
             status="not applicable",
             severity=None,
             legal_requirement="suppression_validator=final_disposition_map",
-            gap_reasoning=(
-                '{"article14_source":{"status":"gap","publication_recommendation":"publish","reasoning":"source categories missing",'
-                '"missing_requirements":["document_evidence_refs","citations"]}}'
-            ),
+                gap_reasoning=(
+                    '{"article14_source":{"status":"gap","publication_recommendation":"publish","reasoning":"source categories missing",'
+                    '"missing_requirements":["document_evidence_refs","citations"],'
+                    '"section_ids":["2. Sources"],"searched_terms":["source categories","third-party source"]}}'
+                ),
             publish_flag="no",
             publication_state="internal_only",
             finding_type="supporting_evidence",
@@ -499,16 +501,16 @@ def test_get_findings_emits_publishable_absence_proof_for_required_publish_famil
             status="not applicable",
             severity=None,
             legal_requirement="suppression_validator=final_disposition_map",
-            gap_reasoning=(
-                '{'
-                '"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"controller missing","blocker_reason":"incomplete hydration"},'
-                '"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing","blocker_reason":"missing evidence linkage"},'
-                '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing","blocker_reason":"missing section traceability"},'
-                '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role ambiguity","blocker_reason":"incomplete hydration"},'
-                '"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"recipients missing","blocker_reason":"missing evidence linkage"},'
-                '"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"purpose mapping missing","blocker_reason":"confidence inconsistency"}'
-                '}'
-            ),
+                gap_reasoning=(
+                    '{'
+                    '"controller_identity_contact":{"status":"gap","publication_recommendation":"publish","reasoning":"controller missing","blocker_reason":"incomplete hydration","section_ids":["1. Intro"],"searched_terms":["controller contact"]},'
+                    '"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"transfer missing","blocker_reason":"missing evidence linkage","section_ids":["6. Transfers"],"searched_terms":["transfer safeguards"]},'
+                    '"profiling":{"status":"gap","publication_recommendation":"publish","reasoning":"profiling missing","blocker_reason":"missing section traceability","section_ids":["7. Profiling"],"searched_terms":["profiling logic"]},'
+                    '"role_ambiguity":{"status":"gap","publication_recommendation":"publish","reasoning":"role ambiguity","blocker_reason":"incomplete hydration"},'
+                    '"recipients":{"status":"gap","publication_recommendation":"publish","reasoning":"recipients missing","blocker_reason":"missing evidence linkage","section_ids":["5. Sharing"],"searched_terms":["recipient categories"]},'
+                    '"purpose_mapping":{"status":"gap","publication_recommendation":"publish","reasoning":"purpose mapping missing","blocker_reason":"confidence inconsistency","section_ids":["3. Purposes"],"searched_terms":["purpose mapping"]}'
+                    '}'
+                ),
             publish_flag="no",
             publication_state="internal_only",
             finding_type="supporting_evidence",
