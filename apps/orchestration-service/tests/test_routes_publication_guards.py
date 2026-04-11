@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes import (
     _apply_family_fallback,
+    _publication_blocker_row,
     _sanitize_published_text,
     _sanitize_review_text,
     create_report,
@@ -1387,3 +1388,14 @@ def test_get_review_grouped_returns_expected_sections(db_session: Session):
         "internal_unresolved_items",
         "diagnostics",
     }
+
+
+def test_publication_blocker_row_has_article14_search_terms():
+    row = _publication_blocker_row(
+        audit_id="audit-x",
+        family="article14_source",
+        issue="article_14_indirect_collection_gap",
+        reason="missing evidence linkage",
+    )
+    assert row.gap_note is not None
+    assert "indirect collection" in row.gap_note.lower()

@@ -3932,6 +3932,8 @@ def run_audit(db: Session, audit: Audit) -> Audit:
 
         f = _enforce_substantive_citation_gate(f, valid_citations)
         f.severity = _normalize_severity(f.status, f.severity, claim_types)
+        if qualification["priority_bucket"] == "fatal" and f.status in {"gap", "partial"}:
+            f.severity = "high"
         if f.status in {"gap", "partial"}:
             f.remediation_note = _issue_specific_remediation(
                 qualification["issue_name"],
@@ -3947,6 +3949,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
             f.gap_note = (
                 f"{f.gap_note} Legal qualification: issue={qualification['issue_name']}; "
+                f"defect_type={qualification['defect_type']}; priority_bucket={qualification['priority_bucket']}; "
                 f"primary={qualification['primary_article']}; secondary={', '.join(qualification['secondary_articles'])}; "
                 f"rejected={', '.join(qualification['rejected_articles'])}. "
                 f"Primary fit: {qualification['reason_primary_article_fits']} "

@@ -913,6 +913,7 @@ def _publication_blocker_row(
         "missing_controller_contact": ["controller contact", "privacy contact", "email", "webform", "address"],
         "missing_transfer_notice": ["transfer", "third country", "safeguard", "SCC", "adequacy"],
         "profiling_disclosure_gap": ["profiling", "automated decision", "logic", "significance", "effects"],
+        "article_14_indirect_collection_gap": ["data source", "indirect collection", "partner", "aggregator", "public records"],
         "controller_processor_role_ambiguity": ["controller", "processor", "on behalf of", "joint controller"],
         "recipients_disclosure_gap": ["recipients", "third parties", "processors", "partners", "vendors"],
         "purpose_specificity_gap": ["purpose", "data category", "lawful basis", "processing purpose"],
