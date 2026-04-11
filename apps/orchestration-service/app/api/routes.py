@@ -135,6 +135,13 @@ INTERNAL_REASONING_RE = re.compile(
     r"(obligation map|suppression|validator|internal engine|state invariant|publication gate|hydration validator)",
     flags=re.IGNORECASE,
 )
+BANNED_OUTPUT_TOKENS = [
+    "coverage_check",
+    "absence-proof mode",
+    "reviewed sections",
+    "result=required disclosure absent",
+    "retrieval_summary",
+]
 
 FAMILY_ANCHOR_TEMPLATES: dict[str, list[str]] = {
     "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
@@ -200,7 +207,49 @@ def _clean_absence_statement(issue: str | None) -> str:
 
 def _is_clean_absence_statement(text: str | None) -> bool:
     cleaned = (text or "").strip()
-    return cleaned.lower().startswith("no explicit ") and cleaned.endswith(".")
+    lowered = cleaned.lower()
+    return (
+        (
+            lowered.startswith("no explicit ")
+            or lowered.startswith("legal basis wording is present but invalid or unclear")
+            or lowered.startswith("purpose descriptions are present but not clearly linked")
+        )
+        and cleaned.endswith(".")
+        and not _has_banned_output_tokens(cleaned)
+    )
+
+
+def _has_banned_output_tokens(text: str | None) -> bool:
+    norm = (text or "").lower()
+    return any(token in norm for token in BANNED_OUTPUT_TOKENS)
+
+
+def _has_valid_legal_rule(row: FindingOut) -> bool:
+    rule = (row.legal_rule or row.legal_requirement or "").strip()
+    return bool(rule) and not _has_banned_output_tokens(rule)
+
+
+def _has_valid_legal_analysis(row: FindingOut) -> bool:
+    analysis = (row.legal_analysis or row.gap_reasoning or "").strip()
+    return bool(analysis) and not _has_banned_output_tokens(analysis)
+
+
+def _has_valid_evidence_bundle(row: FindingOut) -> bool:
+    positive_mode = bool(row.citations) and all(
+        c.evidence_id and c.source_type and c.source_ref and not _has_banned_output_tokens(c.excerpt)
+        for c in row.citations
+    )
+    scoped_absence_mode = (not row.citations) and _is_clean_absence_statement(row.policy_evidence_excerpt)
+    return positive_mode or scoped_absence_mode
+
+
+def _can_publish_row(row: FindingOut) -> bool:
+    return (
+        row.final_legal_outcome in {"non_compliant", "partially_compliant", "compliant"}
+        and _has_valid_legal_rule(row)
+        and _has_valid_legal_analysis(row)
+        and _has_valid_evidence_bundle(row)
+    )
 
 
 def _infer_issue_from_text(issue: str | None, gap_note: str | None, remediation_note: str | None) -> str | None:
@@ -961,6 +1010,8 @@ def _missing_hydration_requirements(row: FindingOut) -> list[str]:
 def _family_issue_map() -> dict[str, str]:
     return {
         "controller_identity_contact": "missing_controller_contact",
+        "controller_identity": "missing_controller_identity",
+        "controller_contact": "missing_controller_contact",
         "legal_basis": "missing_legal_basis",
         "retention": "missing_retention_period",
         "rights_notice": "missing_rights_notice",
@@ -978,8 +1029,12 @@ def _family_issue_map() -> dict[str, str]:
 
 def _issue_for_family(family: str, item: dict[str, str | bool | list[str] | float]) -> str:
     default = _family_issue_map().get(family, family)
-    if family != "controller_identity_contact":
+    if family not in {"controller_identity_contact", "controller_identity", "controller_contact"}:
         return default
+    if family == "controller_identity":
+        return "missing_controller_identity"
+    if family == "controller_contact":
+        return "missing_controller_contact"
     reasoning = str(item.get("reasoning") or "").strip().lower()
     blocker_reason = str(item.get("blocker_reason") or "").strip().lower()
     searchable = " ".join(
@@ -1134,6 +1189,8 @@ def _scoped_absence_publishable_row(
         legal_requirement=f"Rule: {', '.join(anchors)}.",
         legal_rule=f"Rule: {', '.join(anchors)}.",
         legal_analysis=f"Packaging incomplete ({reason}); substantive gap retained for publication with scoped absence statement.",
+        gap_note=excerpt,
+        remediation_note="Add explicit compliant disclosure language and attach evidence-linked citations for stronger traceability.",
         gap_reasoning=(
             f"Fact: {excerpt} "
             f"Law: {', '.join(anchors)}. "
@@ -1400,6 +1457,8 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         excerpt = _clean_absence_statement(issue)
     if not row.citations and not _is_clean_absence_statement(excerpt):
         excerpt = _clean_absence_statement(issue)
+    if _has_banned_output_tokens(excerpt):
+        excerpt = _clean_absence_statement(issue)
     row.policy_evidence_excerpt = excerpt
     row.document_evidence = _sanitize_published_text(row.policy_evidence_excerpt)
     row.legal_rule = _sanitize_published_text(row.legal_requirement)
@@ -1423,6 +1482,11 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         row.final_legal_outcome = "non_compliant"
     if row.final_legal_outcome == "not_assessable_from_provided_text" and row.status in {"gap", "partial"}:
         row.final_legal_outcome = "partially_compliant" if row.status == "partial" else "non_compliant"
+    if row.classification != "publication_blocked" and not _can_publish_row(row):
+        row.classification = "publication_blocked"
+        row.publication_blocked = True
+        row.blocker_reason = row.blocker_reason or "publication contract failed"
+        row.missing_requirements = row.missing_requirements or ["legal_rule_or_analysis_or_evidence_bundle"]
     return row
 
 
@@ -1449,6 +1513,84 @@ def _to_audit_ready_view(row: FindingOut) -> FindingOut:
     row.source_scope_confidence = None
     row.referenced_unseen_sections = None
     return row
+
+
+def _no_banned_debug_tokens(rows: list[FindingOut]) -> bool:
+    for row in [r for r in rows if r.classification != "publication_blocked"]:
+        fields = [
+            row.document_evidence,
+            row.policy_evidence_excerpt,
+            row.legal_analysis,
+            row.legal_rule,
+            row.citation_summary_text,
+            row.gap_note,
+        ]
+        if any(_has_banned_output_tokens(v) for v in fields):
+            return False
+        for c in row.citations:
+            if _has_banned_output_tokens(c.excerpt):
+                return False
+    return True
+
+
+def _every_published_finding_has_valid_evidence(rows: list[FindingOut]) -> bool:
+    published = [r for r in rows if r.classification != "publication_blocked"]
+    return all(_has_valid_evidence_bundle(r) for r in published)
+
+
+def _no_published_controller_identity_false_positive(rows: list[FindingOut], backing_rows: list[Finding], evidence_by_id: dict[str, EvidenceRecord]) -> bool:
+    if not _controller_identity_disclosed_in_document(backing_rows, evidence_by_id):
+        return True
+    return not any(r.section_id in {"systemic:missing_controller_identity", "systemic:missing_controller_contact"} for r in rows)
+
+
+def _no_explicit_retention_violation_is_suppressed(rows: list[FindingOut], backing_rows: list[Finding]) -> bool:
+    corpus = " ".join((r.gap_note or "") + " " + (r.policy_evidence_excerpt or "") for r in backing_rows).lower()
+    has_explicit_retention = any(t in corpus for t in {"retained indefinitely", "archived datasets may be retained indefinitely", "retained for extended periods"})
+    if not has_explicit_retention:
+        return True
+    for r in rows:
+        if r.section_id == "systemic:missing_retention_period":
+            return r.final_legal_outcome == "non_compliant" and r.classification != "publication_blocked"
+    return False
+
+
+def _no_explicit_legal_basis_invalidity_is_marked_not_assessable(rows: list[FindingOut], backing_rows: list[Finding]) -> bool:
+    corpus = " ".join((r.gap_note or "") + " " + (r.policy_evidence_excerpt or "") for r in backing_rows).lower()
+    has_explicit_invalid = any(t in corpus for t in {"consent inferred from interactions", "consent inferred from continued use", "legitimate interests where applicable"})
+    if not has_explicit_invalid:
+        return True
+    return all(
+        not (r.section_id == "systemic:missing_legal_basis" and r.final_legal_outcome == "not_assessable_from_provided_text")
+        for r in rows
+    )
+
+
+def _no_explicit_profiling_gap_lacks_evidence(rows: list[FindingOut], backing_rows: list[Finding]) -> bool:
+    corpus = " ".join((r.gap_note or "") + " " + (r.policy_evidence_excerpt or "") for r in backing_rows).lower()
+    has_profiling_signal = any(t in corpus for t in {"profil", "risk scores", "content recommendations", "service availability influenced"})
+    if not has_profiling_signal:
+        return True
+    for r in rows:
+        if r.section_id == "systemic:profiling_disclosure_gap":
+            return _has_valid_evidence_bundle(r)
+    return False
+
+
+def _release_validator(rows: list[FindingOut], backing_rows: list[Finding], evidence_by_id: dict[str, EvidenceRecord]) -> tuple[bool, str | None]:
+    if not _no_banned_debug_tokens(rows):
+        return False, "banned debug tokens detected in client-visible output"
+    if not _every_published_finding_has_valid_evidence(rows):
+        return False, "published finding without valid evidence bundle"
+    if not _no_published_controller_identity_false_positive(rows, backing_rows, evidence_by_id):
+        return False, "controller identity/contact false positive detected"
+    if not _no_explicit_retention_violation_is_suppressed(rows, backing_rows):
+        return False, "explicit retention violation was suppressed"
+    if not _no_explicit_legal_basis_invalidity_is_marked_not_assessable(rows, backing_rows):
+        return False, "explicit legal-basis invalidity marked not-assessable"
+    if not _no_explicit_profiling_gap_lacks_evidence(rows, backing_rows):
+        return False, "explicit profiling gap lacks valid evidence bundle"
+    return True, None
 
 
 def _reconciliation_blockers(
@@ -1634,6 +1776,8 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     if decision_map:
         projectable_families = {
             "controller_identity_contact",
+            "controller_identity",
+            "controller_contact",
             "legal_basis",
             "retention",
             "rights_notice",
@@ -1669,6 +1813,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         blockers = _reconciliation_blockers(audit, decision_map, [], combined, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
+        release_ok, release_reason = _release_validator(combined, backing_rows, evidence_by_id)
+        if not release_ok:
+            raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
         return [_to_audit_ready_view(r) for r in combined]
     rows = db.scalars(
         select(Finding)
@@ -1688,6 +1835,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         blockers = _reconciliation_blockers(audit, decision_map, [], parity_blockers, hydration_filtered_families)
         if blockers:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
+        release_ok, release_reason = _release_validator(parity_blockers, backing_rows, evidence_by_id)
+        if not release_ok:
+            raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
         return [_to_audit_ready_view(r) for r in parity_blockers]
     out: list[FindingOut] = []
     evidence_ids = known_evidence_ids
@@ -1774,9 +1924,16 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         )
     published = [row for row in out if not _hydration_missing(row)]
     published += _parity_blocker_rows(audit_id, decision_map, published, rows)
+    if _controller_identity_disclosed_in_document(rows, evidence_by_id):
+        published = [
+            r for r in published if r.section_id not in {"systemic:missing_controller_identity", "systemic:missing_controller_contact"}
+        ]
     blockers = _reconciliation_blockers(audit, decision_map, rows, published)
     if blockers:
         raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
+    release_ok, release_reason = _release_validator(published, rows, evidence_by_id)
+    if not release_ok:
+        raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
     if any(r.classification == "publication_blocked" for r in published) and audit.status != "audit_incomplete":
         audit.status = "audit_incomplete"
         db.add(audit)
