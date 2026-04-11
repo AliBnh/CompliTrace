@@ -142,7 +142,7 @@ def test_refine_sections_fixes_weak_title_when_numbered_body_starts():
     assert refined[0].content.startswith("Account, Identity")
 
 
-def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypatch):
+def test_parse_pdf_into_sections_groups_numeric_intro_child_lines_under_parent_title(monkeypatch):
     class _FakePage:
         def __init__(self, text: str):
             self._text = text
@@ -173,7 +173,8 @@ def test_parse_pdf_into_sections_does_not_merge_parent_and_child_titles(monkeypa
     monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
     sections = parse_pdf_into_sections("dummy.pdf")
     assert len(sections) == 1
-    assert sections[0].section_title == "1.1 Purpose of this Policy"
+    assert sections[0].section_title == "1. Introduction and Scope"
+    assert "1.1 Purpose of this Policy" in sections[0].content
 
 
 def test_parse_pdf_into_sections_keeps_decimal_subheading_without_extra_dot(monkeypatch):
@@ -271,22 +272,22 @@ def test_parse_pdf_into_sections_policy_sample_from_screenshot_keeps_titles_and_
 
     assert "Enterprise Privacy Policy" in titles
     assert "Open Data Synthesis, Inc." in by_title["Enterprise Privacy Policy"]
-    assert "1. Introduction" not in titles
-    assert "2. Categories of Data Collected" not in titles
-    assert "3. Information Processing" not in titles
-    assert "4. Legal Basis for Processing" not in titles
-    assert "2.1 Identifiers" in titles
-    assert "2.2 Technical Data" in titles
-    assert "3.1 Service Delivery" in titles
-    assert "3.2 Analytics and Optimization" in titles
-    assert any(title == "4.1" or title.startswith("4.1 ") for title in titles)
-    assert any(title == "13.1" or title.startswith("13.1 ") for title in titles)
-    assert "5.1" in titles
-    assert "6.1" in titles
+    assert "1. Introduction" in titles
+    assert "2. Categories of Data Collected" in titles
+    assert "3. Information Processing" in titles
+    assert "4. Legal Basis for Processing" in titles
+    assert "2.1 Identifiers" not in titles
+    assert "2.2 Technical Data" not in titles
+    assert "3.1 Service Delivery" not in titles
+    assert "3.2 Analytics and Optimization" not in titles
+    assert all(not (title == "4.1" or title.startswith("4.1 ")) for title in titles)
+    assert all(not (title == "13.1" or title.startswith("13.1 ")) for title in titles)
+    assert "5. Security Measures" in titles
+    assert "6. Data Subject Rights" in titles
 
-    assert "We collect full name, email address" in by_title["2.1 Identifiers"]
-    assert "This includes system logs" in by_title["2.2 Technical Data"]
-    assert "processed to enable authentication and access management" in by_title["3.1 Service Delivery"]
+    assert "2.1 Identifiers We collect full name, email address" in by_title["2. Categories of Data Collected"]
+    assert "2.2 Technical Data This includes system logs" in by_title["2. Categories of Data Collected"]
+    assert "3.1 Service Delivery Personal data is processed to enable authentication and access management" in by_title["3. Information Processing"]
     assert all(". ." not in title for title in titles)
 
 
@@ -352,3 +353,49 @@ def test_refine_sections_drops_numbered_rows_when_content_duplicates_title():
     refined = _refine_sections(sections, set())
 
     assert [section.section_title for section in refined] == ["1.1 Overview"]
+
+
+def test_parse_pdf_groups_numeric_only_intro_subsections_under_parent_heading(monkeypatch):
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_text(self, _mode: str) -> str:
+            return self._text
+
+    class _FakeDoc(list):
+        pass
+
+    class _FakeFitz:
+        @staticmethod
+        def open(_path: str):
+            return _FakeDoc(
+                [
+                    _FakePage(
+                        "\n".join(
+                            [
+                                "Orion Data Systems, Inc.",
+                                "Enterprise Privacy Policy",
+                                "1. Introduction",
+                                "1.1 Orion operates enterprise data infrastructure.",
+                                "1.2 This Privacy Policy outlines processing purposes.",
+                                "1.3 By continuing to use the Services, users acknowledge processing.",
+                                "2. Categories of Data Collected",
+                                "2.1 Identifiers: We collect full name and email.",
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "fitz", _FakeFitz)
+    sections = parse_pdf_into_sections("dummy.pdf")
+
+    by_title = {s.section_title: s.content for s in sections}
+    assert "1. Introduction" in by_title
+    assert "1.1 Orion operates enterprise data infrastructure" in by_title["1. Introduction"]
+    assert "1.2 This Privacy Policy outlines processing purposes" in by_title["1. Introduction"]
+    assert "1.3 By continuing to use the Services" in by_title["1. Introduction"]
+    assert "1.1" not in by_title
+    assert "1.2" not in by_title
+    assert "1.3" not in by_title

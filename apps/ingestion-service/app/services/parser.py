@@ -315,7 +315,10 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
                 title = _normalize_section_title(leading[0])
                 content = leading[1]
 
-        parts = _split_embedded_numbered_subheadings(content)
+        if SECTION_HEADING_RE.match(title):
+            parts = [_clean_line(content)]
+        else:
+            parts = _split_embedded_numbered_subheadings(content)
         if not parts:
             continue
 
@@ -327,7 +330,7 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
         for idx, part in enumerate(parts):
             parsed = split_numbered_heading_and_body(part)
             if idx == 0:
-                if parsed and SECTION_NUM_RE.match(current_title):
+                if parsed and SECTION_NUM_RE.match(current_title) and not SECTION_HEADING_RE.match(current_title):
                     primary_content.append(parsed[1])
                 else:
                     primary_content.append(part)
@@ -442,10 +445,16 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
                 split_pair = split_numbered_heading_and_body(chunk)
                 if split_pair:
                     heading, body = split_pair
-                    if not is_noise_line(heading):
-                        page_lines.append(heading)
-                    if body and not is_noise_line(body):
-                        page_lines.append(body)
+                    normalized_heading = _normalize_section_title(heading)
+                    if NUMBER_ONLY_SUBSECTION_RE.match(normalized_heading) and body:
+                        combined = _clean_line(f"{normalized_heading} {body}")
+                        if not is_noise_line(combined):
+                            page_lines.append(combined)
+                    else:
+                        if not is_noise_line(heading):
+                            page_lines.append(heading)
+                        if body and not is_noise_line(body):
+                            page_lines.append(body)
                 elif not is_noise_line(chunk):
                     page_lines.append(chunk)
 
@@ -469,7 +478,28 @@ def parse_pdf_into_sections(pdf_path: str) -> list[ParsedSection]:
                 last_page = page_num
                 continue
 
+            # Keep subsection lines like "1.1 ..." inside an active top-level parent section
+            # instead of creating many short child sections without meaningful titles.
+            subsection_inline = re.match(r"^(\d{1,2})\.(\d{1,2})\b", _clean_line(line))
+            parent_match = SECTION_NUM_RE.match(_normalize_section_title(current_title))
+            if subsection_inline and parent_match and SECTION_HEADING_RE.match(_normalize_section_title(current_title)):
+                if subsection_inline.group(1) == parent_match.group(1).split(".")[0]:
+                    current_content.append(_clean_line(line))
+                    last_page = page_num
+                    continue
+
             if is_heading(line):
+                normalized_line = _normalize_section_title(line)
+                # Keep inline numeric-only subsections (e.g., 1.1 / 1.2 / 1.3) inside their parent top-level section
+                # to avoid over-fragmenting short sections without meaningful subsection titles.
+                if NUMBER_ONLY_SUBSECTION_RE.match(normalized_line):
+                    parent_match = SECTION_NUM_RE.match(_normalize_section_title(current_title))
+                    parent_num = parent_match.group(1).split(".")[0] if parent_match else None
+                    child_num = normalized_line.split(".")[0]
+                    if parent_num and parent_num == child_num and SECTION_HEADING_RE.match(_normalize_section_title(current_title)):
+                        current_content.append(normalized_line)
+                        last_page = page_num
+                        continue
                 _commit_section(sections, current_title, current_content, current_start, last_page)
                 current_title = line
                 current_content = []
