@@ -610,6 +610,8 @@ def _published_legal_conclusion(status: str | None, issue: str | None, existing:
         "missing_complaint_right",
         "missing_transfer_notice",
         "profiling_disclosure_gap",
+        "recipients_disclosure_gap",
+        "purpose_specificity_gap",
     }
     if status == "gap" and issue in strong_non_compliant:
         return "non_compliant"
@@ -933,11 +935,12 @@ def _missing_hydration_requirements(row: FindingOut) -> list[str]:
         if not _citation_has_allowed_evidence_mode(c):
             missing.append("citations.evidence_mode")
     issue = _infer_issue_from_text(_issue_key_from_section(row.section_id), row.gap_note, row.remediation_note)
-    has_primary_article, has_disallowed_article = _citation_article_findings(issue, row.citations)
-    if not has_primary_article:
-        missing.append("citations.article_primary_fit")
-    if has_disallowed_article:
-        missing.append("citations.article_disallowed")
+    if row.citations:
+        has_primary_article, has_disallowed_article = _citation_article_findings(issue, row.citations)
+        if not has_primary_article:
+            missing.append("citations.article_primary_fit")
+        if has_disallowed_article:
+            missing.append("citations.article_disallowed")
     return missing
 
 
@@ -1080,6 +1083,68 @@ def _publication_blocker_row(
         ),
         document_evidence=scoped_absence_statement,
         policy_evidence_excerpt=scoped_absence_statement,
+        citations=[],
+    )
+
+
+def _scoped_absence_publishable_row(
+    *,
+    audit_id: str,
+    family: str,
+    issue: str,
+    reason: str,
+    searched_sections: list[str] | None = None,
+    searched_headings: list[str] | None = None,
+    searched_terms: list[str] | None = None,
+) -> FindingOut:
+    sections = searched_sections or ["all reviewed privacy-notice sections"]
+    headings = searched_headings or sections
+    terms = searched_terms or [issue.replace("_", " ")]
+    anchors = _anchors_for_issue(issue, None)
+    excerpt = (
+        f"No explicit disclosure text found in reviewed sections ({', '.join(sections)}), "
+        f"headings ({', '.join(headings)}), for terms ({', '.join(terms)})."
+    )
+    return FindingOut(
+        id=f"projected_scoped_absence:{audit_id}:{family}",
+        section_id=f"systemic:{issue}",
+        status="gap",
+        severity="high" if issue in {"missing_legal_basis", "missing_retention_period", "missing_transfer_notice", "profiling_disclosure_gap"} else "medium",
+        classification="non_compliant",
+        finding_type="systemic",
+        publish_flag="yes",
+        artifact_role="publishable_finding",
+        finding_level="systemic",
+        publication_state="publishable",
+        issue_key=issue,
+        primary_legal_anchor=anchors,
+        citation_summary_text="Scoped absence statement from reviewed notice sections.",
+        support_complete=False,
+        omission_basis=True,
+        policy_evidence_excerpt=excerpt,
+        document_evidence=excerpt,
+        legal_requirement=f"Rule: {', '.join(anchors)}.",
+        legal_rule=f"Rule: {', '.join(anchors)}.",
+        legal_analysis=f"Packaging incomplete ({reason}); substantive gap retained for publication with scoped absence statement.",
+        gap_reasoning=(
+            f"Fact: {excerpt} "
+            f"Law: {', '.join(anchors)}. "
+            "Breach: required disclosure remains absent in reviewed text. "
+            "Conclusion: publish as substantive notice-level gap pending fuller linkage package."
+        ),
+        severity_rationale=f"substantive_gap={issue}; packaging_gap={reason}; publication_kept_substantive=true",
+        affected_sections=sections,
+        where_evidence_found=sections,
+        where_disclosure_missing=sections,
+        source_scope="full_notice",
+        source_scope_confidence=0.75,
+        assertion_level="probable_document_gap",
+        confidence=0.62,
+        confidence_evidence=0.55,
+        confidence_applicability=0.7,
+        confidence_article_fit=0.65,
+        confidence_synthesis=0.6,
+        confidence_overall=0.6,
         citations=[],
     )
 
@@ -1239,6 +1304,8 @@ def _issue_key_from_section(section_id: str) -> str | None:
 
 def _fill_required_published_fields(row: FindingOut) -> FindingOut:
     issue = _infer_issue_from_text(_issue_key_from_section(row.section_id), row.gap_note, row.remediation_note)
+    if not row.issue_key:
+        row.issue_key = issue
     family_defaults = {
         "missing_transfer_notice": "State whether personal data are transferred internationally and identify the safeguard or transfer mechanism relied upon.",
         "profiling_disclosure_gap": "If profiling or comparable evaluation occurs, explain the logic involved and significant consequences where required.",
@@ -1467,18 +1534,39 @@ def _parity_blocker_rows(
                 "citations.source_type",
                 "citations.source_ref",
             ]
-        blockers.append(
-            _publication_blocker_row(
-                audit_id=audit_id,
-                family=family,
-                issue=issue,
-                reason=blocker_reason,
-                missing_requirements=missing_requirements,
-                searched_sections=searched_sections,
-                searched_headings=searched_headings,
-                searched_terms=searched_terms,
+        substantive_publishable = issue in {
+            "missing_legal_basis",
+            "missing_retention_period",
+            "missing_transfer_notice",
+            "profiling_disclosure_gap",
+            "recipients_disclosure_gap",
+            "purpose_specificity_gap",
+        }
+        if substantive_publishable:
+            blockers.append(
+                _scoped_absence_publishable_row(
+                    audit_id=audit_id,
+                    family=family,
+                    issue=issue,
+                    reason=blocker_reason,
+                    searched_sections=searched_sections,
+                    searched_headings=searched_headings,
+                    searched_terms=searched_terms,
+                )
             )
-        )
+        else:
+            blockers.append(
+                _publication_blocker_row(
+                    audit_id=audit_id,
+                    family=family,
+                    issue=issue,
+                    reason=blocker_reason,
+                    missing_requirements=missing_requirements,
+                    searched_sections=searched_sections,
+                    searched_headings=searched_headings,
+                    searched_terms=searched_terms,
+                )
+            )
     return blockers
 
 
