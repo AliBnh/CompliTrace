@@ -107,5 +107,11 @@ class LlmFinding(BaseModel):
     severity: str | None = None
     gap_note: str | None = None
     remediation_note: str | None = None
+    policy_evidence_excerpt: str | None = None
+    legal_requirement: str | None = None
+    gap_reasoning: str | None = None
+    confidence_level: str | None = Field(default=None, pattern=r"^(low|medium|high)$")
+    assessment_type: str | None = Field(default=None, pattern=r"^(confirmed|probable|not_assessable)$")
+    severity_rationale: str | None = None
     citations: list[LlmCitation] = Field(default_factory=list)
     candidate_publishability: str | None = Field(default=None, pattern=r"^(publishable|internal_only)$")
