@@ -84,7 +84,7 @@ export function SectionsPage() {
             <article key={section.id} className="surface-card animate-rise p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-base font-semibold text-slate-900">
-                  {section.section_order}. {section.section_title || 'Untitled section'}
+                  {formatSectionHeading(section)}
                 </h2>
                 <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-600">{formatPageRange(section.page_start, section.page_end)}</span>
               </div>
@@ -110,6 +110,12 @@ function formatPageRange(start: number | null, end: number | null) {
   if (start == null && end == null) return 'Page n/a'
   if (start != null && end != null && start !== end) return `Pages ${start}-${end}`
   return `Page ${start ?? end}`
+}
+
+function formatSectionHeading(section: SectionOut): string {
+  const title = (section.section_title ?? '').trim()
+  if (title) return title
+  return `Section ${section.section_order}`
 }
 
 function EmptyState({ message }: { message: string }) {
