@@ -191,7 +191,7 @@ def _clean_absence_statement(issue: str | None) -> str:
         "missing_transfer_notice": "No explicit international transfer mechanism or safeguard is described for the listed processing activities.",
         "profiling_disclosure_gap": "No explicit profiling logic, significance, or consequences are described for the listed processing activities.",
         "recipients_disclosure_gap": "No explicit recipient categories are described for the listed processing activities.",
-        "purpose_specificity_gap": "No explicit purpose-to-data-category mapping is described for the listed processing activities.",
+        "purpose_specificity_gap": "Purpose descriptions are present but not clearly linked to specific data categories.",
         "missing_controller_contact": "No explicit controller contact route is described for the listed processing activities.",
         "missing_controller_identity": "No explicit controller legal identity is described for the listed processing activities.",
     }

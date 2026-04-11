@@ -3249,6 +3249,13 @@ def _build_final_disposition_map(
             if _finding_issue_id(r) != issue_id:
                 continue
             refs = _decode_json_list(r.document_evidence_refs)
+            citation_refs = [
+                f"evi:chunk:{c.chunk_id}"
+                for c in (r.citations or [])
+                if c.chunk_id and not str(c.chunk_id).startswith("absence-proof:")
+            ]
+            policy_ref = [f"evi:policy:{r.section_id}"] if r.section_id and not r.section_id.startswith("systemic:") else []
+            refs = list(dict.fromkeys([*refs, *citation_refs, *policy_ref]))
             if r.classification in {"probable_gap", "clear_non_compliance", "systemic_violation", "referenced_but_unseen"}:
                 positive.update(refs)
             if r.classification in {"not_assessable", "diagnostic_internal_only"}:
@@ -3275,7 +3282,7 @@ def _build_final_disposition_map(
         obligation_key = core_obligation_key_by_family.get(family)
         if status == "satisfied":
             if family != "controller_identity_contact" and obligation_key and obligation_map.get(obligation_key) is False:
-                status, reason = "not_assessable", f"{obligation_key}=not_visible and no publishable issue found"
+                status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
             elif family == "controller_identity_contact":
                 identity_present = obligation_map.get("controller_identity")
                 contact_present = obligation_map.get("controller_contact")
@@ -3294,7 +3301,7 @@ def _build_final_disposition_map(
                     issue = "missing_controller_contact"
                 else:
                     status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
-        severity = "high" if family in {"controller_identity_contact", "legal_basis"} else "medium"
+        severity = "high" if family in {"controller_identity_contact", "legal_basis", "retention"} else "medium"
         families[family] = {
             "status": status,
             "reasoning": reason,
