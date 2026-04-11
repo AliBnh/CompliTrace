@@ -393,6 +393,7 @@ class CandidateIssue(TypedDict):
 
 class LegalQualification(TypedDict):
     issue_name: str
+    obligation_family: str
     defect_type: str
     priority_bucket: str
     primary_article: str
@@ -567,11 +568,19 @@ def _defect_type_for_issue(issue: CandidateIssue) -> str:
 
     invalidity_signals_by_issue: dict[str, set[str]] = {
         "missing_legal_basis": {"inferred consent", "continued use", "implied consent", "consent inferred", "legitimate interests for all"},
-        "missing_retention": {"indefinite", "indefinitely", "extended period", "as long as necessary"},
+        "missing_retention": {"extended period", "as long as necessary"},
         "missing_transfer_notice": {"where practical", "as appropriate", "when needed", "case by case"},
-        "profiling_disclosure_gap": {"automated decision", "without human intervention", "similarly significant", "legal effect"},
+        "profiling_disclosure_gap": {"automated decision", "without human intervention"},
         "recipients_disclosure_gap": {"selected partners", "affiliates and partners"},
     }
+    unlawful_practice_signals_by_issue: dict[str, set[str]] = {
+        "missing_legal_basis": {"inferred consent", "consent inferred", "continued use"},
+        "missing_retention": {"indefinite", "indefinitely", "retain forever"},
+        "profiling_disclosure_gap": {"similarly significant", "legal effect"},
+    }
+    unlawful_signals = unlawful_practice_signals_by_issue.get(issue_name, set())
+    if any(signal in text for signal in unlawful_signals):
+        return "potential_unlawful_practice"
     issue_signals = invalidity_signals_by_issue.get(issue_name, set())
     if any(signal in text for signal in issue_signals):
         return "present_but_invalid_disclosure"
@@ -597,6 +606,25 @@ def _priority_bucket_for_claims(finding: LlmFinding, claim_types: set[str]) -> s
     if claim_types & material_claims:
         return "material"
     return "secondary"
+
+
+def _obligation_family_for_issue(issue_name: str) -> str:
+    family_map = {
+        "missing_controller_identity": "identity_contact_transparency",
+        "missing_controller_contact": "identity_contact_transparency",
+        "missing_legal_basis": "lawful_basis_and_validity",
+        "missing_retention": "retention_transparency_and_storage_limitation",
+        "missing_rights_information": "rights_and_complaints",
+        "missing_complaint_right": "rights_and_complaints",
+        "missing_transfer_notice": "international_transfers",
+        "profiling_disclosure_gap": "profiling_and_article22",
+        "special_category_basis_unclear": "special_category_processing",
+        "article_14_indirect_collection_gap": "indirect_collection_article14",
+        "controller_processor_role_ambiguity": "role_allocation_transparency",
+        "recipients_disclosure_gap": "recipients_transparency",
+        "purpose_specificity_gap": "purpose_specification",
+    }
+    return family_map.get(issue_name, "general_transparency")
 
 
 def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
@@ -716,6 +744,8 @@ def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[C
 
 def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
     defect_type = _defect_type_for_issue(issue)
+    issue_name = issue["candidate_issue_type"]
+    obligation_family = _obligation_family_for_issue(issue_name)
     mapping: dict[str, tuple[str, list[str], list[str], str, str]] = {
         "missing_controller_identity": ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Controller identity disclosure duty.", "Article 21/22 do not govern identity notice content."),
         "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes and, where consent is relied on, validity conditions must be supportable.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
@@ -729,13 +759,34 @@ def _legal_qualification_for_issue(issue: CandidateIssue) -> LegalQualification:
         "controller_processor_role_ambiguity": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"], "Role clarity is transparency duty in notice context.", "Article 28 only applies where processor-contract obligations are in scope."),
     }
     primary, secondary, rejected, reason_fit, reason_reject = mapping.get(
-        issue["candidate_issue_type"],
+        issue_name,
         ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Closest notice anchor selected.", "Rejected articles are less direct."),
     )
+    if defect_type == "potential_unlawful_practice":
+        if issue_name == "missing_legal_basis":
+            primary = "6(1)"
+            secondary = ["7(1)", "13(1)(c)", "14(1)(c)"]
+            rejected = ["13(1)(a)"]
+            reason_fit = "Visible wording indicates potentially invalid lawful-basis practice, not only missing notice text."
+            reason_reject = "Identity anchors are not primary for lawful-basis validity failures."
+        elif issue_name == "missing_retention":
+            primary = "5(1)(e)"
+            secondary = ["13(2)(a)", "14(2)(a)"]
+            rejected = ["6(1)"]
+            reason_fit = "Visible indefinite/excessive retention wording may indicate storage-limitation breach."
+            reason_reject = "Lawful basis provisions are not primary for storage-limitation defects."
+        elif issue_name == "profiling_disclosure_gap":
+            primary = "22"
+            secondary = ["13(2)(f)", "14(2)(g)"]
+            rejected = ["21"]
+            reason_fit = "Visible legal/similarly-significant effects indicate potential Article 22 regime relevance."
+            reason_reject = "Article 21 objection right is not primary for automated decisioning safeguards."
+    priority_bucket = "fatal" if defect_type in {"present_but_invalid_disclosure", "potential_unlawful_practice"} else "material"
     return LegalQualification(
-        issue_name=issue["candidate_issue_type"],
+        issue_name=issue_name,
+        obligation_family=obligation_family,
         defect_type=defect_type,
-        priority_bucket="fatal" if defect_type == "present_but_invalid_disclosure" else "material",
+        priority_bucket=priority_bucket,
         primary_article=primary,
         secondary_articles=secondary,
         rejected_articles=rejected,
@@ -3991,6 +4042,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
             f.gap_note = (
                 f"{f.gap_note} Legal qualification: issue={qualification['issue_name']}; "
+                f"obligation_family={qualification['obligation_family']}; "
                 f"defect_type={qualification['defect_type']}; priority_bucket={qualification['priority_bucket']}; "
                 f"primary={qualification['primary_article']}; secondary={', '.join(qualification['secondary_articles'])}; "
                 f"rejected={', '.join(qualification['rejected_articles'])}. "

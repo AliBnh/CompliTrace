@@ -1571,6 +1571,7 @@ def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     }
     qual = _legal_qualification_for_issue(issue)
     assert qual["primary_article"] == "13(1)(f)"
+    assert qual["obligation_family"] == "international_transfers"
     assert qual["defect_type"] == "missing_disclosure"
 
 
@@ -1589,7 +1590,24 @@ def test_legal_qualification_marks_invalid_consent_wording_as_present_but_invali
         "is_visible_gap": True,
     }
     qual = _legal_qualification_for_issue(issue)
-    assert qual["defect_type"] == "present_but_invalid_disclosure"
+    assert qual["defect_type"] == "potential_unlawful_practice"
+    assert qual["primary_article"] == "6(1)"
+    assert qual["obligation_family"] == "lawful_basis_and_validity"
+    assert qual["priority_bucket"] == "fatal"
+
+
+def test_legal_qualification_maps_indefinite_retention_to_storage_limitation_primary():
+    issue = {
+        "candidate_issue_type": "missing_retention",
+        "evidence_text": "Data may be retained indefinitely for operational analytics.",
+        "evidence_strength": 0.8,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    assert qual["defect_type"] == "potential_unlawful_practice"
+    assert qual["primary_article"] == "5(1)(e)"
     assert qual["priority_bucket"] == "fatal"
 
 
