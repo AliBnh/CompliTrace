@@ -2617,8 +2617,7 @@ def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict
     for token, (issue_id, severity) in mandatory.items():
         if issue_id == "missing_controller_identity":
             identity_present = obligation_map.get("controller_identity_present") is True
-            contact_present = obligation_map.get("controller_contact_present") is True
-            if identity_present and contact_present:
+            if identity_present:
                 continue
         if issue_id == "missing_legal_basis":
             has_legal_basis_issue = ("legal basis" in corpus) or ("legal_basis" in existing_obligations) or obligation_map.get("legal_basis_present", False)
@@ -2678,11 +2677,7 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str, obligation_map: di
     for issue_id, group in by_issue.items():
         if issue_id == "general_transparency_gap":
             continue
-        if (
-            issue_id in {"missing_controller_identity", "missing_controller_contact"}
-            and obligation_map.get("controller_identity_present") is True
-            and obligation_map.get("controller_contact_present") is True
-        ):
+        if issue_id in {"missing_controller_identity", "missing_controller_contact"} and obligation_map.get("controller_identity_present") is True:
             continue
         if len(group) < 2:
             continue
@@ -3976,6 +3971,19 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             row.finding_level = "none"
             row.publication_state = "internal_only"
             continue
+        row_text = _norm(f"{row.policy_evidence_excerpt or ''} {row.gap_note or ''} {row.remediation_note or ''}")
+        explicit_hits = _explicit_violation_hits(row_text)
+        if row.status in {"partial", "gap"} and row.classification in {"not_assessable", "section_support", "evidence_support", "gap_support"} and explicit_hits:
+            row.status = "gap"
+            row.classification = "clear_non_compliance"
+            row.finding_type = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publish_flag = "yes"
+            row.artifact_role = "publishable_finding"
+            row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publication_state = "publishable"
+            row.severity = "high"
+            row.gap_note = f"Explicit violation validator matched ({explicit_hits[0][0]}). Finding promoted to substantive non-compliance."
+            row.confidence = max(row.confidence or 0.62, 0.62)
         if row.status not in {"gap", "partial"}:
             continue
         key = "general"
@@ -4338,10 +4346,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             if ranked and ranked[0][1] > 0:
                 unmet_duty_issue = ranked[0][0]
         if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
-            controller_globally_present = (
-                obligation_map.get("controller_identity_present") is True
-                and obligation_map.get("controller_contact_present") is True
-            )
+            controller_globally_present = obligation_map.get("controller_identity_present") is True
             if unmet_duty_issue in {"missing_controller_identity", "missing_controller_contact"} and controller_globally_present:
                 unmet_duty_issue = None
         if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
@@ -4368,10 +4373,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             legal_posture="missing_disclosure",
             legal_posture_reason="Fallback to non-controller placeholder when no issue candidates are spotted.",
         )
-        controller_globally_present = (
-            obligation_map.get("controller_identity_present") is True
-            and obligation_map.get("controller_contact_present") is True
-        )
+        controller_globally_present = obligation_map.get("controller_identity_present") is True
         if (
             primary_issue["candidate_issue_type"] in {"missing_controller_identity", "missing_controller_contact"}
             and controller_globally_present
@@ -4771,10 +4773,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         )
         if not consistency_ok:
             controller_issue = qualification["issue_name"] in {"missing_controller_identity", "missing_controller_contact"}
-            controller_globally_present = (
-                obligation_map.get("controller_identity_present") is True
-                and obligation_map.get("controller_contact_present") is True
-            )
+            controller_globally_present = obligation_map.get("controller_identity_present") is True
             if controller_issue and controller_globally_present:
                 classification = "no_issue"
                 f.status = "compliant"

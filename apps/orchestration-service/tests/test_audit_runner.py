@@ -747,6 +747,35 @@ def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
         assert updated.artifact_role == "publishable_finding"
 
 
+def test_partner_review_promotes_not_assessable_retention_violation():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        row = Finding(
+            audit_id=audit.id,
+            section_id="sec-retention",
+            status="partial",
+            severity=None,
+            classification="not_assessable",
+            finding_type="supporting_evidence",
+            publish_flag="no",
+            gap_note="Not assessable from provided excerpt; additional documentary context is required.",
+            remediation_note="Provide complete notice excerpts and rerun legal qualification.",
+            policy_evidence_excerpt="Archived datasets may be retained indefinitely and retained for extended periods.",
+        )
+        db.add(row)
+        db.commit()
+        _partner_review_pass(db, audit.id)
+        updated = db.get(Finding, row.id)
+        assert updated.classification == "clear_non_compliance"
+        assert updated.publish_flag == "yes"
+        assert updated.artifact_role == "publishable_finding"
+
+
 def test_explicit_violation_hits_detect_consent_inferred_from_interactions():
     hits = _explicit_violation_hits("Consent is inferred from interactions and continued usage of the service.")
     assert any(key == "invalid_consent" for key, _ in hits)
