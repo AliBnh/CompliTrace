@@ -61,6 +61,7 @@ from app.services.audit_runner import (
     _validate_family_obligations,
     _not_assessable_allowed,
     _issue_relevance_score,
+    _build_document_obligation_map,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -702,6 +703,21 @@ def test_article_int_parsing():
     assert _article_int("13") == 13
     assert _article_int("Article 46") == 46
     assert _article_int(None) is None
+
+
+def test_document_obligation_map_detects_controller_identity_from_corporate_suffix():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="Introduction",
+            content='Orion Data Systems, Inc. ("Company", "we", "us") provides cloud services.',
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = _build_document_obligation_map(sections)
+    assert obligation_map["controller_identity_present"] is True
 
 
 def test_normalize_analysis_anchors_rewrites_mismatched_transfer_family():

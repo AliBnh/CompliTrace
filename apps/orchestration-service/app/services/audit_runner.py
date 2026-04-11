@@ -1319,8 +1319,15 @@ def _document_posture_agent(sections: list[SectionData], document_mode: str) -> 
 
 def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, bool]:
     corpus = " ".join(_norm(f"{s.section_title} {s.content}") for s in sections)
+    has_controller_identity = any(t in corpus for t in {"controller", "legal entity", "company name"})
+    has_controller_identity = has_controller_identity or any(
+        t in corpus for t in {"inc.", "limited", "llc", "corp", "corporation", "registered office", "registered address"}
+    )
+    has_controller_identity = has_controller_identity or bool(
+        re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd|limited|corporation|corp)\b", corpus)
+    )
     return {
-        "controller_identity_present": any(t in corpus for t in {"controller", "legal entity", "company name"}),
+        "controller_identity_present": has_controller_identity,
         "controller_contact_present": any(t in corpus for t in {"contact details", "privacy@", "email", "contact us", "address"}),
         "dpo_present": any(t in corpus for t in {"data protection officer", "dpo"}),
         "rights_present": any(t in corpus for t in {"right of access", "right to object", "rectification", "erasure"}),
