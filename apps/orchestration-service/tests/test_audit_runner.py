@@ -56,6 +56,7 @@ from app.services.audit_runner import (
     _has_positive_contradictory_disclosure,
     _extract_legal_facts,
     _legal_reasoning_step,
+    _validate_family_obligations,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -1683,6 +1684,17 @@ def test_legal_reasoning_step_outputs_text_to_fact_to_family_flow():
     facts, narrative = _legal_reasoning_step(section, issue, qual)
     assert any(f["fact_type"] == "data_source" and f["value"] == "third_party" for f in facts)
     assert "triggered_obligation_family=indirect_collection_article14" in narrative
+    assert "obligation_validation" in narrative
+
+
+def test_validate_family_obligations_for_article14_reports_missing_obligations():
+    text = "We receive data from third parties and external datasets."
+    facts = _extract_legal_facts(text)
+    out = _validate_family_obligations("indirect_collection_article14", text, facts)
+    assert out["satisfied"] is False
+    missing = set(out["missing"])
+    assert "legal_basis" in missing
+    assert "rights" in missing
 
 
 def test_classify_finding_quality_uses_visible_violation_rule_without_citations():

@@ -633,6 +633,38 @@ def _obligation_family_for_issue(issue_name: str) -> str:
     return family_map.get(issue_name, "general_transparency")
 
 
+FAMILY_ARTICLE_MAP: dict[str, tuple[str, list[str], list[str]]] = {
+    "identity_contact_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["21", "22"]),
+    "lawful_basis_and_validity": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(a)"]),
+    "retention_transparency_and_storage_limitation": ("13(2)(a)", ["14(2)(a)", "5(1)(e)"], ["6(1)"]),
+    "rights_and_complaints": ("13(2)(b)", ["13(2)(d)", "14(2)(c)", "14(2)(e)", "77"], ["5(1)(a)"]),
+    "international_transfers": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"]),
+    "profiling_and_article22": ("13(2)(f)", ["14(2)(g)", "22"], ["21"]),
+    "recipients_transparency": ("13(1)(e)", ["14(1)(e)", "12(1)"], ["21", "22"]),
+    "purpose_specification": ("13(1)(c)", ["14(1)(c)", "5(1)(b)"], ["21"]),
+    "indirect_collection_article14": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"]),
+    "role_allocation_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"]),
+    "special_category_processing": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"]),
+}
+
+
+def _validate_family_obligations(family: str, text: str, facts: list[LegalFact]) -> dict[str, object]:
+    norm = _norm(text)
+    missing: list[str] = []
+    if family == "indirect_collection_article14":
+        checks = {
+            "source_identity_or_category": any(t in norm for t in {"source categories", "sources of personal data", "obtained from", "from third parties"}),
+            "purposes": any(t in norm for t in {"purpose", "we use", "for the purpose"}),
+            "legal_basis": any(f["fact_type"] == "lawful_basis" and f["value"] == "present" for f in facts),
+            "rights": any(t in norm for t in {"right of access", "rectification", "erasure", "objection", "portability"}),
+            "retention": any(t in norm for t in {"retention", "kept for", "storage period"}),
+            "complaint_right": any(t in norm for t in {"supervisory authority", "complaint"}),
+        }
+        missing = [name for name, ok in checks.items() if not ok]
+    satisfied = len(missing) == 0
+    return {"family": family, "satisfied": satisfied, "missing": missing}
+
+
 def _extract_legal_facts(text: str) -> list[LegalFact]:
     norm = _norm(text)
     facts: list[LegalFact] = []
@@ -696,10 +728,12 @@ def _legal_reasoning_step(
     precomputed_facts: list[LegalFact] | None = None,
 ) -> tuple[list[LegalFact], str]:
     facts = precomputed_facts if precomputed_facts is not None else _extract_legal_facts(f"{section.section_title}. {section.content}")
+    validation = _validate_family_obligations(qualification["obligation_family"], f"{section.section_title}. {section.content}", facts)
     severity_recommendation = "high" if qualification["priority_bucket"] == "fatal" else "medium"
     narrative = (
         f"Legal reasoning pipeline: facts={facts}; "
         f"triggered_obligation_family={qualification['obligation_family']}; "
+        f"obligation_validation={validation}; "
         f"legal_validation={qualification['defect_type']}; "
         f"severity_recommendation={severity_recommendation}."
     )
@@ -829,22 +863,12 @@ def _legal_qualification_for_issue(issue: CandidateIssue, facts: list[LegalFact]
         defect_from_facts = _defect_type_from_facts(issue_name, facts)
         if defect_from_facts:
             defect_type = defect_from_facts
-    mapping: dict[str, tuple[str, list[str], list[str], str, str]] = {
-        "missing_controller_identity": ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Controller identity disclosure duty.", "Article 21/22 do not govern identity notice content."),
-        "missing_legal_basis": ("13(1)(c)", ["14(1)(c)", "6(1)", "7(1)"], ["13(1)(f)", "14(1)(f)"], "Legal basis must be disclosed with purposes and, where consent is relied on, validity conditions must be supportable.", "Transfer paragraphs do not satisfy legal-basis disclosure."),
-        "missing_retention": ("13(2)(a)", ["14(2)(a)", "5(1)(e)"], ["6(1)"], "Retention period/criteria is explicit notice content duty and excessive/indefinite retention implicates storage limitation.", "Lawful basis provisions are not retention disclosure anchors."),
-        "missing_rights_information": ("13(2)(b)", ["13(2)(c)", "13(2)(d)", "14(2)(c)", "14(2)(d)", "14(2)(e)"], ["5(1)(a)"], "Rights notice obligations are in Articles 13(2)/14(2).", "Article 5 principle is supporting, not primary rights notice basis."),
-        "missing_complaint_right": ("13(2)(d)", ["14(2)(e)"], ["21"], "Complaint-right disclosure is explicit in 13(2)(d)/14(2)(e).", "Article 21 is objection right, not complaint-right anchor."),
-        "missing_transfer_notice": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"], "Transfer disclosure belongs to notice transfer paragraph and Chapter V safeguards.", "Article 15 access right is not transfer notice anchor."),
-        "profiling_disclosure_gap": ("13(2)(f)", ["14(2)(g)", "22"], ["21"], "Profiling transparency starts with notice disclosure paragraphs and escalates to Article 22 where effects are significant.", "Article 21 is not a substitute anchor for automated-decision safeguards."),
-        "special_category_basis_unclear": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"], "Special-category processing requires Article 9 condition.", "Article 21 is not lawful condition for special-category processing."),
-        "article_14_indirect_collection_gap": ("14(1)", ["14(1)(d)", "14(2)", "14(3)", "14(5)"], ["13(1)"], "Indirect collection and source disclosures are Article 14-first obligations.", "Article 13 applies to direct collection context."),
-        "controller_processor_role_ambiguity": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"], "Role clarity is transparency duty in notice context.", "Article 28 only applies where processor-contract obligations are in scope."),
-    }
-    primary, secondary, rejected, reason_fit, reason_reject = mapping.get(
-        issue_name,
-        ("13(1)(a)", ["14(1)(a)"], ["21", "22"], "Closest notice anchor selected.", "Rejected articles are less direct."),
+    primary, secondary, rejected = FAMILY_ARTICLE_MAP.get(
+        obligation_family,
+        ("13(1)(a)", ["14(1)(a)"], ["21", "22"]),
     )
+    reason_fit = f"Article set selected from obligation family '{obligation_family}' rather than snippet-level matching."
+    reason_reject = "Rejected articles are outside the triggered obligation family for this finding."
     if defect_type == "potential_unlawful_practice":
         if issue_name == "missing_legal_basis":
             primary = "6(1)"
