@@ -1504,6 +1504,22 @@ def test_reviewer_agent_downgrades_not_assessable_visibility():
     assert reviewed_citations == []
 
 
+def test_applicability_memo_keeps_explicit_consent_excerpt_assessable_even_if_short():
+    memo = _applicability_memo(
+        SectionData(
+            id="p2b",
+            section_order=2,
+            section_title="Consent snippet",
+            content="Consent is inferred from continued use.",
+            page_start=2,
+            page_end=2,
+        ),
+        {"legal_basis"},
+        {"document_type": "external_privacy_notice_excerpt", "triggered_duties": [], "not_triggered_duties": [], "not_assessable_duties": []},
+    )
+    assert memo["visibility"] != "not_assessable"
+
+
 def test_applicability_decision_direct_allows_article_13():
     section = SectionData(
         id="a1",
