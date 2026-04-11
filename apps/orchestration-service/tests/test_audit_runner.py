@@ -1622,6 +1622,18 @@ def test_extract_legal_facts_captures_partner_source_and_undefined_retention():
     assert "retention_policy" in fact_types
 
 
+def test_extract_legal_facts_captures_transfer_recipients_and_unmapped_lawful_basis():
+    facts = _extract_legal_facts(
+        "We transfer personal data outside the EEA to service providers and partners. "
+        "Our legal basis includes legitimate interests."
+    )
+    indexed = {(f["fact_type"], f["value"]) for f in facts}
+    assert ("transfer_scope", "outside_jurisdiction") in indexed
+    assert ("recipient_categories", "missing") in indexed
+    assert ("lawful_basis", "present") in indexed
+    assert ("lawful_basis", "present_but_unmapped") in indexed
+
+
 def test_legal_reasoning_step_outputs_text_to_fact_to_family_flow():
     section = SectionData(
         id="sec-flow",

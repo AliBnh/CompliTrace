@@ -636,38 +636,33 @@ def _obligation_family_for_issue(issue_name: str) -> str:
 def _extract_legal_facts(text: str) -> list[LegalFact]:
     norm = _norm(text)
     facts: list[LegalFact] = []
+    def _add_fact(fact_type: str, value: str, evidence: str) -> None:
+        if any(f["fact_type"] == fact_type and f["value"] == value for f in facts):
+            return
+        facts.append(LegalFact(fact_type=fact_type, value=value, evidence=evidence))
+
     if any(t in norm for t in {"from partners", "from third parties", "data aggregators", "public records", "external datasets"}):
-        facts.append(
-            LegalFact(
-                fact_type="data_source",
-                value="third_party",
-                evidence="collect/obtain data from partners/third parties/external sources",
-            )
-        )
+        _add_fact("data_source", "third_party", "collect/obtain data from partners/third parties/external sources")
     if any(t in norm for t in {"as long as necessary", "indefinite", "indefinitely", "extended period"}):
-        facts.append(
-            LegalFact(
-                fact_type="retention_policy",
-                value="undefined_duration",
-                evidence="retention period wording indicates indefinite or undefined duration",
-            )
-        )
+        _add_fact("retention_policy", "undefined_duration", "retention period wording indicates indefinite or undefined duration")
     if any(t in norm for t in {"inferred consent", "continued use", "consent inferred"}):
-        facts.append(
-            LegalFact(
-                fact_type="lawful_basis_model",
-                value="consent_inferred_from_use",
-                evidence="consent model appears inferred from continued use",
-            )
-        )
+        _add_fact("lawful_basis_model", "consent_inferred_from_use", "consent model appears inferred from continued use")
     if any(t in norm for t in {"without human intervention", "legal effect", "similarly significant"}):
-        facts.append(
-            LegalFact(
-                fact_type="automated_decisioning",
-                value="article22_risk_signal",
-                evidence="automated-decisioning effects/safeguard risk wording detected",
-            )
-        )
+        _add_fact("automated_decisioning", "article22_risk_signal", "automated-decisioning effects/safeguard risk wording detected")
+    if any(t in norm for t in {"outside the eea", "third country", "international transfer", "outside jurisdiction"}):
+        _add_fact("transfer_scope", "outside_jurisdiction", "international/third-country transfer wording is visible")
+    recipient_category_signals = {"categories of recipients", "recipient categories", "types of recipients"}
+    recipient_actor_signals = {"third party", "third-party", "partners", "vendors", "processors", "service providers"}
+    if any(t in norm for t in recipient_category_signals):
+        _add_fact("recipient_categories", "present", "structured recipient-category disclosure is present")
+    elif any(t in norm for t in recipient_actor_signals):
+        _add_fact("recipient_categories", "missing", "recipient actors are mentioned without structured categories")
+    has_lawful_basis = any(t in norm for t in {"legal basis", "lawful basis", "article 6"})
+    if has_lawful_basis:
+        _add_fact("lawful_basis", "present", "lawful basis disclosure language is present")
+        purpose_mapped = any(t in norm for t in {"for the purpose of", "for purposes of", "for each purpose", "by purpose"})
+        if not purpose_mapped:
+            _add_fact("lawful_basis", "present_but_unmapped", "lawful basis is present but not clearly mapped to purposes")
     return facts
 
 
