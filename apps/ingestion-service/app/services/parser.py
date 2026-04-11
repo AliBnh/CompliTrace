@@ -290,6 +290,23 @@ def _refine_sections(sections: list[ParsedSection], boilerplate_lines: set[str])
         )
         content = sec.content.strip() if is_preamble_block else _remove_boilerplate_phrases(sec.content, boilerplate_lines)
         title = _normalize_section_title(sec.section_title)
+        if SECTION_NUM_RE.match(title) and _clean_line(content) == title:
+            content = ""
+
+        if not content:
+            # Drop title-only rows to keep parsed sections content-bearing.
+            continue
+        if is_preamble_block:
+            refined.append(
+                ParsedSection(
+                    section_order=0,
+                    section_title=title,
+                    content=content,
+                    page_start=sec.page_start,
+                    page_end=sec.page_end,
+                )
+            )
+            continue
 
         if not content:
             # Keep top-level numbered headings to preserve document hierarchy; skip empty subsection shells.
