@@ -48,10 +48,15 @@ from app.services.audit_runner import (
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
     _build_final_disposition_map,
+    _final_publication_validator,
     _upsert_evidence_records,
     _extract_notice_cross_references,
     _source_scope_qualification,
     _issue_has_unseen_reference,
+    _has_positive_contradictory_disclosure,
+    _extract_legal_facts,
+    _legal_reasoning_step,
+    _validate_family_obligations,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -157,6 +162,286 @@ def test_upsert_evidence_records_creates_policy_and_chunk_entries():
         ids = {r.evidence_id for r in records}
         assert f"evi:policy:{finding.section_id}" in ids
         assert "evi:chunk:gdpr-art-13-p-1-c" in ids
+
+
+def test_final_publication_validator_marks_audit_incomplete_when_publishable_gap_family_is_unmaterialized():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-1", status="running")
+        db.add(audit)
+        db.flush()
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-1",
+                status="partial",
+                severity="medium",
+                classification="supporting_evidence",
+                finding_type="supporting_evidence",
+                publish_flag="no",
+                publication_state="internal_only",
+                gap_note="support row",
+            )
+        )
+        db.commit()
+        disposition_map = {
+            "transfer": {
+                "status": "gap",
+                "publication_recommendation": "publish",
+                "reasoning": "transfer disclosure missing",
+            }
+        }
+
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(audit)
+        assert audit.status == "audit_incomplete"
+
+
+def test_final_publication_validator_marks_audit_incomplete_when_publishable_referenced_unseen_family_is_unmaterialized():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-2", status="running")
+        db.add(audit)
+        db.flush()
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-2",
+                status="partial",
+                severity="medium",
+                classification="supporting_evidence",
+                finding_type="supporting_evidence",
+                publish_flag="no",
+                publication_state="internal_only",
+                gap_note="support row",
+            )
+        )
+        db.commit()
+        disposition_map = {
+            "profiling": {
+                "status": "referenced_but_unseen",
+                "publication_recommendation": "publish",
+                "reasoning": "profiling references unresolved",
+            }
+        }
+
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(audit)
+        assert audit.status == "audit_incomplete"
+
+
+def test_build_final_disposition_map_splits_controller_identity_from_contact_when_identity_missing():
+    sections = [
+        SectionData(
+            id="s1",
+            section_order=1,
+            section_title="1. Introduction",
+            content="We process personal data.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {
+        "controller_identity": False,
+        "controller_contact": True,
+        "controller_identity_contact": False,
+        "legal_basis": True,
+        "retention": True,
+        "rights": True,
+        "complaint": True,
+    }
+    out = _build_final_disposition_map([], sections, obligation_map)
+    controller = out["controller_identity_contact"]
+    assert controller["status"] == "gap"
+    assert controller["issue_key"] == "missing_controller_identity"
+
+
+def test_final_publication_validator_blocks_publishable_row_without_flbc_reasoning():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-3", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_legal_basis",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(c)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="confirmed_document_gap",
+            confidence_overall=0.71,
+            remediation_note="Add legal bases by purpose.",
+            gap_reasoning="Missing legal basis disclosure in notice.",
+            document_evidence_refs='["evi:policy:lb"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(FindingCitation(finding_id=finding.id, chunk_id="c13", article_number="13", paragraph_ref="1(c)", article_title="Legal basis", excerpt="x"))
+        db.commit()
+
+        disposition_map = {"legal_basis": {"status": "gap", "publication_recommendation": "publish", "reasoning": "legal basis missing"}}
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(finding)
+        assert finding.publish_flag == "no"
+        assert finding.publication_state == "blocked"
+
+
+def test_final_publication_validator_blocks_publishable_row_on_citation_article_matrix_mismatch():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-4", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_transfer_notice",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="confirmed_document_gap",
+            confidence_overall=0.74,
+            remediation_note="Add transfer safeguards.",
+            gap_reasoning="Fact: transfer context. Law: Article 13(1)(f). Breach: missing safeguards. Conclusion: gap.",
+            document_evidence_refs='["evi:policy:transfer"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(FindingCitation(finding_id=finding.id, chunk_id="c21", article_number="21", paragraph_ref="1", article_title="Right to object", excerpt="x"))
+        db.commit()
+
+        disposition_map = {
+            "controller_identity_contact": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "legal_basis": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "retention": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "rights_notice": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "complaint_right": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "transfer": {"status": "gap", "publication_recommendation": "publish", "reasoning": "transfer missing"},
+            "profiling": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "role_ambiguity": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "article14_source": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "recipients": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "purpose_mapping": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "special_category": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+            "dpo_contact": {"status": "not_triggered", "publication_recommendation": "internal_only"},
+        }
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(finding)
+        assert finding.publish_flag == "no"
+        assert finding.publication_state == "blocked"
+
+
+def test_contradiction_helper_requires_positive_quote_not_just_wording():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-5", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_transfer_notice",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="confirmed_document_gap",
+            confidence_overall=0.72,
+            remediation_note="Add transfer safeguards.",
+            gap_reasoning="Fact: transfer context exists. Law: Art 13(1)(f). Breach: safeguards absent. Conclusion: contradiction check pending.",
+            omission_basis="true",
+            support_complete="true",
+            document_evidence_refs='["evi:policy:transfer"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(FindingCitation(finding_id=finding.id, chunk_id="c13", article_number="13", paragraph_ref="1(f)", article_title="Transfers", excerpt="Data may move across regions."))
+        db.commit()
+
+        assert _has_positive_contradictory_disclosure(db, finding, "missing_transfer_notice") is False
+
+
+def test_final_publication_validator_blocks_when_positive_contradictory_quote_exists():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-6", status="running")
+        db.add(audit)
+        db.flush()
+        finding = Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_controller_contact",
+            status="gap",
+            severity="high",
+            classification="probable_gap",
+            finding_type="systemic",
+            publish_flag="yes",
+            publication_state="publishable",
+            primary_legal_anchor='["GDPR Article 13(1)(a)"]',
+            citation_summary_text="summary",
+            source_scope="full_notice",
+            assertion_level="probable_document_gap",
+            confidence_overall=0.73,
+            remediation_note="Add contact route.",
+            gap_reasoning="Fact: contact appears contradictory. Law: Art 13(1)(a). Breach: unclear. Conclusion: contradictory text may already disclose contact.",
+            document_evidence_refs='["evi:policy:controller"]',
+        )
+        db.add(finding)
+        db.flush()
+        db.add(
+            FindingCitation(
+                finding_id=finding.id,
+                chunk_id="c-contact",
+                article_number="13",
+                paragraph_ref="1(a)",
+                article_title="Controller contact",
+                excerpt="You may contact us at privacy@example.com for any request.",
+            )
+        )
+        db.commit()
+        assert _has_positive_contradictory_disclosure(db, finding, "missing_controller_contact") is True
+
+        disposition_map = {
+            "controller_identity_contact": {
+                "status": "gap",
+                "publication_recommendation": "publish",
+                "reasoning": "contact missing",
+            },
+            "legal_basis": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "retention": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "rights_notice": {"status": "satisfied", "publication_recommendation": "internal_only"},
+            "complaint_right": {"status": "satisfied", "publication_recommendation": "internal_only"},
+        }
+        _final_publication_validator(db, audit.id, disposition_map, source_scope="full_notice")
+        db.refresh(finding)
+        assert finding.publish_flag == "no"
+        assert finding.publication_state == "blocked"
 
 
 def test_upsert_evidence_records_deduplicates_same_policy_section_id():
@@ -285,6 +570,26 @@ def test_final_disposition_purpose_mapping_family_non_silent_for_broad_categorie
     assert purpose["status"] in {"gap", "not_assessable"}
 
 
+def test_final_disposition_article14_source_requires_source_categories_and_timing():
+    sections = [
+        SectionData(
+            id="sec-a14",
+            section_order=1,
+            section_title="Data sources",
+            content=(
+                "We receive data from third parties, including partners, data aggregators, and public records."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    disposition = _build_final_disposition_map([], sections, {})
+    article14 = disposition["article14_source"]
+    assert article14["triggered"] is True
+    assert article14["status"] == "gap"
+    assert "timing duties" in str(article14["reasoning"])
+
+
 def test_final_disposition_special_category_ambiguous_sensitive_language_not_overcalled():
     sections = [
         SectionData(
@@ -299,8 +604,8 @@ def test_final_disposition_special_category_ambiguous_sensitive_language_not_ove
     disposition = _build_final_disposition_map([], sections, {})
     special = disposition["special_category"]
     assert special["triggered"] is True
-    assert special["status"] == "not_assessable"
-    assert special["publication_recommendation"] == "internal_only"
+    assert special["status"] == "referenced_but_unseen"
+    assert special["publication_recommendation"] == "publish"
 
 
 def test_final_disposition_special_category_true_art9_without_condition_is_gap():
@@ -366,6 +671,15 @@ def test_normalize_analysis_anchors_rewrites_mismatched_transfer_family():
     assert anchors is not None
     assert "13(1)(f)" in anchors
     assert "14(1)(f)" in anchors
+
+
+def test_normalize_analysis_anchors_enforces_family_validators_for_rights_and_complaint():
+    rights = _normalize_analysis_anchors("missing_rights_notice", '["GDPR Article 13(1)(a)"]') or ""
+    complaint = _normalize_analysis_anchors("missing_complaint_right", '["GDPR Article 13(1)(a)"]') or ""
+    assert "13(2)(b)" in rights
+    assert "14(2)(e)" in rights
+    assert "13(2)(d)" in complaint
+    assert "77" in complaint
 
 
 def test_partner_review_pass_reduces_not_assessable_for_explicit_context():
@@ -582,7 +896,7 @@ def test_systemic_evidence_refs_include_obligation_map_omission_marker():
     )
     assert omission_basis is True
     assert any(ref.startswith("section:") for ref in refs)
-    assert "obligation_map:legal_basis_present=not_visible" in refs
+    assert "coverage_check:legal_basis_present=not_visible_in_reviewed_sections" in refs
 
 
 def test_coverage_to_support_validator_requires_required_obligation_absence():
@@ -996,9 +1310,10 @@ def test_claim_has_primary_anchor_requires_matching_claim_articles():
     assert _claim_has_primary_anchor({"complaint"}, citations) is True
 
 
-def test_normalize_severity_escalates_key_transparency_claims():
-    assert _normalize_severity("gap", "medium", {"retention"}) == "high"
+def test_normalize_severity_applies_policy_buckets():
+    assert _normalize_severity("gap", "high", {"retention"}) == "medium"
     assert _normalize_severity("partial", None, {"rights"}) == "high"
+    assert _normalize_severity("gap", "medium", {"purpose_mapping"}) == "medium"
     assert _normalize_severity("compliant", "high", {"rights"}) is None
 
 
@@ -1031,9 +1346,10 @@ def test_ensure_reasoning_chain_adds_evidence_requirement_assessment():
         [LlmCitation(chunk_id="c13", article_number="13")],
         {"legal_basis"},
     )
-    assert "Evidence:" in (updated.gap_note or "")
-    assert "Requirement:" in (updated.gap_note or "")
-    assert "Assessment:" in (updated.gap_note or "")
+    assert "Fact:" in (updated.gap_note or "")
+    assert "Law:" in (updated.gap_note or "")
+    assert "Breach:" in (updated.gap_note or "")
+    assert "Conclusion:" in (updated.gap_note or "")
 
 
 def test_clean_remediation_rewrites_wrong_13_1_f_legal_basis_reference():
@@ -1047,6 +1363,47 @@ def test_classify_finding_quality_outputs_probable_gap_for_core_notice_without_c
     klass, conf = _classify_finding_quality(finding, [], {"retention"}, "direct")
     assert klass == "probable_gap"
     assert conf is not None and conf >= 0.55
+
+
+def test_claim_type_to_issue_mapping_uses_canonical_issue_families():
+    from app.services.audit_runner import _claim_type_to_issue_id
+
+    assert _claim_type_to_issue_id("controller_contact") == "missing_controller_contact"
+    assert _claim_type_to_issue_id("transfer") == "missing_transfer_notice"
+    assert _claim_type_to_issue_id("profiling") == "profiling_disclosure_gap"
+
+
+def test_classify_finding_quality_avoids_not_assessable_for_specialist_claim_without_citations():
+    finding = LlmFinding(status="gap", severity="medium", gap_note="Profiling signals visible.", remediation_note="Add profiling disclosures.", citations=[])
+    klass, conf = _classify_finding_quality(finding, [], {"profiling"}, "direct")
+    assert klass == "probable_gap"
+    assert conf is not None and conf >= 0.5
+
+
+def test_classify_finding_quality_treats_role_ambiguity_as_presumptively_assessable_without_citations():
+    finding = LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note="Controller/processor role language is ambiguous in notice sections.",
+        remediation_note="Clarify roles by processing purpose.",
+        citations=[],
+    )
+    klass, conf = _classify_finding_quality(finding, [], {"role_ambiguity"}, "direct")
+    assert klass == "probable_gap"
+    assert conf is not None and conf >= 0.5
+
+
+def test_classify_finding_quality_allows_not_assessable_when_excerpt_is_fragmentary():
+    finding = LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note="Fragmentary excerpt; unseen section needed for legal conclusion.",
+        remediation_note=None,
+        citations=[],
+    )
+    klass, conf = _classify_finding_quality(finding, [], {"role_ambiguity"}, "direct")
+    assert klass == "not_assessable"
+    assert conf == 0.2
 
 
 def test_classify_finding_quality_marks_needs_review_as_probable_gap_for_core_notice():
@@ -1206,6 +1563,35 @@ def test_spot_candidate_issues_returns_notice_missing_candidates():
     assert any(i["candidate_issue_type"] == "missing_legal_basis" for i in issues)
 
 
+def test_spot_candidate_issues_fact_fallback_prefers_article14_for_third_party_source():
+    section = SectionData(
+        id="q2b",
+        section_order=2,
+        section_title="Data sources",
+        content="We obtain personal data from third parties and external datasets.",
+        page_start=2,
+        page_end=2,
+    )
+    issues = _spot_candidate_issues(section, "indirect")
+    assert issues
+    assert issues[0]["candidate_issue_type"] == "article_14_indirect_collection_gap"
+
+
+def test_spot_candidate_issues_applies_mandatory_legal_posture_layer_for_invalid_consent():
+    section = SectionData(
+        id="q2c",
+        section_order=3,
+        section_title="Lawful basis",
+        content="Consent is inferred from continued use of the service.",
+        page_start=3,
+        page_end=3,
+    )
+    issues = _spot_candidate_issues(section, "direct")
+    legal_basis_issue = next(i for i in issues if i["candidate_issue_type"] == "missing_legal_basis")
+    assert legal_basis_issue["legal_posture"] == "present_but_legally_invalid"
+    assert "Art. 6/7" in legal_basis_issue["legal_posture_reason"]
+
+
 def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     issue = {
         "candidate_issue_type": "missing_transfer_notice",
@@ -1217,8 +1603,137 @@ def test_legal_qualification_maps_transfer_notice_to_13_1_f():
     }
     qual = _legal_qualification_for_issue(issue)
     assert qual["primary_article"] == "13(1)(f)"
+    assert qual["obligation_family"] == "international_transfers"
+    assert qual["defect_type"] == "missing_disclosure"
 
 
 def test_forbidden_matrix_rejects_article_21_for_complaint():
     citations = [LlmCitation(chunk_id="z1", article_number="21")]
     assert _violates_forbidden_article_matrix({"complaint"}, citations) is True
+
+
+def test_legal_qualification_marks_invalid_consent_wording_as_present_but_invalid():
+    issue = {
+        "candidate_issue_type": "missing_legal_basis",
+        "evidence_text": "Consent is inferred from continued use of the service.",
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    assert qual["defect_type"] == "potential_unlawful_practice"
+    assert qual["primary_article"] == "6(1)"
+    assert qual["obligation_family"] == "lawful_basis_and_validity"
+    assert qual["priority_bucket"] == "fatal"
+
+
+def test_legal_qualification_maps_indefinite_retention_to_storage_limitation_primary():
+    issue = {
+        "candidate_issue_type": "missing_retention",
+        "evidence_text": "Data may be retained indefinitely for operational analytics.",
+        "evidence_strength": 0.8,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    assert qual["defect_type"] == "potential_unlawful_practice"
+    assert qual["primary_article"] == "5(1)(e)"
+    assert qual["priority_bucket"] == "fatal"
+
+
+def test_legal_qualification_uses_facts_to_mark_lawful_basis_present_but_unmapped():
+    issue = {
+        "candidate_issue_type": "missing_legal_basis",
+        "evidence_text": "Legal basis is listed but not mapped by purpose.",
+        "evidence_strength": 0.8,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    facts = _extract_legal_facts("Our legal basis includes legitimate interests for processing.")
+    qual = _legal_qualification_for_issue(issue, facts)
+    assert qual["defect_type"] == "present_but_invalid_disclosure"
+
+
+def test_legal_qualification_uses_facts_to_mark_recipients_present_but_unstructured():
+    issue = {
+        "candidate_issue_type": "recipients_disclosure_gap",
+        "evidence_text": "We share with partners and vendors.",
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "direct",
+        "is_visible_gap": True,
+    }
+    facts = _extract_legal_facts("We disclose personal data to partners and vendors.")
+    qual = _legal_qualification_for_issue(issue, facts)
+    assert qual["defect_type"] == "present_but_invalid_disclosure"
+
+
+def test_extract_legal_facts_captures_partner_source_and_undefined_retention():
+    facts = _extract_legal_facts(
+        "We may collect data from partners and external datasets and keep data as long as necessary."
+    )
+    fact_types = {f["fact_type"] for f in facts}
+    assert "data_source" in fact_types
+    assert "retention_policy" in fact_types
+
+
+def test_extract_legal_facts_captures_transfer_recipients_and_unmapped_lawful_basis():
+    facts = _extract_legal_facts(
+        "We transfer personal data outside the EEA to service providers and partners. "
+        "Our legal basis includes legitimate interests."
+    )
+    indexed = {(f["fact_type"], f["value"]) for f in facts}
+    assert ("transfer_scope", "outside_jurisdiction") in indexed
+    assert ("recipient_categories", "missing") in indexed
+    assert ("lawful_basis", "present") in indexed
+    assert ("lawful_basis", "present_but_unmapped") in indexed
+
+
+def test_legal_reasoning_step_outputs_text_to_fact_to_family_flow():
+    section = SectionData(
+        id="sec-flow",
+        section_order=1,
+        section_title="Data sources",
+        content="We may collect data from partners and public records.",
+        page_start=1,
+        page_end=1,
+    )
+    issue = {
+        "candidate_issue_type": "article_14_indirect_collection_gap",
+        "evidence_text": section.content,
+        "evidence_strength": 0.7,
+        "local_or_document_level": "local",
+        "possible_collection_mode": "indirect",
+        "is_visible_gap": True,
+    }
+    qual = _legal_qualification_for_issue(issue)
+    facts, narrative = _legal_reasoning_step(section, issue, qual)
+    assert any(f["fact_type"] == "data_source" and f["value"] == "third_party" for f in facts)
+    assert "triggered_obligation_family=indirect_collection_article14" in narrative
+    assert "obligation_validation" in narrative
+
+
+def test_validate_family_obligations_for_article14_reports_missing_obligations():
+    text = "We receive data from third parties and external datasets."
+    facts = _extract_legal_facts(text)
+    out = _validate_family_obligations("indirect_collection_article14", text, facts)
+    assert out["satisfied"] is False
+    missing = set(out["missing"])
+    assert "legal_basis" in missing
+    assert "rights" in missing
+
+
+def test_classify_finding_quality_uses_visible_violation_rule_without_citations():
+    finding = LlmFinding(
+        status="gap",
+        severity="high",
+        gap_note="The policy states retention is indefinite retention for all account data.",
+        remediation_note="Define bounded retention periods.",
+        citations=[],
+    )
+    klass, conf = _classify_finding_quality(finding, [], {"retention"}, "direct")
+    assert klass == "probable_gap"
+    assert (conf or 0) >= 0.6
