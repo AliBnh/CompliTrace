@@ -185,3 +185,26 @@ def test_coerce_finding_tolerates_partial_citation_payload():
     assert finding.status == "partial"
     assert len(finding.citations) == 1
     assert finding.citations[0].chunk_id == "c1"
+
+
+def test_coerce_finding_maps_reasoning_trace_fields():
+    parsed = {
+        "status": "gap",
+        "severity": "high",
+        "gap_note": "No retention period disclosed",
+        "remediation_note": "Add concrete retention periods by category.",
+        "policy_evidence_excerpt": "We retain data as needed.",
+        "legal_requirement": "Article 13(2)(a) retention disclosure duty.",
+        "gap_reasoning": "Policy language is indefinite and lacks any timeline.",
+        "confidence_level": "high",
+        "assessment_type": "confirmed",
+        "severity_rationale": "Core notice element missing with direct textual contradiction.",
+        "citations": [{"chunk_id": "c1", "article_number": "13"}],
+    }
+    finding = llm._coerce_finding_from_parsed(parsed)
+    assert finding.policy_evidence_excerpt == "We retain data as needed."
+    assert finding.legal_requirement == "Article 13(2)(a) retention disclosure duty."
+    assert finding.gap_reasoning == "Policy language is indefinite and lacks any timeline."
+    assert finding.confidence_level == "high"
+    assert finding.assessment_type == "confirmed"
+    assert finding.severity_rationale == "Core notice element missing with direct textual contradiction."
