@@ -603,6 +603,18 @@ def _document_wide_duty_validation(sections: list[SectionData], document_type: s
     return out
 
 
+def _not_assessable_allowed(text: str, status: str, classification: str | None) -> bool:
+    norm = _norm(text)
+    explicit_unlawful = bool(_explicit_violation_hits(text))
+    clearly_partial = status == "partial" or any(t in norm for t in {"partially", "incomplete", "not mapped"})
+    clearly_missing = status == "gap" or any(t in norm for t in {"missing", "not disclosed", "absent"})
+    if explicit_unlawful or clearly_partial or clearly_missing:
+        return False
+    if classification in {"diagnostic_internal_only", "retrieval_failure_internal_only"}:
+        return True
+    return len(norm) < 120 or "excerpt" in norm
+
+
 def _is_not_applicable(section: SectionData) -> bool:
     title = re.sub(r"[^a-z0-9\s]", "", _norm(section.section_title))
     if title not in ADMIN_PATTERNS:
@@ -4577,6 +4589,18 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             )
             valid_citations = []
         classification, confidence = _classify_finding_quality(f, valid_citations, claim_types, _collection_mode(section))
+        if classification == "not_assessable" and not _not_assessable_allowed(
+            f"{section.section_title}. {section.content}. {f.gap_note or ''}. {f.remediation_note or ''}",
+            f.status,
+            classification,
+        ):
+            classification = "probable_gap" if f.status in {"gap", "partial"} else "clear_non_compliance"
+            if f.status == "needs review":
+                f.status = "partial"
+                f.severity = f.severity or "medium"
+                f.gap_note = (
+                    "Substantive disclosure signal detected; not-assessable is disallowed by strict legal gate."
+                )
         consistency_ok, consistency_reason = _pre_persist_consistency_gate(
             qualification["issue_name"],
             claim_types,

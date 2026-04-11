@@ -505,9 +505,20 @@ def _project_published_findings_from_map(
                 continue
         missing_requirements = _missing_hydration_requirements(projected)
         if missing_requirements:
-            item["blocker_reason"] = _blocker_reason_for_missing_requirements(missing_requirements)
-            item["missing_requirements"] = missing_requirements
-            continue
+            substantive_missing = {
+                "primary_legal_anchor",
+                "citations",
+                "document_evidence_refs",
+                "policy_evidence_excerpt",
+                "citations.article_primary_fit",
+                "citations.article_disallowed",
+            } & set(missing_requirements)
+            if substantive_missing:
+                item["blocker_reason"] = _blocker_reason_for_missing_requirements(missing_requirements)
+                item["missing_requirements"] = missing_requirements
+                continue
+            projected.confidence_overall = min(projected.confidence_overall or 0.62, 0.62)
+            projected.support_complete = False
         out.append(projected)
     return out
 
@@ -581,6 +592,20 @@ def _published_legal_conclusion(status: str | None, issue: str | None, existing:
     if status == "gap":
         return "partially_compliant"
     return existing or "not_assessable"
+
+
+def _final_legal_outcome_for_row(row: FindingOut) -> str:
+    status = (row.status or "").lower()
+    cls = (row.classification or "").lower()
+    if "publication_blocked" in cls:
+        return "not_assessable_from_provided_text"
+    if status == "compliant":
+        return "compliant"
+    if status in {"partial"} or cls in {"partially_compliant", "referenced_but_unseen"}:
+        return "partially_compliant"
+    if status == "gap" or cls in {"non_compliant", "clear_non_compliance", "systemic_violation"}:
+        return "non_compliant"
+    return "not_assessable_from_provided_text"
 
 
 def _severity_rule(issue: str | None, status: str | None, section_id: str, reasoning: str | None) -> tuple[str, str]:
@@ -1139,6 +1164,10 @@ def _absence_proof_publishable_row(
         support_complete=False,
         omission_basis=True,
         policy_evidence_excerpt=absence_proof,
+        document_evidence=absence_proof,
+        legal_rule=legal_requirement,
+        legal_analysis=reasoning,
+        final_legal_outcome="partially_compliant",
         affected_sections=sections,
         where_evidence_found=sections,
         where_disclosure_missing=sections,
@@ -1217,6 +1246,9 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
     article_fit_quality = row.confidence_article_fit if row.confidence_article_fit is not None else (0.8 if row.primary_legal_anchor else 0.5)
     contradiction_quality = 0.0 if "contradict" in ((row.gap_reasoning or "").lower()) else 1.0
     completeness_quality = 0.0 if _hydration_missing(row) else 1.0
+    substantive_ok = bool(row.primary_legal_anchor) and (
+        bool(row.citations) or (row.policy_evidence_excerpt and "absence-proof mode" in row.policy_evidence_excerpt.lower())
+    )
     derived_confidence = (
         0.35 * min(1.0, evidence_quality)
         + 0.2 * min(1.0, traceability_quality)
@@ -1229,6 +1261,8 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         c.evidence_id is None or c.source_type is None or c.source_ref is None for c in row.citations
     ):
         row.confidence_overall = min(row.confidence_overall or 0.55, 0.55)
+    if substantive_ok and row.confidence_overall < 0.55:
+        row.confidence_overall = 0.58
     if evidence_quality >= 0.75 and row.confidence_overall < 0.55:
         row.confidence_overall = 0.6
     if not row.primary_legal_anchor:
@@ -1260,6 +1294,9 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
             "Result: required disclosure absent."
         )
     row.policy_evidence_excerpt = excerpt
+    row.document_evidence = _sanitize_published_text(row.policy_evidence_excerpt)
+    row.legal_rule = _sanitize_published_text(row.legal_requirement)
+    row.legal_analysis = _sanitize_published_text(row.gap_reasoning or row.gap_note)
     _ensure_flbc_reasoning(row, issue)
     has_primary_article, has_disallowed_article = _citation_article_findings(issue, row.citations)
     if has_disallowed_article or not has_primary_article:
@@ -1267,6 +1304,43 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         if row.severity == "high":
             row.severity = "medium"
     row.classification = _published_legal_conclusion(row.status, issue, row.classification)
+    row.final_legal_outcome = _final_legal_outcome_for_row(row)
+    explicit_violation_text = f"{row.document_evidence or ''} {row.legal_analysis or ''}".lower()
+    explicit_violation_markers = {
+        "consent inferred",
+        "retained indefinitely",
+        "no specific mechanism disclosed",
+        "automated profiling",
+    }
+    if row.final_legal_outcome == "not_assessable_from_provided_text" and any(m in explicit_violation_text for m in explicit_violation_markers):
+        row.final_legal_outcome = "non_compliant"
+    if row.final_legal_outcome == "not_assessable_from_provided_text" and row.status in {"gap", "partial"}:
+        row.final_legal_outcome = "partially_compliant" if row.status == "partial" else "non_compliant"
+    return row
+
+
+def _to_audit_ready_view(row: FindingOut) -> FindingOut:
+    row.publish_flag = None
+    row.artifact_role = None
+    row.finding_level = None
+    row.publication_state = None
+    row.confidence = None
+    row.confidence_evidence = None
+    row.confidence_applicability = None
+    row.confidence_synthesis = None
+    row.missing_from_section = None
+    row.missing_from_document = None
+    row.not_visible_in_excerpt = None
+    row.obligation_under_review = None
+    row.collection_mode = None
+    row.applicability_status = None
+    row.visibility_status = None
+    row.section_vs_document_scope = None
+    row.missing_fact_if_unresolved = None
+    row.support_complete = None
+    row.omission_basis = None
+    row.source_scope_confidence = None
+    row.referenced_unseen_sections = None
     return row
 
 

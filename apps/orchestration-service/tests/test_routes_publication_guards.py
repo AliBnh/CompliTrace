@@ -398,6 +398,10 @@ def test_get_findings_emits_publishable_absence_proof_for_unmaterialized_publish
     finding = rows[0]
     assert finding.classification == "referenced_but_unseen"
     assert finding.publication_blocked is not True
+    assert finding.final_legal_outcome in {"compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"}
+    assert finding.document_evidence is not None
+    assert finding.legal_rule is not None
+    assert finding.legal_analysis is not None
     assert finding.issue_key == "missing_transfer_notice"
     assert finding.document_evidence_refs is not None
     assert finding.citations

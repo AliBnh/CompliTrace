@@ -63,6 +63,10 @@ class FindingOut(BaseModel):
     affected_sections: list[str] | None = None
     where_evidence_found: list[str] | None = None
     where_disclosure_missing: list[str] | None = None
+    document_evidence: str | None = None
+    legal_rule: str | None = None
+    legal_analysis: str | None = None
+    final_legal_outcome: str | None = None
     gap_note: str | None
     remediation_note: str | None
     citations: list[CitationOut]

@@ -57,6 +57,7 @@ from app.services.audit_runner import (
     _extract_legal_facts,
     _legal_reasoning_step,
     _validate_family_obligations,
+    _not_assessable_allowed,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -1518,6 +1519,11 @@ def test_applicability_memo_keeps_explicit_consent_excerpt_assessable_even_if_sh
         {"document_type": "external_privacy_notice_excerpt", "triggered_duties": [], "not_triggered_duties": [], "not_assessable_duties": []},
     )
     assert memo["visibility"] != "not_assessable"
+
+
+def test_not_assessable_gate_forbids_explicit_unlawful_patterns():
+    text = "Consent inferred from continued use and retained indefinitely."
+    assert _not_assessable_allowed(text, "needs review", "not_assessable") is False
 
 
 def test_applicability_decision_direct_allows_article_13():
