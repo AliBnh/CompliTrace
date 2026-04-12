@@ -587,6 +587,7 @@ def _explicit_violation_library() -> dict[str, dict[str, object]]:
                 "consent is inferred from interactions",
                 "consent inferred from continued usage",
                 "continued usage",
+                "continuing to use",
                 "consent via browsing",
                 "implied consent",
             },
@@ -606,12 +607,12 @@ def _explicit_violation_library() -> dict[str, dict[str, object]]:
             "issue": "missing_retention",
         },
         "weak_transfer_safeguards": {
-            "patterns": {"safeguards where practical", "protection may vary", "operational needs", "no specific mechanism disclosed"},
+            "patterns": {"safeguards where practical", "protection may vary", "operational needs", "no specific mechanism disclosed", "appropriate safeguards where possible"},
             "articles": ["Art. 13(1)(f)", "Art. 14(1)(f)", "Art. 44", "Art. 45", "Art. 46"],
             "issue": "missing_transfer_notice",
         },
         "profiling_without_required_explanation": {
-            "patterns": {"automated profiling", "risk scores", "service availability influenced", "without logic explanation"},
+            "patterns": {"automated profiling", "risk scores", "service availability influenced", "without logic explanation", "without detailed logic explanations"},
             "articles": ["Art. 13(2)(f)", "Art. 14(2)(g)", "Art. 22"],
             "issue": "profiling_disclosure_gap",
         },
@@ -718,6 +719,8 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
     explicit_hits = _explicit_violation_hits(corpus)
 
     if duty_id == "controller_identity_contact":
+        if _eval_presence(corpus, {"identity and contact details are provided", "controller identity and contact details are provided"}):
+            return "compliant"
         identity = _eval_presence(corpus, {"inc.", "inc", "llc", "ltd", "limited", "corporation", "corp", "controller"})
         contact = _eval_presence(corpus, {"privacy@", "dpo@", "contact us", "contact route", "email", "webform", "postal address", "address"})
         if identity and contact:
@@ -726,8 +729,8 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "partially_compliant"
         return "non_compliant"
     if duty_id == "legal_basis_notice":
-        has_basis = _eval_presence(corpus, {"legal basis", "lawful basis", "contract", "legal obligation", "legitimate interests", "consent"})
-        mapped = _eval_presence(corpus, {"for this purpose", "for the following purposes", "mapped to", "each purpose"})
+        has_basis = _eval_presence(corpus, {"legal basis", "lawful basis", "lawful bases", "contract", "legal obligation", "legitimate interests", "consent"})
+        mapped = _eval_presence(corpus, {"for this purpose", "for the following purposes", "mapped to", "each purpose", "purpose mapping"})
         invalid = any(k == "invalid_consent" for k, _ in explicit_hits)
         if has_basis and mapped and not invalid:
             return "compliant"
@@ -737,14 +740,14 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "non_compliant"
         return "not_assessable_from_provided_text"
     if duty_id == "retention_notice":
-        has_period = _eval_presence(corpus, {"months", "years", "days", "retention period", "kept for"})
-        has_criteria = _eval_presence(corpus, {"until no longer necessary", "objective criteria", "as required by law"})
+        has_period = _eval_presence(corpus, {"months", "years", "days", "retention period", "kept for", "retention periods"})
+        has_criteria = _eval_presence(corpus, {"until no longer necessary", "objective criteria", "as required by law", "criteria are listed"})
         invalid = any(k == "unlawful_retention_wording" for k, _ in explicit_hits)
         if (has_period or has_criteria) and not invalid:
             return "compliant" if (has_period and has_criteria) else "partially_compliant"
-        if invalid or _eval_presence(corpus, {"retained indefinitely", "archived indefinitely", "extended periods"}):
+        if invalid or _eval_presence(corpus, {"retained indefinitely", "archived indefinitely", "extended periods", "data indefinitely", "keep data indefinitely"}):
             return "non_compliant"
-        return "not_assessable_from_provided_text"
+        return "non_compliant" if "privacy_notice" in document_type else "not_assessable_from_provided_text"
     if duty_id == "rights_notice":
         if _eval_presence(corpus, {"rights listed and actionable", "data subject rights include"}):
             return "compliant"
@@ -756,6 +759,8 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "partially_compliant"
         if _eval_presence(corpus, {"rights are limited", "no data subject rights"}):
             return "non_compliant"
+        if _eval_presence(corpus, {"some rights may apply", "rights may apply"}):
+            return "non_compliant"
         return "not_assessable_from_provided_text"
     if duty_id == "complaint_right_notice":
         complaint = _eval_presence(corpus, {"lodge a complaint", "supervisory authority", "data protection authority"})
@@ -763,7 +768,7 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "compliant"
         if _eval_presence(corpus, {"no complaint right"}):
             return "non_compliant"
-        return "not_assessable_from_provided_text"
+        return "non_compliant" if "privacy_notice" in document_type else "not_assessable_from_provided_text"
     if duty_id == "transfers_notice":
         transfer = _eval_presence(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS)
         safeguards = _eval_presence(corpus, {"adequacy", "standard contractual clauses", "scc", "binding corporate rules", "article 49"})
@@ -806,7 +811,7 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "non_compliant"
         return "not_assessable_from_provided_text"
     if duty_id == "cookies_consent_notice":
-        non_essential = _eval_presence(corpus, {"analytics cookie", "advertising cookie", "non-essential"})
+        non_essential = _eval_presence(corpus, {"analytics cookie", "advertising cookie", "non-essential", "cookies", "ad networks", "tracking"})
         opt_in = _eval_presence(corpus, {"opt-in", "prior consent", "accept all / reject all", "consent banner"})
         withdraw = _eval_presence(corpus, {"withdraw consent", "change cookie settings", "reject non-essential"})
         if non_essential and opt_in and withdraw:
@@ -815,7 +820,7 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "partially_compliant"
         if non_essential and not opt_in:
             return "non_compliant"
-        return "not_assessable_from_provided_text"
+        return "non_compliant" if non_essential else "not_assessable_from_provided_text"
     if duty_id == "role_allocation_notice":
         mixed = _eval_presence(
             corpus,

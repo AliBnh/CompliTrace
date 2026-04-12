@@ -13,6 +13,8 @@ from app.api.routes import (
     _sanitize_published_text,
     _sanitize_review_text,
     create_report,
+    get_export_contract,
+    get_final_decision_ledger,
     get_findings,
     get_review,
     get_review_grouped,
@@ -45,6 +47,67 @@ def test_get_findings_blocks_publication_when_review_required(db_session: Sessio
 
     assert exc.value.status_code == 409
     assert "requires review" in str(exc.value.detail)
+
+
+def test_final_decision_ledger_exposes_canonical_rows(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    finding = Finding(
+        audit_id=audit.id,
+        section_id="systemic:missing_transfer_notice",
+        status="gap",
+        severity="high",
+        publication_state="publishable",
+        classification="systemic_violation",
+        gap_note="Transfer safeguard wording is unclear.",
+        primary_legal_anchor='["GDPR Article 13(1)(f)"]',
+        document_evidence_refs='["evi:policy:sec-transfer"]',
+    )
+    db_session.add(finding)
+    db_session.flush()
+    db_session.add(
+        FindingCitation(
+            finding_id=finding.id,
+            chunk_id="transfer-1",
+            article_number="13",
+            paragraph_ref="1(f)",
+            article_title="Transfer disclosure",
+            excerpt="We may transfer data without naming safeguards.",
+        )
+    )
+    db_session.commit()
+
+    rows = get_final_decision_ledger(audit.id, db_session)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.issue_type == "Transfer safeguards disclosure"
+    assert row.scope_type == "document_wide"
+    assert row.evidence_mode == "direct_excerpt"
+    assert row.evidence_refs
+
+
+def test_export_contract_is_backend_authoritative(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="systemic:missing_rights_notice",
+            status="gap",
+            severity="high",
+            publication_state="blocked",
+            classification="systemic_violation",
+            legal_requirement="GDPR Art 13(2)(b)",
+            gap_note="Rights disclosure is incomplete.",
+            remediation_note="Add rights disclosures.",
+        )
+    )
+    db_session.commit()
+
+    contract = get_export_contract(audit.id, db_session)
+    assert contract.report_type == "Review report (final publication pending)"
+    assert contract.dataset_used == "review"
+    assert contract.export_allowed is True
+    assert contract.counts_by_status["total"] == 1
+    assert contract.finding_ids == contract.document_wide_finding_ids
 
 
 def test_create_report_blocks_generation_when_review_required(db_session: Session):

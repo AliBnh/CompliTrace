@@ -101,6 +101,39 @@ class ReportTriggerOut(BaseModel):
     status: str
 
 
+class ExportContractOut(BaseModel):
+    report_type: str
+    dataset_used: str
+    export_allowed: bool
+    blocker_reasons: list[str]
+    counts_by_status: dict[str, int]
+    finding_ids: list[str]
+    document_wide_finding_ids: list[str]
+    section_finding_ids: list[str]
+    generated_from_audit_id: str
+    generated_at: str
+
+
+class FinalDecisionLedgerRowOut(BaseModel):
+    canonical_issue_key: str
+    scope_type: str
+    scope_id: str
+    scope_title: str | None = None
+    issue_type: str
+    issue_subtype: str
+    final_status: str
+    final_severity: str | None = None
+    legal_anchors: list[str]
+    evidence_refs: list[str]
+    evidence_mode: str
+    review_visible: bool
+    published_visible: bool
+    report_visible: bool
+    export_visible: bool
+    blocker_reason_codes: list[str]
+    normalization_metadata: dict[str, str] | None = None
+
+
 class AnalysisCitationOut(BaseModel):
     chunk_id: str
     evidence_id: str | None = None
@@ -177,3 +210,4 @@ class ReviewItemOut(BaseModel):
     reason: str | None = None
     source_scope_dependency: str | None = None
     publication_recommendation: str | None = None
+    citations: list[CitationOut] | None = None

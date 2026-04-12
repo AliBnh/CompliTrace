@@ -1,4 +1,4 @@
-import type { AnalysisItemOut, AuditOut, DocumentOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from './types'
+import type { AnalysisItemOut, AuditOut, DocumentOut, ExportContractOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from './types'
 
 const INGESTION_BASE = import.meta.env.VITE_INGESTION_URL ?? 'http://localhost:8001'
 const ORCHESTRATION_BASE = import.meta.env.VITE_ORCHESTRATION_URL ?? 'http://localhost:8003'
@@ -82,6 +82,11 @@ export async function createReport(auditId: string): Promise<{ report_id: string
 export async function getReport(auditId: string): Promise<ReportOut> {
   const res = await fetch(`${ORCHESTRATION_BASE}/audits/${auditId}/report`)
   return parseResponse<ReportOut>(res)
+}
+
+export async function getExportContract(auditId: string): Promise<ExportContractOut> {
+  const res = await fetch(`${ORCHESTRATION_BASE}/audits/${auditId}/export-contract`)
+  return parseResponse<ExportContractOut>(res)
 }
 
 export function reportDownloadUrl(auditId: string): string {
