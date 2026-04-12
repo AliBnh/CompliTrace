@@ -458,7 +458,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Non-compliant: {by_status['gap']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
         _TextBlock(
-            "Dataset used: Review findings (final publication blocked)." if published_blocked else "Dataset used: Final published findings.",
+            "Dataset used: Review findings (publication blocked)" if published_blocked else "Dataset used: Final published findings.",
             bullet=True,
         ),
         _TextBlock("Document-wide findings", font_size=13, top_gap=14),

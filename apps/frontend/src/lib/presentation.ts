@@ -20,6 +20,7 @@ export type SectionFinding = {
   stable_ui_id: string
   sectionId: string
   sectionTitle: string
+  scope: 'Section' | 'Document-wide'
   overallStatus: UserStatus
   severity: UserSeverity
   issues: Issue[]
@@ -49,28 +50,30 @@ export type FindingsPresentation = {
 }
 
 const FALLBACK_CONTEXT = 'This issue requires additional context before publication.'
+const WHY_FALLBACK = 'This section cannot be validated because the provided content is incomplete or lacks required legal detail.'
 
 const BANNED_PATTERNS = [
   'support_only', 'internal_only', 'candidate_issue', 'provisional_local', 'support_evidence', 'post_reviewer_snapshot',
   'meta_section', 'auditability gate', 'not-assessable', 'not_assessable', 'confirmed_document_gap', 'probable_document_gap',
   'clear_non_compliance', 'duty validation marked', 'filtered by', 'explicit violation validator matched', 'validator token',
   'no explicit evidence refs from final map', 'withheld by final publication validator',
+  'signal detected', 'legal gate', 'duty-level', 'reconciliation', 'suppressed',
 ]
 
 const ISSUE_LABELS: Record<string, string> = {
-  legal_basis: 'Legal basis disclosure',
+  legal_basis: 'Transparency disclosure',
   rights_notice: 'Data subject rights disclosure',
-  complaint_right: 'Complaint right disclosure',
+  complaint_right: 'Data subject rights disclosure',
   transfers: 'Transfer safeguards disclosure',
-  cookies: 'Cookie transparency disclosure',
+  cookies: 'Transparency disclosure',
   profiling: 'Profiling transparency',
-  governance: 'Governance and compliance disclosure',
-  contact: 'Contact information disclosure',
+  governance: 'Transparency disclosure',
+  contact: 'Transparency disclosure',
   retention: 'Retention disclosure',
-  recipients: 'Recipients disclosure',
-  purpose: 'Purpose disclosure',
-  role_ambiguity: 'Role allocation disclosure',
-  wording_only: 'Wording clarity issue',
+  recipients: 'Transparency disclosure',
+  purpose: 'Transparency disclosure',
+  role_ambiguity: 'Transparency disclosure',
+  wording_only: 'Transparency disclosure',
 }
 
 const ISSUE_ALIASES: Record<string, string> = {
@@ -140,7 +143,17 @@ function sanitizeUserFacingText(value?: string | null): string {
     text = text.replace(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ')
   }
 
-  text = text.replace(/Observation:\s*/gi, '').replace(/\s+/g, ' ').trim()
+  text = text
+    .replace(/Observation:\s*/gi, '')
+    .replace(/substantive disclosure signal detected\.?/gi, 'The document suggests disclosure is present, but required details are missing or unclear.')
+    .replace(/legal gate/gi, 'legal review')
+    .replace(/duty-level/gi, 'requirement-level')
+    .replace(/reconciliation/gi, 'cross-check')
+    .replace(/suppressed/gi, 'removed')
+    .replace(/signal detected/gi, 'potential issue identified')
+    .replace(/Section\s*\.\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (/^(n\/?a|null|none|undefined|-|\[\])$/i.test(text)) return ''
   return text
 }
@@ -160,15 +173,16 @@ function mapStatus(value?: string | null): UserStatus {
 
 function canonicalIssueKey(value?: string | null): string {
   const normalized = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
-  return ISSUE_ALIASES[normalized] ?? normalized
+  return ISSUE_ALIASES[normalized] ?? 'legal_basis'
 }
 
 function issueLabel(issue: string): string {
-  return ISSUE_LABELS[issue] ?? 'Compliance disclosure issue'
+  return ISSUE_LABELS[issue] ?? 'Transparency disclosure'
 }
 
 function whyText(issue: string, fallback?: string | null): string {
-  return sanitizeOrFallback(WHY_TEXT[issue] ?? fallback)
+  const sanitized = sanitizeUserFacingText(WHY_TEXT[issue] ?? fallback)
+  return sanitized || WHY_FALLBACK
 }
 
 function actionText(issue: string, fallback?: string | null): string {
@@ -187,12 +201,17 @@ function mapSeverity(issue: string, raw?: string | null): UserSeverity {
 }
 
 function sectionTitleFor(sectionId: string, sectionsById: Record<string, SectionOut>): string | null {
-  if (sectionId.startsWith('systemic:')) return 'Document-wide finding'
+  if (sectionId.startsWith('systemic:')) return 'Entire document'
   const section = sectionsById[sectionId]
   if (!section?.section_title?.trim()) return null
   const title = sanitizeUserFacingText(section.section_title)
   if (!title) return null
   return `Section ${section.section_order}: ${title}`
+}
+
+
+function findingScope(sectionId: string): 'Document-wide' | 'Section' {
+  return sectionId.startsWith('systemic:') ? 'Document-wide' : 'Section'
 }
 
 function evidenceText(sectionTitle: string, excerpt?: string | null, issue?: string): string {
@@ -253,6 +272,7 @@ function normalizePublished(rows: FindingOut[], sectionsById: Record<string, Sec
       stable_ui_id: `published:${row.id}`,
       sectionId: row.section_id,
       sectionTitle,
+      scope: findingScope(row.section_id),
       overallStatus: mapStatus(row.status),
       severity: 'Low' as UserSeverity,
       issues: [
@@ -281,6 +301,7 @@ function normalizeReview(rows: ReviewItemOut[], sectionsById: Record<string, Sec
       stable_ui_id: `review:${row.id}`,
       sectionId: row.section_id,
       sectionTitle,
+      scope: findingScope(row.section_id),
       overallStatus: mapStatus(row.status ?? row.final_disposition),
       severity: 'Low' as UserSeverity,
       issues: [
@@ -308,6 +329,7 @@ function normalizeAnalysis(rows: AnalysisItemOut[], sectionsById: Record<string,
       stable_ui_id: `analysis:${row.id}`,
       sectionId: row.section_id,
       sectionTitle,
+      scope: findingScope(row.section_id),
       overallStatus: mapStatus(row.status_candidate),
       severity: 'Low' as UserSeverity,
       issues: [
@@ -334,11 +356,11 @@ function collapseToSectionRows(rows: SectionFinding[]): SectionFinding[] {
       map.set(key, { ...row })
       continue
     }
-    const seen = new Set(existing.issues.map((x) => x.issueKey))
+    const seen = new Set(existing.issues.map((x) => x.issueLabel))
     for (const issue of row.issues) {
-      if (!seen.has(issue.issueKey)) {
+      if (!seen.has(issue.issueLabel)) {
         existing.issues.push(issue)
-        seen.add(issue.issueKey)
+        seen.add(issue.issueLabel)
       }
     }
   }
@@ -351,6 +373,7 @@ function collapseToSectionRows(rows: SectionFinding[]): SectionFinding[] {
       return {
         ...row,
         stable_ui_id: `${row.sourceMode}:${row.sectionId}`,
+        scope: findingScope(row.sectionId),
         issues,
         overallStatus,
         severity,
@@ -457,10 +480,17 @@ export function validatePresentationInvariants(
       keys.add(dedupeKey)
 
       if (!sanitizeUserFacingText(row.sectionTitle)) errors.push(`Missing valid sectionTitle in ${name}`)
+      if (row.scope === 'Section' && row.sectionId.startsWith('systemic:')) errors.push(`Document findings appear in section table for ${name}`)
+      if (row.sectionTitle.includes('Document-wide finding')) errors.push(`Forbidden title found in ${name}`)
       if (!row.issues.length) errors.push(`Missing issues in ${name} for section ${row.sectionId}`)
 
       for (const issue of row.issues) {
-        if (!sanitizeUserFacingText(issue.whyThisMatters)) errors.push(`Missing Why this matters in ${name} for section ${row.sectionId}`)
+        if (!sanitizeUserFacingText(issue.whyThisMatters) || issue.whyThisMatters.trim().toLowerCase() === 'section .') {
+          errors.push(`Missing Why this matters in ${name} for section ${row.sectionId}`)
+        }
+        if (!['Transparency disclosure', 'Data subject rights disclosure', 'Retention disclosure', 'Transfer safeguards disclosure', 'Profiling transparency'].includes(issue.issueLabel)) {
+          errors.push(`Non-canonical issue label in ${name} for section ${row.sectionId}`)
+        }
         if (hasInternalText(issue.whyThisMatters) || hasInternalText(issue.evidenceText) || hasInternalText(issue.recommendedAction)) {
           errors.push(`Unsanitized content in ${name} for section ${row.sectionId}`)
         }
@@ -486,4 +516,21 @@ export function buildReviewSummary(findings: SectionFinding[]): string | null {
 
 export function containsBannedUserText(value: string): boolean {
   return hasInternalText(value)
+}
+
+export function splitFindingsByScope(rows: SectionFinding[]): { documentFindings: SectionFinding[]; sectionFindings: SectionFinding[] } {
+  return {
+    documentFindings: rows.filter((row) => row.scope === 'Document-wide'),
+    sectionFindings: rows.filter((row) => row.scope === 'Section'),
+  }
+}
+
+
+export function assertPdfDatasetIntegrity(pdfFindings: SectionFinding[], reportExportFindings: SectionFinding[]): void {
+  if (pdfFindings.length !== reportExportFindings.length) {
+    throw new Error('PDF dataset mismatch')
+  }
+  if (JSON.stringify(pdfFindings) !== JSON.stringify(reportExportFindings)) {
+    throw new Error('PDF dataset mismatch')
+  }
 }
