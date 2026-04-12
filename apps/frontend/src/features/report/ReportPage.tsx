@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
 import { createReport, getAnalysis, getFindings, getReport, getReview, getSections, reportDownloadUrl } from '../../lib/api'
-import { aggregateCounts, buildFindingsPresentation, validateReportExportReadiness } from '../../lib/presentation'
+import { aggregateCounts, assertPdfDatasetIntegrity, buildFindingsPresentation, validateReportExportReadiness } from '../../lib/presentation'
 import type { AnalysisItemOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function ReportPage() {
@@ -60,11 +60,13 @@ export function ReportPage() {
     if (!auditId) return
     setError(null)
     setStatus('generating')
+    const pdfFindings = presentation.reportExportFindings
     const readiness = validateReportExportReadiness(presentation, {
-      pdfRenderedFindingsCount: presentation.reportExportFindings.length,
+      pdfRenderedFindingsCount: pdfFindings.length,
       pdfDatasetLabel: presentation.reportDatasetLabel,
-      pdfRows: presentation.reportExportFindings,
+      pdfRows: pdfFindings,
     })
+    assertPdfDatasetIntegrity(pdfFindings, presentation.reportExportFindings)
     if (!readiness.ok) {
       console.error('Report export invariants failed', readiness.errors)
       setStatus('idle')

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
 import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
-import { aggregateCounts, buildFindingsPresentation, buildReviewSummary, type NormalizedFinding } from '../../lib/presentation'
+import { aggregateCounts, buildFindingsPresentation, buildReviewSummary, splitFindingsByScope, type NormalizedFinding } from '../../lib/presentation'
 import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function FindingsPage() {
@@ -72,23 +72,24 @@ export function FindingsPage() {
     : viewMode === 'review'
       ? presentation.reviewVisibleFindings
       : presentation.analysisVisibleFindings
+  const { documentFindings, sectionFindings } = splitFindingsByScope(activeRows)
 
   const isPublishedBlockedView = viewMode === 'published' && presentation.publishedBlocked
-  const counts = aggregateCounts(activeRows)
+  const counts = aggregateCounts(sectionFindings)
   const reviewSummary = buildReviewSummary(presentation.reviewVisibleFindings)
 
   useEffect(() => {
     setSelectedByView((current) => {
       const existing = current[viewMode]
-      if (!activeRows.length) return { ...current, [viewMode]: null }
-      if (existing && activeRows.some((row) => row.stable_ui_id === existing)) return current
-      return { ...current, [viewMode]: activeRows[0].stable_ui_id }
+      if (!sectionFindings.length) return { ...current, [viewMode]: null }
+      if (existing && sectionFindings.some((row) => row.stable_ui_id === existing)) return current
+      return { ...current, [viewMode]: sectionFindings[0].stable_ui_id }
     })
-  }, [activeRows, viewMode])
+  }, [sectionFindings, viewMode])
 
   if (!auditId) return <EmptyState message="No audit in progress. Trigger an audit from Sections page." />
 
-  const selected = activeRows.find((x) => x.stable_ui_id === selectedByView[viewMode]) ?? null
+  const selected = sectionFindings.find((x) => x.stable_ui_id === selectedByView[viewMode]) ?? null
 
   return (
     <section className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
@@ -136,13 +137,32 @@ export function FindingsPage() {
         </header>
 
         {!isPublishedBlockedView && (
+          <div className="surface-card p-4">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Document-wide findings</h2>
+            {documentFindings.length === 0 ? (
+              <p className="mt-2 text-sm text-slate-500">No document-wide findings.</p>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {documentFindings.map((finding) => (
+                  <article key={finding.stable_ui_id} className="rounded-lg border border-slate-200 p-3 text-sm">
+                    <div className="font-medium text-slate-900">{finding.sectionTitle}</div>
+                    <div className="mt-1 text-slate-600">Scope: Document-wide</div>
+                    <div className="mt-1 text-slate-700">{finding.issues.map((x) => x.issueLabel).join(', ')}</div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isPublishedBlockedView && (
           <div className="surface-card overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-slate-100/80 text-left text-xs uppercase tracking-wide text-slate-500">
                 <tr><th className="px-4 py-3">Section</th><th className="px-4 py-3">Issues</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Severity</th></tr>
               </thead>
               <tbody>
-                {activeRows.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No findings in this dataset.</td></tr> : activeRows.map((finding) => (
+                {sectionFindings.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No section findings in this dataset.</td></tr> : sectionFindings.map((finding) => (
                   <tr key={finding.stable_ui_id} onClick={() => setSelectedByView((c) => ({ ...c, [viewMode]: finding.stable_ui_id }))} className={`cursor-pointer border-t ${selected?.stable_ui_id === finding.stable_ui_id ? 'bg-sky-50/80' : 'bg-white'}`}>
                     <td className="px-4 py-3">{finding.sectionTitle}</td>
                     <td className="px-4 py-3">{finding.issues.map((x) => x.issueLabel).join(', ')}</td>
