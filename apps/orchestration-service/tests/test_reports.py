@@ -327,3 +327,37 @@ def test_export_fallback_uses_review_dataset_when_published_unavailable(tmp_path
             assert pdf_path.exists()
     finally:
         settings.reports_dir = old_reports_dir
+
+
+def test_zero_findings_still_generates_pdf(tmp_path: Path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    old_reports_dir = settings.reports_dir
+    settings.reports_dir = tmp_path
+    try:
+        with SessionLocal() as db:
+            audit = Audit(
+                id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                status="complete",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                model_provider="test",
+                model_name="test-model",
+                model_temperature=0.1,
+                prompt_template_version="v1",
+                embedding_model="embed",
+                corpus_version="corpus-v1",
+            )
+            db.add(audit)
+            db.commit()
+            contract, rows, _ = build_export_contract(db, audit.id)
+            assert contract["export_allowed"] is True
+            assert rows == []
+            report, out_path = generate_report_text(db, audit.id)
+            assert report.status == "ready"
+            decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
+            assert "No material issues identified in the selected report dataset." in decoded
+    finally:
+        settings.reports_dir = old_reports_dir

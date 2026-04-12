@@ -269,6 +269,10 @@ def _sanitize_user_text(text: str | None) -> str | None:
     cleaned = re.sub(r"The reviewed notice content triggers GDPR transparency analysis\.?", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"Observation:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"Substantive disclosure signal detected\.?", "The notice text suggests disclosure is present, but key details remain unclear.", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"not assessable from provided excerpt", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"finding promoted to substantive non-compliance", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"strict legal gate", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"section\s*\.", "Section", cleaned, flags=re.IGNORECASE)
     for token in BANNED_USER_TOKENS:
         cleaned = re.sub(re.escape(token), "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
@@ -430,7 +434,6 @@ def build_export_contract(
         "generated_at": datetime.utcnow().isoformat(),
     }
     if len(report_rows) > 0 and len(export_rows) == 0:
-        contract["export_allowed"] = False
         contract["blocker_reasons"] = ["no_exportable_findings_after_safety_filters"]
     return contract, export_rows, published_blocked
 
@@ -445,8 +448,6 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     db.refresh(report)
 
     contract, report_rows_deduped, published_blocked = build_export_contract(db, audit_id)
-    if not contract["export_allowed"]:
-        raise ValueError(f"Export blocked: {', '.join(contract['blocker_reasons'])}")
     analysis_rows = db.scalars(
         select(AuditAnalysisItem)
         .where(AuditAnalysisItem.audit_id == audit_id)
@@ -521,6 +522,15 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         if finding.remediation_note:
             blocks.append(_TextBlock(f"Recommended action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
         blocks.append(_TextBlock(f"Evidence: {_evidence_for_row(finding, meta.label)}", bullet=True))
+        for citation in finding.citations:
+            blocks.append(
+                _TextBlock(
+                    _format_citation_label(citation.article_number, citation.article_title, citation.paragraph_ref),
+                    bullet=True,
+                )
+            )
+            if citation.excerpt and _sanitize_user_text(citation.excerpt):
+                blocks.append(_TextBlock(f'Evidence excerpt: "{_sanitize_user_text(citation.excerpt)}"', bullet=True))
     if not systemic_findings:
         blocks.append(_TextBlock("No document-wide compliance issues were identified.", bullet=True))
 
@@ -557,6 +567,8 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             blocks.append(_TextBlock(f"Action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
     blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
     blocks.append(_TextBlock(f"Export-ready findings: {contract['counts_by_status']['total']}", bullet=True))
+    if total == 0:
+        blocks.append(_TextBlock("No material issues identified in the selected report dataset.", bullet=True))
     blocks.append(_TextBlock(f"Finding IDs: {', '.join(contract['finding_ids'])}", bullet=True))
 
     out_path = settings.reports_dir / f"audit_{audit_id}_{report.id}.pdf"

@@ -1791,6 +1791,63 @@ def test_document_wide_duty_validation_non_compliant_privacy_notice_promotes_fai
     assert out["profiling_notice"] == "non_compliant"
 
 
+def test_benchmark_compliant_forbidden_major_findings_do_not_survive():
+    sections = [
+        SectionData(
+            id="bench-ok-1",
+            section_order=1,
+            section_title="Privacy Notice",
+            content=(
+                "Controller identity and contact details are provided. "
+                "We set out lawful bases and purpose mapping. "
+                "Data subject rights include access, rectification, erasure, restriction, portability and objection. "
+                "You can lodge a complaint with a supervisory authority. "
+                "Retention periods and objective criteria are listed. "
+                "International transfers use adequacy decisions and SCC safeguards."
+            ),
+            page_start=1,
+            page_end=2,
+        )
+    ]
+    out = _document_wide_duty_validation(sections, "privacy_notice")
+    forbidden = {
+        "legal_basis_notice",
+        "rights_notice",
+        "complaint_right_notice",
+        "retention_notice",
+        "transfers_notice",
+    }
+    assert all(out[duty] == "compliant" for duty in forbidden)
+
+
+def test_benchmark_noncompliant_required_major_findings_are_present():
+    sections = [
+        SectionData(
+            id="bench-bad-1",
+            section_order=1,
+            section_title="Bad Privacy Notice",
+            content=(
+                "By continuing to use this site, you consent to all processing. "
+                "We keep data indefinitely including archives and logs. "
+                "Transfers may occur globally with appropriate safeguards where possible. "
+                "Some rights may apply. "
+                "We use cookies, ad networks and profiling for risk scores without detailed logic explanations."
+            ),
+            page_start=1,
+            page_end=2,
+        )
+    ]
+    out = _document_wide_duty_validation(sections, "privacy_notice")
+    required_non_compliant = {
+        "legal_basis_notice",
+        "retention_notice",
+        "transfers_notice",
+        "profiling_notice",
+        "cookies_consent_notice",
+    }
+    assert all(out[duty] == "non_compliant" for duty in required_non_compliant)
+
+
 def test_document_wide_duty_validation_cookie_notice_consent_modes():
     good_sections = [
         SectionData(

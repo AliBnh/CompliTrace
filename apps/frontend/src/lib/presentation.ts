@@ -92,6 +92,7 @@ const BANNED_PATTERNS = [
   'clear_non_compliance', 'duty validation marked', 'filtered by', 'explicit violation validator matched', 'validator token',
   'no explicit evidence refs from final map', 'withheld by final publication validator',
   'signal detected', 'legal gate', 'duty-level', 'reconciliation', 'suppressed',
+  'not assessable from provided excerpt', 'finding promoted to substantive non-compliance', 'strict legal gate',
 ]
 
 const ISSUE_ALIASES: Record<string, string> = {
@@ -192,6 +193,7 @@ function sanitizeUserFacingText(value?: string | null): string {
   text = text
     .replace(/Observation:\s*/gi, '')
     .replace(/substantive disclosure signal detected\.?/gi, 'The notice appears to reference this topic, but required details are missing or unclear.')
+    .replace(/section\s*\./gi, 'Section')
     .replace(/\s+/g, ' ')
     .trim()
   if (/^(n\/?a|null|none|undefined|-|\[\])$/i.test(text)) return ''
