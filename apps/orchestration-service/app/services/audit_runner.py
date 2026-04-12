@@ -520,6 +520,56 @@ GDPR_DUTY_REGISTRY: dict[str, GdprDutySpec] = {
         "clear_failure_patterns": ["automated profiling without logic", "automated decision without explanation"],
         "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
     },
+    "cookies_consent_notice": {
+        "duty_id": "cookies_consent_notice",
+        "document_types": ["cookie_notice", "consent_text", "privacy_notice", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 6", "ePrivacy consent requirements"],
+        "secondary_articles": ["Art. 7", "Art. 5(3) ePrivacy"],
+        "trigger_conditions": ["non-essential cookies or trackers are described"],
+        "satisfaction_requirements": ["non-essential cookies require opt-in consent", "withdrawal/rejection route disclosed"],
+        "clear_failure_patterns": ["consent inferred from use", "continued use means consent", "pre-ticked consent", "implied consent"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "role_allocation_notice": {
+        "duty_id": "role_allocation_notice",
+        "document_types": ["dpa", "internal_policy", "mixed_document", "privacy_notice", "external_privacy_notice"],
+        "primary_articles": ["Art. 4(7)", "Art. 4(8)", "Art. 28"],
+        "secondary_articles": ["Art. 24", "Art. 26"],
+        "trigger_conditions": ["controller/processor signals present"],
+        "satisfaction_requirements": ["controller and processor contexts distinguished"],
+        "clear_failure_patterns": ["acts as both controller and processor without allocation", "role allocation unclear"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "article14_source_notice": {
+        "duty_id": "article14_source_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 14(2)(f)", "Art. 14(3)"],
+        "secondary_articles": ["Art. 14(1)(d)"],
+        "trigger_conditions": ["indirect source collection signals present"],
+        "satisfaction_requirements": ["source categories disclosed", "article 14 timing disclosed where triggered"],
+        "clear_failure_patterns": ["indirect collection without source categories", "indirect collection timing missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "eu_representative_contact": {
+        "duty_id": "eu_representative_contact",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(a)", "Art. 14(1)(a)", "Art. 27"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["non-eu establishment and eu data-subject context indicated"],
+        "satisfaction_requirements": ["eu representative identified", "eu representative contact route disclosed"],
+        "clear_failure_patterns": ["eu representative required but not disclosed", "representative contact missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "dpo_contact_notice": {
+        "duty_id": "dpo_contact_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document", "internal_policy", "dpa"],
+        "primary_articles": ["Art. 13(1)(b)", "Art. 14(1)(b)", "Art. 37-39"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["dpo exists or dpo duty signaled"],
+        "satisfaction_requirements": ["dpo role mentioned", "dpo contact route disclosed"],
+        "clear_failure_patterns": ["dpo appointed but contact missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
 }
 
 
@@ -589,12 +639,17 @@ def _duty_registry_key_for_issue(issue_name: str) -> str | None:
         "missing_controller_contact": "controller_identity_contact",
         "missing_legal_basis": "legal_basis_notice",
         "missing_retention": "retention_notice",
+        "missing_retention_period": "retention_notice",
         "missing_rights_information": "rights_notice",
+        "missing_rights_notice": "rights_notice",
         "missing_complaint_right": "complaint_right_notice",
         "missing_transfer_notice": "transfers_notice",
         "profiling_disclosure_gap": "profiling_notice",
         "recipients_disclosure_gap": "recipients_notice",
         "purpose_specificity_gap": "purposes_notice",
+        "controller_processor_role_ambiguity": "role_allocation_notice",
+        "article_14_indirect_collection_gap": "article14_source_notice",
+        "dpo_contact_gap": "dpo_contact_notice",
     }
     return mapping.get(issue_name)
 
@@ -617,17 +672,205 @@ def _issue_relevance_score(issue_name: str, section: SectionData) -> int:
     return sum(1 for token in tokens if token in text)
 
 
-def _validate_duty_outcome(duty: GdprDutySpec, sections: list[SectionData]) -> str:
+def _base_document_type(document_type: str) -> str:
+    base = (document_type or "").lower().replace("_excerpt", "")
+    if base.startswith("external_"):
+        base = base[len("external_") :]
+    return base
+
+
+def _duty_applies(duty_id: str, document_type: str, corpus: str) -> bool:
+    base_type = _base_document_type(document_type)
+    if duty_id in {"cookies_consent_notice"}:
+        return base_type in {"cookie_notice", "consent_text", "privacy_notice", "privacy_policy", "mixed_document"} and _contains_any(
+            corpus, {"cookie", "tracking", "analytics cookie", "advertising cookie", "consent"}
+        )
+    if duty_id in {"role_allocation_notice"}:
+        return base_type in {"dpa", "internal_policy", "mixed_document", "privacy_notice", "privacy_policy"} and _contains_any(
+            corpus, {"controller", "processor", "on behalf of", "instructions"}
+        )
+    if duty_id in {"article14_source_notice"}:
+        return base_type in {"privacy_notice", "privacy_policy", "mixed_document"} and _contains_any(corpus, INDIRECT_COLLECTION_SIGNALS)
+    if duty_id in {"eu_representative_contact"}:
+        if base_type not in {"privacy_notice", "privacy_policy", "mixed_document"}:
+            return False
+        outside_eu = _contains_any(corpus, {"outside the eu", "not established in the union", "non-eu controller", "uk company"})
+        eu_data_subjects = _contains_any(corpus, {"eu resident", "eea", "european union"})
+        return outside_eu and eu_data_subjects
+    if duty_id in {"dpo_contact_notice"}:
+        return base_type in {"privacy_notice", "privacy_policy", "mixed_document", "internal_policy", "dpa"} and _contains_any(
+            corpus, {"dpo", "data protection officer", "privacy officer", "article 37"}
+        )
+    return True
+
+
+def _eval_presence(corpus: str, tokens: set[str]) -> bool:
+    return any(t in corpus for t in tokens)
+
+
+def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[SectionData], document_type: str) -> str:
     corpus = _norm(" ".join(f"{s.section_title} {s.content}" for s in sections))
     if len(corpus) < 80:
         return "not_assessable_from_provided_text"
+    if not _duty_applies(duty_id, document_type, corpus):
+        return "compliant"
+
+    explicit_hits = _explicit_violation_hits(corpus)
+
+    if duty_id == "controller_identity_contact":
+        identity = _eval_presence(corpus, {"inc.", "inc", "llc", "ltd", "limited", "corporation", "corp", "controller"})
+        contact = _eval_presence(corpus, {"privacy@", "dpo@", "contact us", "contact route", "email", "webform", "postal address", "address"})
+        if identity and contact:
+            return "compliant"
+        if identity or contact:
+            return "partially_compliant"
+        return "non_compliant"
+    if duty_id == "legal_basis_notice":
+        has_basis = _eval_presence(corpus, {"legal basis", "lawful basis", "contract", "legal obligation", "legitimate interests", "consent"})
+        mapped = _eval_presence(corpus, {"for this purpose", "for the following purposes", "mapped to", "each purpose"})
+        invalid = any(k == "invalid_consent" for k, _ in explicit_hits)
+        if has_basis and mapped and not invalid:
+            return "compliant"
+        if has_basis and not invalid:
+            return "partially_compliant"
+        if invalid or _eval_presence(corpus, {"consent inferred from use", "implied consent", "continued usage means consent"}):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "retention_notice":
+        has_period = _eval_presence(corpus, {"months", "years", "days", "retention period", "kept for"})
+        has_criteria = _eval_presence(corpus, {"until no longer necessary", "objective criteria", "as required by law"})
+        invalid = any(k == "unlawful_retention_wording" for k, _ in explicit_hits)
+        if (has_period or has_criteria) and not invalid:
+            return "compliant" if (has_period and has_criteria) else "partially_compliant"
+        if invalid or _eval_presence(corpus, {"retained indefinitely", "archived indefinitely", "extended periods"}):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "rights_notice":
+        if _eval_presence(corpus, {"rights listed and actionable", "data subject rights include"}):
+            return "compliant"
+        rights = {"access", "rectification", "erasure", "restriction", "objection", "portability"}
+        hits = sum(1 for r in rights if r in corpus)
+        if hits >= 5:
+            return "compliant"
+        if 2 <= hits < 5:
+            return "partially_compliant"
+        if _eval_presence(corpus, {"rights are limited", "no data subject rights"}):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "complaint_right_notice":
+        complaint = _eval_presence(corpus, {"lodge a complaint", "supervisory authority", "data protection authority"})
+        if complaint:
+            return "compliant"
+        if _eval_presence(corpus, {"no complaint right"}):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "transfers_notice":
+        transfer = _eval_presence(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS)
+        safeguards = _eval_presence(corpus, {"adequacy", "standard contractual clauses", "scc", "binding corporate rules", "article 49"})
+        weak = any(k == "weak_transfer_safeguards" for k, _ in explicit_hits)
+        if transfer and safeguards and not weak:
+            return "compliant"
+        if transfer and (safeguards or _eval_presence(corpus, {"safeguards"})) and not weak:
+            return "partially_compliant"
+        if transfer and (weak or not safeguards):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "profiling_notice":
+        profiling = _eval_presence(corpus, {"profiling", "automated decision", "automated decision-making"})
+        logic = _eval_presence(corpus, {"logic involved", "meaningful information about the logic"})
+        effects = _eval_presence(corpus, {"significance", "effects", "legal effect", "similarly significant"})
+        safeguards = _eval_presence(corpus, {"human intervention", "right to contest", "review by a person"})
+        if profiling and logic and (effects or safeguards):
+            return "compliant"
+        if profiling and (logic or effects or safeguards):
+            return "partially_compliant"
+        if profiling and not (logic and effects):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "recipients_notice":
+        third_party = _eval_presence(corpus, {"vendor", "partner", "processor", "third party", "recipient"})
+        categories = _eval_presence(corpus, {"categories of recipients", "recipient categories", "types of recipients"})
+        if categories:
+            return "compliant"
+        if third_party and not categories:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "purposes_notice":
+        specific = _eval_presence(corpus, {"for fraud prevention", "for account security", "for payment processing", "for support requests"})
+        broad = _eval_presence(corpus, {"for business purposes", "as necessary", "operational purposes"})
+        if specific and not broad:
+            return "compliant"
+        if specific:
+            return "partially_compliant"
+        if broad and not specific:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "cookies_consent_notice":
+        non_essential = _eval_presence(corpus, {"analytics cookie", "advertising cookie", "non-essential"})
+        opt_in = _eval_presence(corpus, {"opt-in", "prior consent", "accept all / reject all", "consent banner"})
+        withdraw = _eval_presence(corpus, {"withdraw consent", "change cookie settings", "reject non-essential"})
+        if non_essential and opt_in and withdraw:
+            return "compliant"
+        if non_essential and (opt_in or withdraw):
+            return "partially_compliant"
+        if non_essential and not opt_in:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "role_allocation_notice":
+        mixed = _eval_presence(
+            corpus,
+            {"controller and processor", "both controller and processor", "acts as controller", "acts as processor", "act as controller", "act as processor"},
+        )
+        clear = _eval_presence(
+            corpus,
+            {
+                "when we act as controller",
+                "when we act as processor",
+                "for our own purposes we act as controller",
+                "for customer instructions we act as processor",
+                "role allocation",
+            },
+        )
+        if mixed and clear:
+            return "compliant"
+        if mixed and not clear:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "article14_source_notice":
+        indirect = _eval_presence(corpus, INDIRECT_COLLECTION_SIGNALS)
+        source_cats = _eval_presence(corpus, {"source categories", "categories of sources", "obtained from"})
+        timing = _eval_presence(corpus, {"within one month", "first communication", "before disclosure"})
+        if indirect and source_cats and timing:
+            return "compliant"
+        if indirect and (source_cats or timing):
+            return "partially_compliant"
+        if indirect and not (source_cats and timing):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "eu_representative_contact":
+        rep = _eval_presence(corpus, {"eu representative", "article 27 representative"})
+        contact = _eval_presence(corpus, {"representative contact", "representative email", "representative address"})
+        if rep and contact:
+            return "compliant"
+        if rep or contact:
+            return "partially_compliant"
+        return "non_compliant"
+    if duty_id == "dpo_contact_notice":
+        dpo = _eval_presence(corpus, {"data protection officer", "dpo"})
+        contact = _eval_presence(corpus, {"dpo@", "dpo contact", "privacy officer email"})
+        if dpo and contact:
+            return "compliant"
+        if dpo or contact:
+            return "partially_compliant"
+        return "not_assessable_from_provided_text"
+
     failure_patterns = {p for p in duty["clear_failure_patterns"]}
     if any(p in corpus for p in failure_patterns):
         return "non_compliant"
     requirements = {r for r in duty["satisfaction_requirements"]}
     req_hits = sum(1 for r in requirements if any(token in corpus for token in _norm(r).split()[:2]))
     if req_hits == 0:
-        return "non_compliant"
+        return "not_assessable_from_provided_text"
     if req_hits < len(requirements):
         return "partially_compliant"
     return "compliant"
@@ -635,10 +878,13 @@ def _validate_duty_outcome(duty: GdprDutySpec, sections: list[SectionData]) -> s
 
 def _document_wide_duty_validation(sections: list[SectionData], document_type: str) -> dict[str, str]:
     out: dict[str, str] = {}
+    corpus = _norm(" ".join(f"{s.section_title} {s.content}" for s in sections))
     for duty_id, duty in GDPR_DUTY_REGISTRY.items():
         if not any(t in document_type for t in duty["document_types"]):
             continue
-        out[duty_id] = _validate_duty_outcome(duty, sections)
+        if not _duty_applies(duty_id, document_type, corpus):
+            continue
+        out[duty_id] = _validate_duty_outcome(duty_id, duty, sections, document_type)
     return out
 
 
@@ -3374,11 +3620,10 @@ def _build_final_disposition_map(
                     "on behalf of",
                     "under customer instructions",
                     "instructions from customers",
-                    "processor",
                     "customer data",
                 }
                 mixed_roles = (
-                    (_contains_any(corpus, {"independent controller", "acts as controller", "controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor", "processor"}))
+                    (_contains_any(corpus, {"independent controller", "acts as controller", "controller"}) and _contains_any(corpus, {"on behalf of", "acts as processor"}))
                     or _contains_any(corpus, {"controller and processor", "both controller and processor"})
                     or (_contains_any(corpus, own_operations_signals) and _contains_any(corpus, on_behalf_signals))
                 )
@@ -3577,7 +3822,7 @@ def _build_final_disposition_map(
                 elif has_ambiguous_sensitive and not has_true_art9:
                     status, reason = "referenced_but_unseen", "ambiguous sensitive-language suggests possible special-category context, but reviewed excerpts do not confirm Article 9 processing"
                     specialist_severity = "medium"
-        if triggered and status == "satisfied" and family not in {"special_category", "role_ambiguity"}:
+        if triggered and status == "satisfied" and family in {"dpo_contact"}:
             status, reason = "referenced_but_unseen", "specialist trigger is visible, but reviewed excerpts do not include enough text to confirm full disclosure outcome"
         families[family] = {
             "status": status,

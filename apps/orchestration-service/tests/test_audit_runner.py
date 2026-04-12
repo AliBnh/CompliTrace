@@ -1732,6 +1732,131 @@ def test_document_wide_duty_validation_marks_non_compliant_notice_as_non_complia
     assert out["transfers_notice"] == "non_compliant"
 
 
+def test_document_wide_duty_validation_compliant_privacy_notice_specialists_resolve():
+    sections = [
+        SectionData(
+            id="sec-good-full",
+            section_order=1,
+            section_title="Privacy Notice",
+            content=(
+                "ACME Corp LLC is the controller and can be contacted at privacy@acme.com. "
+                "We process data for fraud prevention, account security, payment processing, and support requests. "
+                "Legal basis includes contract, legal obligation, and legitimate interests for each purpose. "
+                "Retention period is 24 months or longer only where required by law and objective criteria are documented. "
+                "You have rights of access, rectification, erasure, restriction, objection, and portability. "
+                "You may lodge a complaint with your supervisory authority. "
+                "International transfers outside the EEA use Standard Contractual Clauses and adequacy decisions. "
+                "Recipient categories include processors, payment providers, cloud providers, and support vendors. "
+                "We use profiling for fraud prevention with meaningful information about the logic, significance, effects, and human intervention."
+            ),
+            page_start=1,
+            page_end=2,
+        )
+    ]
+    out = _document_wide_duty_validation(sections, "external_privacy_notice")
+    assert out["controller_identity_contact"] == "compliant"
+    assert out["legal_basis_notice"] in {"compliant", "partially_compliant"}
+    assert out["retention_notice"] in {"compliant", "partially_compliant"}
+    assert out["rights_notice"] == "compliant"
+    assert out["complaint_right_notice"] == "compliant"
+    assert out["transfers_notice"] in {"compliant", "partially_compliant"}
+    assert out["profiling_notice"] in {"compliant", "partially_compliant"}
+    disposition = _build_final_disposition_map([], sections, {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True})
+    assert disposition["transfer"]["status"] in {"satisfied", "not_triggered"}
+    assert disposition["profiling"]["status"] in {"satisfied", "not_triggered"}
+    assert disposition["recipients"]["status"] in {"satisfied", "not_triggered"}
+    assert disposition["role_ambiguity"]["publication_recommendation"] == "internal_only"
+
+
+def test_document_wide_duty_validation_non_compliant_privacy_notice_promotes_failures():
+    sections = [
+        SectionData(
+            id="sec-bad-full",
+            section_order=1,
+            section_title="Privacy Notice",
+            content=(
+                "We collect personal data. Consent inferred from continued use. "
+                "Archived datasets may be retained indefinitely for operational needs. "
+                "We transfer data outside the EEA with safeguards where practical. "
+                "We use automated profiling without logic explanation."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    out = _document_wide_duty_validation(sections, "external_privacy_notice")
+    assert out["legal_basis_notice"] == "non_compliant"
+    assert out["retention_notice"] == "non_compliant"
+    assert out["transfers_notice"] == "non_compliant"
+    assert out["profiling_notice"] == "non_compliant"
+
+
+def test_document_wide_duty_validation_cookie_notice_consent_modes():
+    good_sections = [
+        SectionData(
+            id="cookie-good",
+            section_order=1,
+            section_title="Cookie Notice",
+            content=(
+                "We use analytics cookie and advertising cookie technologies. "
+                "Non-essential cookies require opt-in prior consent via consent banner with accept all / reject all controls. "
+                "You can withdraw consent and change cookie settings at any time."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    bad_sections = [
+        SectionData(
+            id="cookie-bad",
+            section_order=1,
+            section_title="Cookie Notice",
+            content="Analytics cookie and advertising cookie are used and continued usage means consent.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    good = _document_wide_duty_validation(good_sections, "consent_text")
+    bad = _document_wide_duty_validation(bad_sections, "consent_text")
+    assert good["cookies_consent_notice"] == "compliant"
+    assert bad["cookies_consent_notice"] == "non_compliant"
+
+
+def test_document_wide_duty_validation_dpa_and_internal_policy_are_document_type_sensitive():
+    dpa_sections = [
+        SectionData(
+            id="dpa-1",
+            section_order=1,
+            section_title="Data Processing Agreement",
+            content=(
+                "For our own purposes we act as controller. For customer instructions we act as processor on behalf of customers. "
+                "Role allocation and responsibilities are defined in this agreement."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    internal_sections = [
+        SectionData(
+            id="int-1",
+            section_order=1,
+            section_title="Internal privacy governance policy",
+            content=(
+                "Roles and responsibilities define controller and processor accountability and incident response. "
+                "Data protection officer is appointed and can be contacted at dpo@example.com."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    dpa_out = _document_wide_duty_validation(dpa_sections, "dpa")
+    internal_out = _document_wide_duty_validation(internal_sections, "internal_policy")
+    assert dpa_out["role_allocation_notice"] == "compliant"
+    assert "rights_notice" not in dpa_out
+    assert internal_out["dpo_contact_notice"] == "compliant"
+    assert "complaint_right_notice" not in internal_out
+
+
 def test_issue_relevance_score_prefers_retention_over_transfer_for_retention_section():
     section = SectionData(
         id="ret-sec",
