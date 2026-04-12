@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
 import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
+import { buildFindingsSnapshot, formatLegalAnchors, mapUserSeverity } from '../../lib/presentation'
 import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 const SYSTEMIC_LABELS: Record<string, string> = {
@@ -137,18 +138,12 @@ export function FindingsPage() {
   const selectedPublished = viewMode === 'published' ? orderedFindings.find((f) => f.id === selectedId) ?? null : null
   const selectedReview = viewMode === 'review' ? orderedReviewItems.find((r) => r.id === selectedId) ?? null : null
   const selectedAnalysis = viewMode === 'analysis' ? orderedAnalysisItems.find((r) => r.id === selectedId) ?? null : null
-  const counts = useMemo(() => {
-    const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    for (const row of activeRows) {
-      const mapped = normalizeStatus(rowStatus(row))
-      if (mapped in base) base[mapped] += 1
-    }
-    return base
-  }, [activeRows])
   const publicationBlocked = !!publishedError?.toLowerCase().includes('blocked')
-  const blockerCount = useMemo(() => {
-    return reviewItems.filter((r) => r.item_kind === 'review_block' && r.final_disposition && !['satisfied'].includes(r.final_disposition)).length
-  }, [reviewItems])
+  const snapshot = useMemo(
+    () => buildFindingsSnapshot({ publishedRows: orderedFindings, reviewRows: orderedReviewItems, publishedBlocked: publicationBlocked }),
+    [orderedFindings, orderedReviewItems, publicationBlocked],
+  )
+  const blockerCount = snapshot.blockers.length
 
   useEffect(() => {
     if (viewMode !== 'published') return
@@ -217,9 +212,9 @@ export function FindingsPage() {
             ))}
           </div>
 
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-            {Object.entries(counts).map(([label, count]) => (
-              <div key={label} className={`metric-card ${countChipClass(label as FindingOut['status'])}`}>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {Object.entries(snapshot.counts).map(([label, count]) => (
+              <div key={label} className={`metric-card ${countChipClass(label)}`}>
                 <div className="text-[11px] uppercase tracking-wide opacity-80">{label}</div>
                 <div className="mt-1 text-xl font-semibold">{count}</div>
               </div>
@@ -235,7 +230,7 @@ export function FindingsPage() {
             </div>
           )}
         </header>
-        {uiNotice && <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700">{uiNotice}</div>}
+        {(uiNotice || snapshot.message) && <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700">{snapshot.message ?? uiNotice}</div>}
         {sectionsError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{sectionsError}</div>}
         {viewMode === 'review' && reviewError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{reviewError}</div>}
         {viewMode === 'analysis' && analysisError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{analysisError}</div>}
@@ -268,7 +263,7 @@ export function FindingsPage() {
                       className={`cursor-pointer border-t border-slate-200/80 transition-colors hover:bg-sky-50/50 ${selectedId === finding.id ? 'bg-sky-50/80' : 'bg-white'}`}
                     >
                       <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
-                      <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
+                      <td className="px-4 py-3"><StatusBadge status={mapDisplayStatus(rowStatus(finding))} /></td>
                       <td className="px-4 py-3 text-slate-600">{rowSeverityOrKind(finding)}</td>
                     </tr>
                   )
@@ -377,20 +372,14 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
     <>
       <h2 className="text-lg font-semibold text-slate-900">Published finding</h2>
       <div className="flex flex-wrap gap-2">
-        <StatusBadge status={finding.status} />
-        {finding.finding_type && <Pill value={finding.finding_type} />}
-        {finding.classification && <Pill value={finding.classification} />}
-        {finding.confidence_level && <Pill value={`confidence ${finding.confidence_level}`} />}
+        <StatusBadge status={mapDisplayStatus(finding.status)} />
+        {mapUserSeverity(finding.severity) && <Pill value={`Severity ${mapUserSeverity(finding.severity)}`} />}
       </div>
-      <Detail label="Gap note" value={sanitizeCitationText(finding.gap_note ?? 'n/a')} />
-      <Detail label="Remediation" value={sanitizeCitationText(finding.remediation_note ?? 'n/a')} />
-      <Detail label="Legal anchors" value={finding.primary_legal_anchor?.join(', ') ?? 'n/a'} />
-      <Detail label="Secondary anchors" value={finding.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
-      <Detail label="Citation summary" value={sanitizeCitationText(finding.citation_summary_text ?? 'n/a')} />
-      <Detail label="Assertion level" value={finding.assertion_level ?? 'n/a'} />
-      <Detail label="Source scope" value={finding.source_scope ?? 'n/a'} />
-      <Detail label="Evidence refs" value={finding.document_evidence_refs?.join(', ') ?? 'n/a'} />
-      <Detail label="Section text" value={sectionText ?? 'Systemic finding (document-level synthesis)'} />
+      {finding.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(finding.gap_note)} />}
+      {finding.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(finding.remediation_note)} />}
+      {formatLegalAnchors(finding.primary_legal_anchor) && <Detail label="Legal anchors" value={formatLegalAnchors(finding.primary_legal_anchor) ?? ''} />}
+      <Detail label="Evidence summary" value={sanitizeCitationText(finding.citation_summary_text ?? 'No supporting excerpt available in the current view.')} />
+      {sectionText && <Detail label="Section text" value={sectionText} />}
       <CitationList title="Citations" items={finding.citations} />
     </>
   )
@@ -402,17 +391,10 @@ function ReviewDetail({ item }: { item: ReviewItemOut }) {
       <h2 className="text-lg font-semibold text-slate-900">Review artifact</h2>
       <div className="flex flex-wrap gap-2">
         <Pill value={`source: ${item.item_kind}`} />
-        {item.status && <StatusBadge status={item.status} />}
-        {item.artifact_role && <Pill value={item.artifact_role} />}
-        {item.publication_state && <Pill value={item.publication_state} />}
+        {item.status && <StatusBadge status={mapDisplayStatus(item.status)} />}
       </div>
-      <Detail label="Classification" value={item.classification ?? 'n/a'} />
-      <Detail label="Issue type" value={item.issue_type ?? 'n/a'} />
-      <Detail label="Finding level" value={item.finding_level ?? 'n/a'} />
-      <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
-      <Detail label="Completeness map" value={item.completeness_map ?? 'n/a'} />
-      <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
-      <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
+      {item.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(item.gap_note)} />}
+      {item.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(item.remediation_note)} />}
     </>
   )
 }
@@ -422,17 +404,10 @@ function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
     <>
       <h2 className="text-lg font-semibold text-slate-900">Analysis artifact</h2>
       <div className="flex flex-wrap gap-2">
-        {item.status_candidate && <StatusBadge status={item.status_candidate} />}
-        {item.analysis_stage && <Pill value={item.analysis_stage} />}
-        <Pill value={item.analysis_type} />
-        {item.artifact_role && <Pill value={item.artifact_role} />}
-        {item.publication_state_candidate && <Pill value={item.publication_state_candidate} />}
+        {item.status_candidate && <StatusBadge status={mapDisplayStatus(item.status_candidate)} />}
       </div>
-      <Detail label="Issue type" value={item.issue_type ?? 'n/a'} />
-      <Detail label="Classification candidate" value={item.classification_candidate ?? 'n/a'} />
-      <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
-      <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
-      <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
+      {item.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(item.gap_note)} />}
+      {item.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(item.remediation_note)} />}
       <CitationList title="Analysis citations" items={item.citations} />
     </>
   )
@@ -444,14 +419,11 @@ function CitationList({ title, items }: { title: string; items: { chunk_id: stri
       <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
       <ul className="mt-2 space-y-2 text-sm">
         {items.length === 0 ? (
-          <li className="detail-block text-slate-500">No citations.</li>
+          <li className="detail-block text-slate-500">No supporting excerpt available in the current view.</li>
         ) : (
           items.map((c, idx) => (
             <li key={`${c.chunk_id}-${idx}`} className="detail-block">
               <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
-              {'evidence_id' in c && (c as { evidence_id?: string | null }).evidence_id && (
-                <div className="mt-1 text-xs text-slate-500">evidence: {(c as { evidence_id?: string | null }).evidence_id}</div>
-              )}
               <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
             </li>
           ))
@@ -471,26 +443,27 @@ function Pill({ value }: { value: string }) {
   return <span className={`rounded-full border px-2.5 py-1 text-xs ${tone}`}>{value}</span>
 }
 
-function countChipClass(status: FindingOut['status']): string {
-  if (status === 'gap') return 'border-rose-200 bg-rose-50 text-rose-700'
-  if (status === 'partial' || status === 'needs review') return 'border-amber-200 bg-amber-50 text-amber-700'
-  if (status === 'compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+function countChipClass(status: string): string {
+  if (status === 'Non-compliant') return 'border-rose-200 bg-rose-50 text-rose-700'
+  if (status === 'Partially compliant') return 'border-amber-200 bg-amber-50 text-amber-700'
+  if (status === 'Compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
   return 'border-slate-200 bg-slate-50 text-slate-700'
 }
 
-function normalizeStatus(status: string): FindingOut['status'] {
+function mapDisplayStatus(status: string): string {
   const s = status.toLowerCase()
-  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked') return 'gap'
-  if (s === 'candidate_partial' || s === 'partial') return 'partial'
-  if (s === 'candidate_compliant' || s === 'compliant') return 'compliant'
-  if (s === 'needs_review' || s === 'needs review') return 'needs review'
+  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked' || s.includes('non')) return 'non-compliant'
+  if (s === 'candidate_partial' || s === 'partial') return 'partially compliant'
+  if (s === 'candidate_compliant' || s === 'compliant' || s === 'satisfied') return 'compliant'
   return 'not applicable'
 }
 
 function sanitizeCitationText(text: string): string {
   return text
     .replace(/section:[a-f0-9-]{12,}:/gi, 'section: ')
-    .replace(/obligation_map:[^,\]]+/gi, 'obligation map signal')
+    .replace(/obligation_map:[^,\]]+/gi, '')
+    .replace(/evi:[a-z]+:[a-z0-9:_-]+/gi, '')
+    .replace(/support_only|internal_only|post_reviewer_snapshot|confirmed_document_gap|probable_document_gap/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
 }

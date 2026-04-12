@@ -1,19 +1,26 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
-import { createReport, getReport, getReview, reportDownloadUrl } from '../../lib/api'
-import type { ReportOut, ReviewItemOut } from '../../lib/types'
+import { createReport, getFindings, getReport, getReview, reportDownloadUrl } from '../../lib/api'
+import { buildFindingsSnapshot } from '../../lib/presentation'
+import type { FindingOut, ReportOut, ReviewItemOut } from '../../lib/types'
 
 export function ReportPage() {
   const { auditId } = useAppState()
   const [reviewRows, setReviewRows] = useState<ReviewItemOut[]>([])
+  const [publishedRows, setPublishedRows] = useState<FindingOut[]>([])
   const [report, setReport] = useState<ReportOut | null>(null)
   const [status, setStatus] = useState<'idle' | 'generating' | 'ready'>('idle')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!auditId) return
-    getReview(auditId).then(setReviewRows).catch((e) => setError(e.message))
+    Promise.allSettled([getReview(auditId), getFindings(auditId)]).then(([reviewResult, publishedResult]) => {
+      if (reviewResult.status === 'fulfilled') setReviewRows(reviewResult.value)
+      else setError(reviewResult.reason?.message ?? 'Unable to load review findings')
+      if (publishedResult.status === 'fulfilled') setPublishedRows(publishedResult.value)
+      else setPublishedRows([])
+    })
   }, [auditId])
 
   useEffect(() => {
@@ -30,17 +37,14 @@ export function ReportPage() {
     return () => clearInterval(timer)
   }, [auditId, status])
 
-  const counts = useMemo(() => {
-    const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    const visibleRows = reviewRows
-      .filter((row) => !row.section_id.startsWith('ledger:'))
-      .filter((row) => !row.section_id.startsWith('review:'))
-    for (const row of visibleRows) {
-      const mapped = normalizeStatus(row.status)
-      base[mapped] += 1
-    }
-    return base
-  }, [reviewRows])
+  const publishedBlocked = useMemo(
+    () => reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
+    [reviewRows],
+  )
+  const snapshot = useMemo(
+    () => buildFindingsSnapshot({ publishedRows, reviewRows, publishedBlocked }),
+    [publishedRows, reviewRows, publishedBlocked],
+  )
 
   async function generate() {
     if (!auditId) return
@@ -63,18 +67,19 @@ export function ReportPage() {
         <p className="section-subtitle">Generate an executive-ready PDF with current audit outcomes and evidence references.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          {Object.entries(counts).map(([label, count]) => (
+          {Object.entries(snapshot.counts).map(([label, count]) => (
             <article key={label} className={`metric-card ${metricTone(label)}`}>
               <div className="text-xs uppercase tracking-wide opacity-75">{label}</div>
               <div className="mt-2 text-2xl font-semibold">{count}</div>
             </article>
           ))}
         </div>
+        {snapshot.message && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{snapshot.message}</div>}
       </header>
 
       <article className="surface-card p-6">
         <h2 className="text-lg font-semibold text-slate-900">PDF generation</h2>
-        <p className="mt-1 text-sm text-slate-500">Use the latest review data to create a shareable compliance report.</p>
+        <p className="mt-1 text-sm text-slate-500">Use the latest visible findings dataset to create a shareable compliance report.</p>
 
         {error && <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
 
@@ -95,18 +100,8 @@ export function ReportPage() {
 }
 
 function metricTone(label: string): string {
-  if (label === 'compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
-  if (label === 'partial') return 'border-amber-200 bg-amber-50 text-amber-800'
-  if (label === 'gap') return 'border-rose-200 bg-rose-50 text-rose-800'
-  if (label === 'needs review') return 'border-violet-200 bg-violet-50 text-violet-800'
+  if (label === 'Compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (label === 'Partially compliant') return 'border-amber-200 bg-amber-50 text-amber-800'
+  if (label === 'Non-compliant') return 'border-rose-200 bg-rose-50 text-rose-800'
   return 'border-slate-200 bg-slate-50 text-slate-700'
-}
-
-function normalizeStatus(status?: string | null): 'compliant' | 'partial' | 'gap' | 'needs review' | 'not applicable' {
-  const s = (status ?? '').toLowerCase()
-  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked') return 'gap'
-  if (s === 'candidate_partial' || s === 'partial') return 'partial'
-  if (s === 'candidate_compliant' || s === 'compliant') return 'compliant'
-  if (s === 'needs_review' || s === 'needs review') return 'needs review'
-  return 'not applicable'
 }
