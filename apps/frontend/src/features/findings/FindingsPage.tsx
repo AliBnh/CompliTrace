@@ -2,33 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
-import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
-import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
-
-const SYSTEMIC_LABELS: Record<string, string> = {
-  missing_controller_identity: 'Missing controller identity disclosure',
-  missing_legal_basis: 'Missing legal basis disclosure',
-  missing_retention_period: 'Missing retention period disclosure',
-  missing_rights_notice: 'Missing rights notice disclosure',
-  missing_complaint_right: 'Missing complaint-right disclosure',
-}
+import { getAudit, getFindings, getReview, getSections } from '../../lib/api'
+import { buildFindingsSnapshot, formatLegalAnchors, mapUserSeverity } from '../../lib/presentation'
+import type { FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function FindingsPage() {
   const { auditId, documentId } = useAppState()
   const [findings, setFindings] = useState<FindingOut[]>([])
-  const [analysisItems, setAnalysisItems] = useState<AnalysisItemOut[]>([])
   const [reviewItems, setReviewItems] = useState<ReviewItemOut[]>([])
   const [sectionsById, setSectionsById] = useState<Record<string, SectionOut>>({})
-  const [selectedByView, setSelectedByView] = useState<Record<'published' | 'review' | 'analysis', string | null>>({
+  const [selectedByView, setSelectedByView] = useState<Record<'published' | 'review', string | null>>({
     published: null,
     review: null,
-    analysis: null,
   })
-  const [viewMode, setViewMode] = useState<'published' | 'review' | 'analysis'>('published')
+  const [viewMode, setViewMode] = useState<'published' | 'review'>('published')
   const [status, setStatus] = useState<string>('pending')
   const [publishedError, setPublishedError] = useState<string | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
-  const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [sectionsError, setSectionsError] = useState<string | null>(null)
   const [uiNotice, setUiNotice] = useState<string | null>(null)
   const [progress, setProgress] = useState<number>(12)
@@ -58,10 +48,9 @@ export function FindingsPage() {
         } else if (audit.status === 'running' || audit.status === 'pending') {
           setProgress((previous) => Math.min(previous + Math.random() * 6 + 2, 92))
         }
-        const [publishedResult, reviewResult, analysisResult] = await Promise.allSettled([
+        const [publishedResult, reviewResult] = await Promise.allSettled([
           getFindings(currentAuditId),
           getReview(currentAuditId),
-          getAnalysis(currentAuditId),
         ])
         if (cancelled) return
         if (publishedResult.status === 'fulfilled') {
@@ -78,13 +67,6 @@ export function FindingsPage() {
         } else {
           setReviewItems([])
           setReviewError(normalizeUiError(reviewResult.reason, 'Unable to load Review findings.'))
-        }
-        if (analysisResult.status === 'fulfilled') {
-          setAnalysisItems(analysisResult.value)
-          setAnalysisError(null)
-        } else {
-          setAnalysisItems([])
-          setAnalysisError(normalizeUiError(analysisResult.reason, 'Unable to load Analysis findings.'))
         }
       } catch (e) {
         if (!cancelled) setPublishedError(e instanceof Error ? e.message : 'Failed to load findings')
@@ -112,45 +94,32 @@ export function FindingsPage() {
   }, [findings, sectionsById])
 
   const orderedReviewItems = useMemo(() => {
-    return [...reviewItems]
+    const visibleRows = [...reviewItems]
       .filter((item) => !item.section_id.startsWith('ledger:'))
+      .filter((item) => !item.section_id.startsWith('review:'))
+      .filter((item) => Boolean(sectionsById[item.section_id]))
       .filter((item) => {
         if (item.item_kind !== 'review_block') return true
         return (item.final_disposition ?? '').toLowerCase() !== 'satisfied'
       })
-      .sort((a, b) => {
-        const rank = (row: ReviewItemOut) => {
-          if (row.item_kind === 'review_block' && row.review_group === 'core_duties') return 0
-          if (row.item_kind === 'review_block' && row.review_group === 'specialist_families') return 1
-          if (row.item_kind === 'finding') return 2
-          return 3
-        }
-        const r = rank(a) - rank(b)
-        return r !== 0 ? r : a.id.localeCompare(b.id)
-      })
-  }, [reviewItems])
+    return dedupeReviewRows(visibleRows).sort((a, b) => {
+      const aOrder = sectionsById[a.section_id]?.section_order ?? Number.MAX_SAFE_INTEGER
+      const bOrder = sectionsById[b.section_id]?.section_order ?? Number.MAX_SAFE_INTEGER
+      if (aOrder !== bOrder) return aOrder - bOrder
+      return a.id.localeCompare(b.id)
+    })
+  }, [reviewItems, sectionsById])
 
-  const orderedAnalysisItems = useMemo(() => {
-    return [...analysisItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
-  }, [analysisItems])
-
-  const activeRows = viewMode === 'published' ? orderedFindings : viewMode === 'review' ? orderedReviewItems : orderedAnalysisItems
+  const publicationBlocked = !!publishedError?.toLowerCase().includes('blocked')
+  const snapshot = useMemo(
+    () => buildFindingsSnapshot({ publishedRows: orderedFindings, reviewRows: orderedReviewItems, publishedBlocked: publicationBlocked }),
+    [orderedFindings, orderedReviewItems, publicationBlocked],
+  )
+  const activeRows = snapshot.rows
   const selectedId = selectedByView[viewMode]
   const selectedPublished = viewMode === 'published' ? orderedFindings.find((f) => f.id === selectedId) ?? null : null
   const selectedReview = viewMode === 'review' ? orderedReviewItems.find((r) => r.id === selectedId) ?? null : null
-  const selectedAnalysis = viewMode === 'analysis' ? orderedAnalysisItems.find((r) => r.id === selectedId) ?? null : null
-  const counts = useMemo(() => {
-    const base = { compliant: 0, partial: 0, gap: 0, 'needs review': 0, 'not applicable': 0 }
-    for (const row of activeRows) {
-      const mapped = normalizeStatus(rowStatus(row))
-      if (mapped in base) base[mapped] += 1
-    }
-    return base
-  }, [activeRows])
-  const publicationBlocked = !!publishedError?.toLowerCase().includes('blocked')
-  const blockerCount = useMemo(() => {
-    return reviewItems.filter((r) => r.item_kind === 'review_block' && r.final_disposition && !['satisfied'].includes(r.final_disposition)).length
-  }, [reviewItems])
+  const blockerCount = snapshot.blockers.length
 
   useEffect(() => {
     if (viewMode !== 'published') return
@@ -208,7 +177,7 @@ export function FindingsPage() {
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
-            {(['published', 'review', 'analysis'] as const).map((mode) => (
+            {(['published', 'review'] as const).map((mode) => (
               <button
                 key={mode}
                 className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${viewMode === mode ? 'bg-slate-900 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
@@ -219,9 +188,9 @@ export function FindingsPage() {
             ))}
           </div>
 
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-            {Object.entries(counts).map(([label, count]) => (
-              <div key={label} className={`metric-card ${countChipClass(label as FindingOut['status'])}`}>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {Object.entries(snapshot.counts).map(([label, count]) => (
+              <div key={label} className={`metric-card ${countChipClass(label)}`}>
                 <div className="text-[11px] uppercase tracking-wide opacity-80">{label}</div>
                 <div className="mt-1 text-xl font-semibold">{count}</div>
               </div>
@@ -237,10 +206,9 @@ export function FindingsPage() {
             </div>
           )}
         </header>
-        {uiNotice && <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700">{uiNotice}</div>}
+        {(uiNotice || snapshot.message) && <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700">{snapshot.message ?? uiNotice}</div>}
         {sectionsError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{sectionsError}</div>}
         {viewMode === 'review' && reviewError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{reviewError}</div>}
-        {viewMode === 'analysis' && analysisError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{analysisError}</div>}
 
         <div className="surface-card overflow-hidden">
           <table className="w-full text-sm">
@@ -248,7 +216,8 @@ export function FindingsPage() {
               <tr>
                 <th className="px-4 py-3">Section</th>
                 <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Severity / type</th>
+                <th className="px-4 py-3">Scope</th>
+                <th className="px-4 py-3">Severity</th>
               </tr>
             </thead>
             <tbody>
@@ -257,12 +226,12 @@ export function FindingsPage() {
                   <td className="px-4 py-6 text-sm text-slate-500" colSpan={3}>
                     {viewMode === 'review'
                       ? 'No unresolved review artifacts. Switch to Published or Analysis for detailed records.'
-                      : 'No records available for this view yet.'}
+                      : 'No published findings are currently available for this audit.'}
                   </td>
                 </tr>
               ) : (
                 activeRows.map((finding) => {
-                  const sectionLabel = displaySectionTitle(finding, sectionsById)
+                  const sectionLabel = finding.title
                   return (
                     <tr
                       key={finding.id}
@@ -270,8 +239,9 @@ export function FindingsPage() {
                       className={`cursor-pointer border-t border-slate-200/80 transition-colors hover:bg-sky-50/50 ${selectedId === finding.id ? 'bg-sky-50/80' : 'bg-white'}`}
                     >
                       <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
-                      <td className="px-4 py-3"><StatusBadge status={rowStatus(finding)} /></td>
-                      <td className="px-4 py-3 text-slate-600">{rowSeverityOrKind(finding)}</td>
+                      <td className="px-4 py-3"><StatusBadge status={finding.status.toLowerCase()} /></td>
+                      <td className="px-4 py-3 text-slate-600">{finding.scope}</td>
+                      <td className="px-4 py-3 text-slate-600">{finding.severity ?? '-'}</td>
                     </tr>
                   )
                 })
@@ -282,13 +252,12 @@ export function FindingsPage() {
       </div>
 
       <aside className="surface-card sticky top-24 h-fit p-5">
-        {!selectedPublished && !selectedReview && !selectedAnalysis ? (
+        {!selectedPublished && !selectedReview ? (
           <p className="text-sm text-slate-600">Select a finding on the left to inspect legal context and remediation details.</p>
         ) : (
           <div className="space-y-4">
             {selectedPublished && <PublishedDetail finding={selectedPublished} sectionText={sectionsById[selectedPublished.section_id]?.content ?? null} />}
             {selectedReview && <ReviewDetail item={selectedReview} />}
-            {selectedAnalysis && <AnalysisDetail item={selectedAnalysis} />}
           </div>
         )}
       </aside>
@@ -296,33 +265,9 @@ export function FindingsPage() {
   )
 }
 
-function displaySectionTitle(finding: { section_id: string }, sectionsById: Record<string, SectionOut>): string {
-  const section = sectionsById[finding.section_id]
-  if (section) return section.section_title
-  if (finding.section_id === 'review:core_duties') return 'Review block: Core duties'
-  if (finding.section_id === 'review:specialist_families') return 'Review block: Specialist families'
-  if (finding.section_id.startsWith('review:')) return `Review block: ${humanize(finding.section_id.replace('review:', ''))}`
-  if (finding.section_id.startsWith('systemic:')) {
-    const issueId = finding.section_id.split('systemic:')[1]
-    return `Systemic: ${SYSTEMIC_LABELS[issueId] ?? humanize(issueId)}`
-  }
-  return finding.section_id
-}
-
-function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
+function rowStatus(row: FindingOut | ReviewItemOut): string {
   if ('status' in row && row.status) return row.status
-  if ('status_candidate' in row && row.status_candidate) return row.status_candidate
   return 'not applicable'
-}
-
-function rowSeverityOrKind(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
-  if ('severity' in row) return row.severity ?? 'n/a'
-  if ('item_kind' in row) {
-    const reviewLabel = row.issue_type ?? row.family ?? row.review_group ?? row.item_kind
-    return humanize(reviewLabel)
-  }
-  if ('analysis_type' in row) return row.analysis_type
-  return 'n/a'
 }
 
 function normalizeUiError(reason: unknown, fallback: string): string {
@@ -331,6 +276,33 @@ function normalizeUiError(reason: unknown, fallback: string): string {
     return 'Published findings are blocked until review issues are resolved.'
   }
   return fallback
+}
+
+function dedupeReviewRows(rows: ReviewItemOut[]): ReviewItemOut[] {
+  const deduped = new Map<string, ReviewItemOut>()
+  for (const row of rows) {
+    const key = [
+      row.section_id,
+      (row.issue_type ?? '').toLowerCase(),
+      (row.gap_note ?? '').toLowerCase(),
+      (row.remediation_note ?? '').toLowerCase(),
+    ].join('|')
+    const existing = deduped.get(key)
+    if (!existing || reviewRowPriority(row) > reviewRowPriority(existing)) {
+      deduped.set(key, row)
+    }
+  }
+  return [...deduped.values()]
+}
+
+function reviewRowPriority(row: ReviewItemOut): number {
+  const status = (row.status ?? '').toLowerCase()
+  const isCandidate = status.startsWith('candidate')
+  if (row.item_kind === 'finding' && !isCandidate) return 5
+  if (!isCandidate) return 4
+  if (row.item_kind === 'finding') return 3
+  if (row.item_kind === 'analysis') return 2
+  return 1
 }
 
 function humanize(value: string): string {
@@ -355,20 +327,14 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
     <>
       <h2 className="text-lg font-semibold text-slate-900">Published finding</h2>
       <div className="flex flex-wrap gap-2">
-        <StatusBadge status={finding.status} />
-        {finding.finding_type && <Pill value={finding.finding_type} />}
-        {finding.classification && <Pill value={finding.classification} />}
-        {finding.confidence_level && <Pill value={`confidence ${finding.confidence_level}`} />}
+        <StatusBadge status={mapDisplayStatus(finding.status)} />
+        {mapUserSeverity(finding.severity) && <Pill value={`Severity ${mapUserSeverity(finding.severity)}`} />}
       </div>
-      <Detail label="Gap note" value={finding.gap_note ?? 'n/a'} />
-      <Detail label="Remediation" value={finding.remediation_note ?? 'n/a'} />
-      <Detail label="Legal anchors" value={finding.primary_legal_anchor?.join(', ') ?? 'n/a'} />
-      <Detail label="Secondary anchors" value={finding.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
-      <Detail label="Citation summary" value={finding.citation_summary_text ?? 'n/a'} />
-      <Detail label="Assertion level" value={finding.assertion_level ?? 'n/a'} />
-      <Detail label="Source scope" value={finding.source_scope ?? 'n/a'} />
-      <Detail label="Evidence refs" value={finding.document_evidence_refs?.join(', ') ?? 'n/a'} />
-      <Detail label="Section text" value={sectionText ?? 'Systemic finding (document-level synthesis)'} />
+      {finding.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(finding.gap_note)} />}
+      {finding.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(finding.remediation_note)} />}
+      {formatLegalAnchors(finding.primary_legal_anchor) && <Detail label="Legal anchors" value={formatLegalAnchors(finding.primary_legal_anchor) ?? ''} />}
+      <Detail label="Evidence summary" value={sanitizeCitationText(finding.citation_summary_text ?? 'No supporting excerpt available in the current view.')} />
+      {sectionText && <Detail label="Section text" value={sectionText} />}
       <CitationList title="Citations" items={finding.citations} />
     </>
   )
@@ -380,38 +346,10 @@ function ReviewDetail({ item }: { item: ReviewItemOut }) {
       <h2 className="text-lg font-semibold text-slate-900">Review artifact</h2>
       <div className="flex flex-wrap gap-2">
         <Pill value={`source: ${item.item_kind}`} />
-        {item.status && <StatusBadge status={item.status} />}
-        {item.artifact_role && <Pill value={item.artifact_role} />}
-        {item.publication_state && <Pill value={item.publication_state} />}
+        {item.status && <StatusBadge status={mapDisplayStatus(item.status)} />}
       </div>
-      <Detail label="Classification" value={item.classification ?? 'n/a'} />
-      <Detail label="Issue type" value={item.issue_type ?? 'n/a'} />
-      <Detail label="Finding level" value={item.finding_level ?? 'n/a'} />
-      <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
-      <Detail label="Completeness map" value={item.completeness_map ?? 'n/a'} />
-      <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
-      <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
-    </>
-  )
-}
-
-function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
-  return (
-    <>
-      <h2 className="text-lg font-semibold text-slate-900">Analysis artifact</h2>
-      <div className="flex flex-wrap gap-2">
-        {item.status_candidate && <StatusBadge status={item.status_candidate} />}
-        {item.analysis_stage && <Pill value={item.analysis_stage} />}
-        <Pill value={item.analysis_type} />
-        {item.artifact_role && <Pill value={item.artifact_role} />}
-        {item.publication_state_candidate && <Pill value={item.publication_state_candidate} />}
-      </div>
-      <Detail label="Issue type" value={item.issue_type ?? 'n/a'} />
-      <Detail label="Classification candidate" value={item.classification_candidate ?? 'n/a'} />
-      <Detail label="Suppression reason" value={item.suppression_reason ?? 'n/a'} />
-      <Detail label="Gap note" value={item.gap_note ?? 'n/a'} />
-      <Detail label="Remediation" value={item.remediation_note ?? 'n/a'} />
-      <CitationList title="Analysis citations" items={item.citations} />
+      {item.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(item.gap_note)} />}
+      {item.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(item.remediation_note)} />}
     </>
   )
 }
@@ -422,14 +360,11 @@ function CitationList({ title, items }: { title: string; items: { chunk_id: stri
       <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
       <ul className="mt-2 space-y-2 text-sm">
         {items.length === 0 ? (
-          <li className="detail-block text-slate-500">No citations.</li>
+          <li className="detail-block text-slate-500">No supporting excerpt available in the current view.</li>
         ) : (
           items.map((c, idx) => (
             <li key={`${c.chunk_id}-${idx}`} className="detail-block">
               <div className="font-medium text-slate-800">{c.article_number} — {c.article_title}</div>
-              {'evidence_id' in c && (c as { evidence_id?: string | null }).evidence_id && (
-                <div className="mt-1 text-xs text-slate-500">evidence: {(c as { evidence_id?: string | null }).evidence_id}</div>
-              )}
               <p className="mt-1 text-slate-600">{sanitizeCitationText(c.excerpt)}</p>
             </li>
           ))
@@ -449,26 +384,27 @@ function Pill({ value }: { value: string }) {
   return <span className={`rounded-full border px-2.5 py-1 text-xs ${tone}`}>{value}</span>
 }
 
-function countChipClass(status: FindingOut['status']): string {
-  if (status === 'gap') return 'border-rose-200 bg-rose-50 text-rose-700'
-  if (status === 'partial' || status === 'needs review') return 'border-amber-200 bg-amber-50 text-amber-700'
-  if (status === 'compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+function countChipClass(status: string): string {
+  if (status === 'Non-compliant') return 'border-rose-200 bg-rose-50 text-rose-700'
+  if (status === 'Partially compliant') return 'border-amber-200 bg-amber-50 text-amber-700'
+  if (status === 'Compliant') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
   return 'border-slate-200 bg-slate-50 text-slate-700'
 }
 
-function normalizeStatus(status: string): FindingOut['status'] {
+function mapDisplayStatus(status: string): string {
   const s = status.toLowerCase()
-  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked') return 'gap'
-  if (s === 'candidate_partial' || s === 'partial') return 'partial'
-  if (s === 'candidate_compliant' || s === 'compliant') return 'compliant'
-  if (s === 'needs_review' || s === 'needs review') return 'needs review'
+  if (s === 'candidate_gap' || s === 'gap' || s === 'blocked' || s.includes('non')) return 'non-compliant'
+  if (s === 'candidate_partial' || s === 'partial') return 'partially compliant'
+  if (s === 'candidate_compliant' || s === 'compliant' || s === 'satisfied') return 'compliant'
   return 'not applicable'
 }
 
 function sanitizeCitationText(text: string): string {
   return text
     .replace(/section:[a-f0-9-]{12,}:/gi, 'section: ')
-    .replace(/obligation_map:[^,\]]+/gi, 'obligation map signal')
+    .replace(/obligation_map:[^,\]]+/gi, '')
+    .replace(/evi:[a-z]+:[a-z0-9:_-]+/gi, '')
+    .replace(/support_only|internal_only|post_reviewer_snapshot|confirmed_document_gap|probable_document_gap/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
 }
