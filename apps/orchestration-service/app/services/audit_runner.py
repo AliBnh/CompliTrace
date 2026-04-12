@@ -3387,6 +3387,13 @@ def _build_final_disposition_map(
                     {
                         "when we act as controller",
                         "when we act as processor",
+                        "where we act as controller",
+                        "where we act as processor",
+                        "for our own purposes we act as controller",
+                        "for customer instructions we act as processor",
+                        "for customer data we act as processor",
+                        "for this processing we act as controller",
+                        "for this processing we act as processor",
                         "role allocation",
                         "in these contexts we are controller",
                         "in these contexts we are processor",
@@ -3570,7 +3577,7 @@ def _build_final_disposition_map(
                 elif has_ambiguous_sensitive and not has_true_art9:
                     status, reason = "referenced_but_unseen", "ambiguous sensitive-language suggests possible special-category context, but reviewed excerpts do not confirm Article 9 processing"
                     specialist_severity = "medium"
-        if triggered and status == "satisfied" and family != "special_category":
+        if triggered and status == "satisfied" and family not in {"special_category", "role_ambiguity"}:
             status, reason = "referenced_but_unseen", "specialist trigger is visible, but reviewed excerpts do not include enough text to confirm full disclosure outcome"
         families[family] = {
             "status": status,

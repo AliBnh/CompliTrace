@@ -49,6 +49,7 @@ from app.services.audit_runner import (
     _coverage_to_support_valid,
     _enforce_core_and_specialist_completeness,
     _build_final_disposition_map,
+    _document_wide_duty_validation,
     _final_publication_validator,
     _upsert_evidence_records,
     _extract_notice_cross_references,
@@ -522,6 +523,28 @@ def test_final_disposition_promotes_role_ambiguity_to_gap_when_mixed_roles_witho
     assert role["triggered"] is True
     assert role["status"] == "gap"
     assert role["publication_recommendation"] == "publish"
+
+
+def test_final_disposition_role_ambiguity_explicit_split_is_satisfied_not_gap():
+    sections = [
+        SectionData(
+            id="sec-role-clear",
+            section_order=1,
+            section_title="Controller and processor roles",
+            content=(
+                "For our own purposes we act as controller for account administration and fraud prevention. "
+                "For customer instructions we act as processor and process customer data only on behalf of customers."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    obligation_map = {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}
+    disposition = _build_final_disposition_map([], sections, obligation_map)
+    role = disposition["role_ambiguity"]
+    assert role["triggered"] is True
+    assert role["status"] == "satisfied"
+    assert role["publication_recommendation"] == "internal_only"
 
 
 def test_final_disposition_profiling_tier_automated_decisioning_sets_high_severity_gap():
@@ -1662,6 +1685,51 @@ def test_applicability_memo_keeps_explicit_consent_excerpt_assessable_even_if_sh
 def test_not_assessable_gate_forbids_explicit_unlawful_patterns():
     text = "Consent inferred from continued use and retained indefinitely."
     assert _not_assessable_allowed(text, "needs review", "not_assessable") is False
+
+
+def test_document_wide_duty_validation_marks_compliant_notice_as_compliant():
+    sections = [
+        SectionData(
+            id="sec-duty-ok",
+            section_order=1,
+            section_title="Privacy notice",
+            content=(
+                "Controller identity and contact route are provided. Specific purpose statements are listed. "
+                "Lawful basis disclosed and mapped to purpose where needed. Recipient categories are disclosed. "
+                "Transfer disclosed with safeguard mechanism. Specific retention period and objective criteria are stated. "
+                "Rights listed and actionable. Supervisory authority complaint right disclosed. "
+                "Profiling logic involved significance and effects safeguards where relevant."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    out = _document_wide_duty_validation(sections, "external_privacy_notice")
+    assert out["controller_identity_contact"] == "compliant"
+    assert out["legal_basis_notice"] == "compliant"
+    assert out["retention_notice"] == "compliant"
+    assert out["rights_notice"] == "compliant"
+    assert out["complaint_right_notice"] == "compliant"
+
+
+def test_document_wide_duty_validation_marks_non_compliant_notice_as_non_compliant():
+    sections = [
+        SectionData(
+            id="sec-duty-bad",
+            section_order=1,
+            section_title="Privacy notice",
+            content=(
+                "Consent inferred from use of the service. Archived datasets may be retained indefinitely "
+                "and safeguards where practical may be used for transfers."
+            ),
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    out = _document_wide_duty_validation(sections, "external_privacy_notice")
+    assert out["legal_basis_notice"] == "non_compliant"
+    assert out["retention_notice"] == "non_compliant"
+    assert out["transfers_notice"] == "non_compliant"
 
 
 def test_issue_relevance_score_prefers_retention_over_transfer_for_retention_section():
