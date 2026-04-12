@@ -52,7 +52,7 @@ export function ReportPage() {
     if (!auditId) return
     setError(null)
     setStatus('generating')
-    const readiness = validateReportExportReadiness(presentation)
+    const readiness = validateReportExportReadiness(presentation, { pdfRenderedFindingsCount: presentation.reportExportFindings.length, pdfDatasetLabel: presentation.reportDatasetLabel })
     if (!readiness.ok) {
       setStatus('idle')
       setError(`PDF export blocked until presentation integrity checks pass: ${readiness.errors[0]}`)
@@ -73,7 +73,7 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{presentation.reportDatasetLabel}</span>.</p>
+        <p className="section-subtitle">PDF source dataset (`reportExportFindings`): <span className="font-medium">{presentation.reportDatasetLabel}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
