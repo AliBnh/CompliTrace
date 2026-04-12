@@ -2,34 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
-import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
+import { getAudit, getFindings, getReview, getSections } from '../../lib/api'
 import { buildFindingsSnapshot, formatLegalAnchors, mapUserSeverity } from '../../lib/presentation'
-import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
-
-const SYSTEMIC_LABELS: Record<string, string> = {
-  missing_controller_identity: 'Missing controller identity disclosure',
-  missing_legal_basis: 'Missing legal basis disclosure',
-  missing_retention_period: 'Missing retention period disclosure',
-  missing_rights_notice: 'Missing rights notice disclosure',
-  missing_complaint_right: 'Missing complaint-right disclosure',
-}
+import type { FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function FindingsPage() {
   const { auditId, documentId } = useAppState()
   const [findings, setFindings] = useState<FindingOut[]>([])
-  const [analysisItems, setAnalysisItems] = useState<AnalysisItemOut[]>([])
   const [reviewItems, setReviewItems] = useState<ReviewItemOut[]>([])
   const [sectionsById, setSectionsById] = useState<Record<string, SectionOut>>({})
-  const [selectedByView, setSelectedByView] = useState<Record<'published' | 'review' | 'analysis', string | null>>({
+  const [selectedByView, setSelectedByView] = useState<Record<'published' | 'review', string | null>>({
     published: null,
     review: null,
-    analysis: null,
   })
-  const [viewMode, setViewMode] = useState<'published' | 'review' | 'analysis'>('published')
+  const [viewMode, setViewMode] = useState<'published' | 'review'>('published')
   const [status, setStatus] = useState<string>('pending')
   const [publishedError, setPublishedError] = useState<string | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
-  const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [sectionsError, setSectionsError] = useState<string | null>(null)
   const [uiNotice, setUiNotice] = useState<string | null>(null)
   const [progress, setProgress] = useState<number>(12)
@@ -59,10 +48,9 @@ export function FindingsPage() {
         } else if (audit.status === 'running' || audit.status === 'pending') {
           setProgress((previous) => Math.min(previous + Math.random() * 6 + 2, 92))
         }
-        const [publishedResult, reviewResult, analysisResult] = await Promise.allSettled([
+        const [publishedResult, reviewResult] = await Promise.allSettled([
           getFindings(currentAuditId),
           getReview(currentAuditId),
-          getAnalysis(currentAuditId),
         ])
         if (cancelled) return
         if (publishedResult.status === 'fulfilled') {
@@ -79,13 +67,6 @@ export function FindingsPage() {
         } else {
           setReviewItems([])
           setReviewError(normalizeUiError(reviewResult.reason, 'Unable to load Review findings.'))
-        }
-        if (analysisResult.status === 'fulfilled') {
-          setAnalysisItems(analysisResult.value)
-          setAnalysisError(null)
-        } else {
-          setAnalysisItems([])
-          setAnalysisError(normalizeUiError(analysisResult.reason, 'Unable to load Analysis findings.'))
         }
       } catch (e) {
         if (!cancelled) setPublishedError(e instanceof Error ? e.message : 'Failed to load findings')
@@ -129,20 +110,15 @@ export function FindingsPage() {
     })
   }, [reviewItems, sectionsById])
 
-  const orderedAnalysisItems = useMemo(() => {
-    return [...analysisItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
-  }, [analysisItems])
-
-  const activeRows = viewMode === 'published' ? orderedFindings : viewMode === 'review' ? orderedReviewItems : orderedAnalysisItems
-  const selectedId = selectedByView[viewMode]
-  const selectedPublished = viewMode === 'published' ? orderedFindings.find((f) => f.id === selectedId) ?? null : null
-  const selectedReview = viewMode === 'review' ? orderedReviewItems.find((r) => r.id === selectedId) ?? null : null
-  const selectedAnalysis = viewMode === 'analysis' ? orderedAnalysisItems.find((r) => r.id === selectedId) ?? null : null
   const publicationBlocked = !!publishedError?.toLowerCase().includes('blocked')
   const snapshot = useMemo(
     () => buildFindingsSnapshot({ publishedRows: orderedFindings, reviewRows: orderedReviewItems, publishedBlocked: publicationBlocked }),
     [orderedFindings, orderedReviewItems, publicationBlocked],
   )
+  const activeRows = snapshot.rows
+  const selectedId = selectedByView[viewMode]
+  const selectedPublished = viewMode === 'published' ? orderedFindings.find((f) => f.id === selectedId) ?? null : null
+  const selectedReview = viewMode === 'review' ? orderedReviewItems.find((r) => r.id === selectedId) ?? null : null
   const blockerCount = snapshot.blockers.length
 
   useEffect(() => {
@@ -201,7 +177,7 @@ export function FindingsPage() {
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
-            {(['published', 'review', 'analysis'] as const).map((mode) => (
+            {(['published', 'review'] as const).map((mode) => (
               <button
                 key={mode}
                 className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${viewMode === mode ? 'bg-slate-900 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
@@ -233,7 +209,6 @@ export function FindingsPage() {
         {(uiNotice || snapshot.message) && <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700">{snapshot.message ?? uiNotice}</div>}
         {sectionsError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{sectionsError}</div>}
         {viewMode === 'review' && reviewError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{reviewError}</div>}
-        {viewMode === 'analysis' && analysisError && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{analysisError}</div>}
 
         <div className="surface-card overflow-hidden">
           <table className="w-full text-sm">
@@ -241,7 +216,8 @@ export function FindingsPage() {
               <tr>
                 <th className="px-4 py-3">Section</th>
                 <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Severity / type</th>
+                <th className="px-4 py-3">Scope</th>
+                <th className="px-4 py-3">Severity</th>
               </tr>
             </thead>
             <tbody>
@@ -250,12 +226,12 @@ export function FindingsPage() {
                   <td className="px-4 py-6 text-sm text-slate-500" colSpan={3}>
                     {viewMode === 'review'
                       ? 'No unresolved review artifacts. Switch to Published or Analysis for detailed records.'
-                      : 'No records available for this view yet.'}
+                      : 'No published findings are currently available for this audit.'}
                   </td>
                 </tr>
               ) : (
                 activeRows.map((finding) => {
-                  const sectionLabel = displaySectionTitle(finding, sectionsById)
+                  const sectionLabel = finding.title
                   return (
                     <tr
                       key={finding.id}
@@ -263,8 +239,9 @@ export function FindingsPage() {
                       className={`cursor-pointer border-t border-slate-200/80 transition-colors hover:bg-sky-50/50 ${selectedId === finding.id ? 'bg-sky-50/80' : 'bg-white'}`}
                     >
                       <td className="px-4 py-3 text-slate-800">{sectionLabel}</td>
-                      <td className="px-4 py-3"><StatusBadge status={mapDisplayStatus(rowStatus(finding))} /></td>
-                      <td className="px-4 py-3 text-slate-600">{rowSeverityOrKind(finding)}</td>
+                      <td className="px-4 py-3"><StatusBadge status={finding.status.toLowerCase()} /></td>
+                      <td className="px-4 py-3 text-slate-600">{finding.scope}</td>
+                      <td className="px-4 py-3 text-slate-600">{finding.severity ?? '-'}</td>
                     </tr>
                   )
                 })
@@ -275,13 +252,12 @@ export function FindingsPage() {
       </div>
 
       <aside className="surface-card sticky top-24 h-fit p-5">
-        {!selectedPublished && !selectedReview && !selectedAnalysis ? (
+        {!selectedPublished && !selectedReview ? (
           <p className="text-sm text-slate-600">Select a finding on the left to inspect legal context and remediation details.</p>
         ) : (
           <div className="space-y-4">
             {selectedPublished && <PublishedDetail finding={selectedPublished} sectionText={sectionsById[selectedPublished.section_id]?.content ?? null} />}
             {selectedReview && <ReviewDetail item={selectedReview} />}
-            {selectedAnalysis && <AnalysisDetail item={selectedAnalysis} />}
           </div>
         )}
       </aside>
@@ -289,30 +265,9 @@ export function FindingsPage() {
   )
 }
 
-function displaySectionTitle(finding: { section_id: string }, sectionsById: Record<string, SectionOut>): string {
-  const section = sectionsById[finding.section_id]
-  if (section) return section.section_title || `Section ${section.section_order}`
-  if (finding.section_id.startsWith('systemic:')) {
-    const issueId = finding.section_id.split('systemic:')[1]
-    return `Systemic: ${SYSTEMIC_LABELS[issueId] ?? humanize(issueId)}`
-  }
-  return finding.section_id
-}
-
-function rowStatus(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
+function rowStatus(row: FindingOut | ReviewItemOut): string {
   if ('status' in row && row.status) return row.status
-  if ('status_candidate' in row && row.status_candidate) return row.status_candidate
   return 'not applicable'
-}
-
-function rowSeverityOrKind(row: FindingOut | ReviewItemOut | AnalysisItemOut): string {
-  if ('severity' in row) return row.severity ?? 'n/a'
-  if ('item_kind' in row) {
-    const reviewLabel = row.issue_type ?? row.family ?? row.review_group ?? row.item_kind
-    return humanize(reviewLabel)
-  }
-  if ('analysis_type' in row) return row.analysis_type
-  return 'n/a'
 }
 
 function normalizeUiError(reason: unknown, fallback: string): string {
@@ -395,20 +350,6 @@ function ReviewDetail({ item }: { item: ReviewItemOut }) {
       </div>
       {item.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(item.gap_note)} />}
       {item.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(item.remediation_note)} />}
-    </>
-  )
-}
-
-function AnalysisDetail({ item }: { item: AnalysisItemOut }) {
-  return (
-    <>
-      <h2 className="text-lg font-semibold text-slate-900">Analysis artifact</h2>
-      <div className="flex flex-wrap gap-2">
-        {item.status_candidate && <StatusBadge status={mapDisplayStatus(item.status_candidate)} />}
-      </div>
-      {item.gap_note && <Detail label="Why this matters" value={sanitizeCitationText(item.gap_note)} />}
-      {item.remediation_note && <Detail label="Recommended action" value={sanitizeCitationText(item.remediation_note)} />}
-      <CitationList title="Analysis citations" items={item.citations} />
     </>
   )
 }
