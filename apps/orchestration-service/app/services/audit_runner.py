@@ -3819,7 +3819,7 @@ def _final_publication_validator(
     db.commit()
 
 
-def _partner_review_pass(db: Session, audit_id: str) -> None:
+def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, str] | None = None) -> None:
     reviewer_pass_total.inc()
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     corpus_text = " ".join(_norm(f"{r.policy_evidence_excerpt or ''} {r.gap_note or ''} {r.remediation_note or ''}") for r in rows)
@@ -3871,8 +3871,58 @@ def _partner_review_pass(db: Session, audit_id: str) -> None:
             "Clarify whether true Article 9 categories are processed and identify the Article 9(2) condition with safeguards.",
         ),
     }
+    duty_validation = duty_validation or {}
+    issue_to_duty = {
+        "missing_controller_identity": "controller_identity_contact",
+        "missing_controller_contact": "controller_identity_contact",
+        "missing_legal_basis": "legal_basis_notice",
+        "missing_retention_period": "retention_notice",
+        "missing_rights_notice": "rights_notice",
+        "missing_complaint_right": "complaint_right_notice",
+        "missing_transfer_notice": "transfers_notice",
+        "profiling_disclosure_gap": "profiling_notice",
+        "recipients_disclosure_gap": "recipients_notice",
+        "purpose_specificity_gap": "purposes_notice",
+    }
     for row in rows:
         issue_id = _finding_issue_id(row)
+        duty_id = issue_to_duty.get(issue_id or "")
+        duty_outcome = duty_validation.get(duty_id or "")
+        if duty_outcome == "compliant" and issue_id:
+            row.status = "compliant"
+            row.classification = "no_issue"
+            row.severity = None
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            row.gap_note = f"Duty-level reconciliation marked {duty_id} as compliant; issue suppressed."
+            row.remediation_note = None
+            row.confidence = max(row.confidence or 0.8, 0.8)
+            continue
+        if duty_outcome == "non_compliant" and row.classification in {"not_assessable", "section_support", "evidence_support", "gap_support"}:
+            row.status = "gap"
+            row.classification = "clear_non_compliance"
+            row.severity = row.severity or "high"
+            row.finding_type = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publish_flag = "yes"
+            row.artifact_role = "publishable_finding"
+            row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publication_state = "publishable"
+            row.gap_note = f"Duty-level reconciliation marked {duty_id} as non-compliant; issue promoted."
+            row.confidence = max(row.confidence or 0.62, 0.62)
+        elif duty_outcome == "partially_compliant" and row.classification in {"not_assessable", "section_support", "evidence_support"}:
+            row.status = "partial"
+            row.classification = "probable_gap"
+            row.severity = row.severity or "medium"
+            row.finding_type = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publish_flag = "yes"
+            row.artifact_role = "publishable_finding"
+            row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publication_state = "publishable"
+            row.gap_note = f"Duty-level reconciliation marked {duty_id} as partially compliant; partial issue retained."
+            row.confidence = max(row.confidence or 0.58, 0.58)
         if issue_id in {"missing_controller_identity", "missing_controller_contact"} and controller_identity_present_doc:
             row.status = "not applicable"
             row.classification = "no_issue"
@@ -5012,7 +5062,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         "final_disposition_map",
         json.dumps(final_disposition_map, sort_keys=True),
     )
-    _partner_review_pass(db, audit.id)
+    _partner_review_pass(db, audit.id, duty_validation)
     _upsert_evidence_records(db, audit.id)
     post_review_rows = db.query(Finding).filter(Finding.audit_id == audit.id).all()
     invariant_errors = _state_invariant_validator(post_review_rows)
