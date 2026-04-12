@@ -3493,7 +3493,9 @@ def _build_final_disposition_map(
     rows: list[Finding],
     sections: list[SectionData],
     obligation_map: dict[str, bool],
+    duty_validation: dict[str, str] | None = None,
 ) -> dict[str, dict[str, str | bool]]:
+    duty_validation = duty_validation or {}
     def _issue_evidence_ids(issue_id: str) -> tuple[list[str], list[str]]:
         positive: set[str] = set()
         negative: set[str] = set()
@@ -3529,10 +3531,27 @@ def _build_final_disposition_map(
         "rights_notice": "rights",
         "complaint_right": "complaint",
     }
+    core_duty_by_family = {
+        "controller_identity_contact": "controller_identity_contact",
+        "legal_basis": "legal_basis_notice",
+        "retention": "retention_notice",
+        "rights_notice": "rights_notice",
+        "complaint_right": "complaint_right_notice",
+    }
     for family, issue in core_issue_by_family.items():
         status, reason = _final_disposition_for_issue(rows, issue)
         obligation_key = core_obligation_key_by_family.get(family)
-        if status == "satisfied":
+        duty_key = core_duty_by_family.get(family)
+        duty_outcome = duty_validation.get(duty_key or "")
+        forced_by_duty = False
+        if duty_outcome == "compliant":
+            status, reason = "satisfied", f"duty validation confirmed {duty_key} is compliant"
+            forced_by_duty = True
+        elif duty_outcome == "partially_compliant" and status == "gap":
+            status, reason = "not_assessable", f"duty validation marked {duty_key} as partially compliant; gap narrowed for manual review"
+        elif duty_outcome == "non_compliant":
+            status, reason = "gap", f"duty validation marked {duty_key} as non-compliant"
+        if status == "satisfied" and not forced_by_duty:
             if family != "controller_identity_contact" and obligation_key and obligation_map.get(obligation_key) is False:
                 status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
             elif family == "controller_identity_contact":
@@ -3576,10 +3595,27 @@ def _build_final_disposition_map(
         "dpo_contact": "dpo_contact_gap",
         "purpose_mapping": "purpose_specificity_gap",
     }
+    specialist_duty_by_family = {
+        "transfer": "transfers_notice",
+        "profiling": "profiling_notice",
+        "role_ambiguity": "role_allocation_notice",
+        "article14_source": "article14_source_notice",
+        "recipients": "recipients_notice",
+        "purpose_mapping": "purposes_notice",
+        "dpo_contact": "dpo_contact_notice",
+    }
     corpus = " ".join(_section_context_signals(s) for s in sections)
     for family, issue in specialist_issue_by_family.items():
         triggered = any(signal in corpus for signal in SPECIALIST_TRIGGER_RULES.get(issue, ({family}, ""))[0])
         status, reason = _final_disposition_for_issue(rows, issue)
+        duty_key = specialist_duty_by_family.get(family)
+        duty_outcome = duty_validation.get(duty_key or "")
+        if duty_outcome == "compliant":
+            status, reason = "satisfied", f"duty validation confirmed {duty_key} is compliant"
+        elif duty_outcome == "partially_compliant" and status in {"gap", "not_assessable"}:
+            status, reason = "not_assessable", f"duty validation marked {duty_key} as partially compliant; unresolved fragments retained as non-publishable"
+        elif duty_outcome == "non_compliant":
+            status, reason = "gap", f"duty validation marked {duty_key} as non-compliant"
         specialist_severity = "high" if family in {"transfer", "special_category"} else "medium"
         if triggered:
             if family == "transfer":
@@ -5304,7 +5340,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     )
     _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
     rows_for_disposition = db.query(Finding).filter(Finding.audit_id == audit.id).all()
-    final_disposition_map = _build_final_disposition_map(rows_for_disposition, sections, obligation_map)
+    final_disposition_map = _build_final_disposition_map(rows_for_disposition, sections, obligation_map, duty_validation)
     _final_publication_validator(db, audit.id, final_disposition_map, source_scope)
     _record_suppression_ledger(
         db,

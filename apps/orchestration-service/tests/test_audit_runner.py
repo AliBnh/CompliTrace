@@ -1857,6 +1857,99 @@ def test_document_wide_duty_validation_dpa_and_internal_policy_are_document_type
     assert "complaint_right_notice" not in internal_out
 
 
+def test_final_disposition_honors_duty_validation_for_core_compliance():
+    sections = [
+        SectionData(
+            id="sec-core",
+            section_order=1,
+            section_title="Privacy notice",
+            content="Lawful basis includes contract and legal obligation. Retention period is 24 months.",
+            page_start=1,
+            page_end=1,
+        )
+    ]
+    disposition = _build_final_disposition_map(
+        [],
+        sections,
+        {"controller_contact": False, "legal_basis": False, "retention": False, "rights": False, "complaint": False},
+        {"legal_basis_notice": "compliant", "retention_notice": "compliant"},
+    )
+    assert disposition["legal_basis"]["status"] == "satisfied"
+    assert disposition["retention"]["status"] == "satisfied"
+    assert disposition["legal_basis"]["publication_recommendation"] == "internal_only"
+
+
+def test_cross_stage_controller_contact_remains_suppressed_when_duty_compliant():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        audit = Audit(document_id="doc-x", status="running")
+        db.add(audit)
+        db.flush()
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="systemic:missing_controller_contact",
+                status="gap",
+                severity="high",
+                classification="systemic_violation",
+                finding_type="systemic",
+                publish_flag="yes",
+                publication_state="publishable",
+                gap_note="Controller contact route missing.",
+            )
+        )
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-intro",
+                status="compliant",
+                severity=None,
+                classification="no_issue",
+                finding_type="supporting_evidence",
+                publish_flag="no",
+                publication_state="internal_only",
+                policy_evidence_excerpt='ACME Corp Ltd, contact privacy@acme.com.',
+            )
+        )
+        db.commit()
+        _partner_review_pass(db, audit.id, {"controller_identity_contact": "compliant"})
+        rows = db.query(Finding).filter(Finding.audit_id == audit.id).all()
+        controller_rows = [r for r in rows if r.section_id == "systemic:missing_controller_contact"]
+        assert controller_rows
+        assert controller_rows[0].publish_flag == "no"
+        disposition = _build_final_disposition_map(rows, [], {"controller_contact": True, "legal_basis": True, "retention": True, "rights": True, "complaint": True}, {"controller_identity_contact": "compliant"})
+        assert disposition["controller_identity_contact"]["status"] == "satisfied"
+        assert disposition["controller_identity_contact"]["publication_recommendation"] == "internal_only"
+
+
+def test_severity_calibration_deterministic_for_core_and_specialist_claims():
+    assert _normalize_severity("gap", None, {"legal_basis"}) == "high"
+    assert _normalize_severity("gap", None, {"rights"}) == "high"
+    assert _normalize_severity("gap", None, {"complaint"}) == "high"
+    assert _normalize_severity("gap", None, {"transfer"}) == "high"
+    assert _normalize_severity("gap", None, {"profiling"}) == "high"
+    assert _normalize_severity("gap", None, {"retention"}) == "medium"
+    assert _normalize_severity("gap", None, {"recipients"}) == "medium"
+
+
+def test_confidence_calibration_spreads_high_and_low_ranges():
+    high_finding = LlmFinding(status="gap", severity="high", gap_note="clear transfer gap", remediation_note="fix", citations=[])
+    high_citations = [
+        LlmCitation(chunk_id="c1", article_number="13", paragraph_ref="1(f)", article_title="info", excerpt="x"),
+        LlmCitation(chunk_id="c2", article_number="44", paragraph_ref=None, article_title="transfer", excerpt="y"),
+        LlmCitation(chunk_id="c3", article_number="46", paragraph_ref=None, article_title="safeguards", excerpt="z"),
+    ]
+    klass_high, conf_high = _classify_finding_quality(high_finding, high_citations, {"transfer"}, "direct")
+    low_finding = LlmFinding(status="needs review", severity=None, gap_note="fragmentary excerpt", remediation_note=None, citations=[])
+    klass_low, conf_low = _classify_finding_quality(low_finding, [], {"legal_basis"}, "unknown")
+    assert klass_high in {"clear_non_compliance", "probable_gap"}
+    assert conf_high is not None and conf_high >= 0.85
+    assert klass_low == "not_assessable"
+    assert conf_low is not None and conf_low <= 0.3
+
+
 def test_issue_relevance_score_prefers_retention_over_transfer_for_retention_section():
     section = SectionData(
         id="ret-sec",
