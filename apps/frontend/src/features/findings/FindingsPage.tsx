@@ -112,23 +112,21 @@ export function FindingsPage() {
   }, [findings, sectionsById])
 
   const orderedReviewItems = useMemo(() => {
-    return [...reviewItems]
+    const visibleRows = [...reviewItems]
       .filter((item) => !item.section_id.startsWith('ledger:'))
+      .filter((item) => !item.section_id.startsWith('review:'))
+      .filter((item) => Boolean(sectionsById[item.section_id]))
       .filter((item) => {
         if (item.item_kind !== 'review_block') return true
         return (item.final_disposition ?? '').toLowerCase() !== 'satisfied'
       })
-      .sort((a, b) => {
-        const rank = (row: ReviewItemOut) => {
-          if (row.item_kind === 'review_block' && row.review_group === 'core_duties') return 0
-          if (row.item_kind === 'review_block' && row.review_group === 'specialist_families') return 1
-          if (row.item_kind === 'finding') return 2
-          return 3
-        }
-        const r = rank(a) - rank(b)
-        return r !== 0 ? r : a.id.localeCompare(b.id)
-      })
-  }, [reviewItems])
+    return dedupeReviewRows(visibleRows).sort((a, b) => {
+      const aOrder = sectionsById[a.section_id]?.section_order ?? Number.MAX_SAFE_INTEGER
+      const bOrder = sectionsById[b.section_id]?.section_order ?? Number.MAX_SAFE_INTEGER
+      if (aOrder !== bOrder) return aOrder - bOrder
+      return a.id.localeCompare(b.id)
+    })
+  }, [reviewItems, sectionsById])
 
   const orderedAnalysisItems = useMemo(() => {
     return [...analysisItems].filter((item) => !item.section_id.startsWith('ledger:')).sort((a, b) => a.id.localeCompare(b.id))
@@ -298,10 +296,7 @@ export function FindingsPage() {
 
 function displaySectionTitle(finding: { section_id: string }, sectionsById: Record<string, SectionOut>): string {
   const section = sectionsById[finding.section_id]
-  if (section) return section.section_title
-  if (finding.section_id === 'review:core_duties') return 'Review block: Core duties'
-  if (finding.section_id === 'review:specialist_families') return 'Review block: Specialist families'
-  if (finding.section_id.startsWith('review:')) return `Review block: ${humanize(finding.section_id.replace('review:', ''))}`
+  if (section) return section.section_title || `Section ${section.section_order}`
   if (finding.section_id.startsWith('systemic:')) {
     const issueId = finding.section_id.split('systemic:')[1]
     return `Systemic: ${SYSTEMIC_LABELS[issueId] ?? humanize(issueId)}`
@@ -333,6 +328,33 @@ function normalizeUiError(reason: unknown, fallback: string): string {
   return fallback
 }
 
+function dedupeReviewRows(rows: ReviewItemOut[]): ReviewItemOut[] {
+  const deduped = new Map<string, ReviewItemOut>()
+  for (const row of rows) {
+    const key = [
+      row.section_id,
+      (row.issue_type ?? '').toLowerCase(),
+      (row.gap_note ?? '').toLowerCase(),
+      (row.remediation_note ?? '').toLowerCase(),
+    ].join('|')
+    const existing = deduped.get(key)
+    if (!existing || reviewRowPriority(row) > reviewRowPriority(existing)) {
+      deduped.set(key, row)
+    }
+  }
+  return [...deduped.values()]
+}
+
+function reviewRowPriority(row: ReviewItemOut): number {
+  const status = (row.status ?? '').toLowerCase()
+  const isCandidate = status.startsWith('candidate')
+  if (row.item_kind === 'finding' && !isCandidate) return 5
+  if (!isCandidate) return 4
+  if (row.item_kind === 'finding') return 3
+  if (row.item_kind === 'analysis') return 2
+  return 1
+}
+
 function humanize(value: string): string {
   return value
     .split('_')
@@ -360,11 +382,11 @@ function PublishedDetail({ finding, sectionText }: { finding: FindingOut; sectio
         {finding.classification && <Pill value={finding.classification} />}
         {finding.confidence_level && <Pill value={`confidence ${finding.confidence_level}`} />}
       </div>
-      <Detail label="Gap note" value={finding.gap_note ?? 'n/a'} />
-      <Detail label="Remediation" value={finding.remediation_note ?? 'n/a'} />
+      <Detail label="Gap note" value={sanitizeCitationText(finding.gap_note ?? 'n/a')} />
+      <Detail label="Remediation" value={sanitizeCitationText(finding.remediation_note ?? 'n/a')} />
       <Detail label="Legal anchors" value={finding.primary_legal_anchor?.join(', ') ?? 'n/a'} />
       <Detail label="Secondary anchors" value={finding.secondary_legal_anchors?.join(', ') ?? 'n/a'} />
-      <Detail label="Citation summary" value={finding.citation_summary_text ?? 'n/a'} />
+      <Detail label="Citation summary" value={sanitizeCitationText(finding.citation_summary_text ?? 'n/a')} />
       <Detail label="Assertion level" value={finding.assertion_level ?? 'n/a'} />
       <Detail label="Source scope" value={finding.source_scope ?? 'n/a'} />
       <Detail label="Evidence refs" value={finding.document_evidence_refs?.join(', ') ?? 'n/a'} />
