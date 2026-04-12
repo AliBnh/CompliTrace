@@ -43,7 +43,7 @@ export function FindingsPage() {
         setPublishedError(null)
       } else {
         setFindings([])
-        setPublishedError('Final published findings are not available yet because some findings still require review.')
+        setPublishedError('Final published findings are not yet available because some findings still require review.')
       }
       setReviewItems(r.status === 'fulfilled' ? r.value : [])
       setAnalysisItems(a.status === 'fulfilled' ? a.value : [])
@@ -104,13 +104,13 @@ export function FindingsPage() {
           <p className="mt-3 text-xs text-slate-600">
             {viewMode === 'published' && (presentation.publishedBlocked
               ? 'Final published findings are not yet available because some findings still require review.'
-              : 'Showing final published findings only.')}
-            {viewMode === 'review' && 'Showing review-stage findings only.'}
-            {viewMode === 'analysis' && 'Showing early-stage analysis findings only.'}
+              : `Using dataset: ${presentation.datasetLabels.publishedVisibleFindings}.`)}
+            {viewMode === 'review' && `Using dataset: ${presentation.datasetLabels.reviewVisibleFindings}.`}
+            {viewMode === 'analysis' && `Using dataset: ${presentation.datasetLabels.analysisVisibleFindings}.`}
           </p>
           {presentation.publishedBlocked && viewMode === 'published' && (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Final published findings are not available yet because some findings still require review.
+              Final published findings are not yet available because some findings still require review.
             </div>
           )}
           {viewMode === 'review' && reviewSummary && (
@@ -134,14 +134,14 @@ export function FindingsPage() {
         <div className="surface-card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-100/80 text-left text-xs uppercase tracking-wide text-slate-500">
-              <tr><th className="px-4 py-3">Title</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Severity</th></tr>
+              <tr><th className="px-4 py-3">Title</th><th className="px-4 py-3">Issue</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Severity</th></tr>
             </thead>
             <tbody>
               {activeRows.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No findings in this dataset.</td></tr> : activeRows.map((finding) => (
                 <tr key={finding.stable_ui_id} onClick={() => setSelectedByView((c) => ({ ...c, [viewMode]: finding.stable_ui_id }))} className={`cursor-pointer border-t ${selected?.stable_ui_id === finding.stable_ui_id ? 'bg-sky-50/80' : 'bg-white'}`}>
                   <td className="px-4 py-3">{finding.title}</td>
+                  <td className="px-4 py-3">{finding.issue_label}</td>
                   <td className="px-4 py-3"><StatusBadge status={finding.status.toLowerCase()} /></td>
-                  <td className="px-4 py-3">{finding.scope_label}</td>
                   <td className="px-4 py-3">{finding.severity}</td>
                 </tr>
               ))}
@@ -163,6 +163,7 @@ function FindingDetail({ finding }: { finding: NormalizedFinding }) {
     <div className="flex gap-2"><StatusBadge status={finding.status.toLowerCase()} /><span className="rounded-full border px-2.5 py-1 text-xs">Severity {finding.severity}</span></div>
     <Detail label="Dataset" value={finding.source_mode === 'published' ? 'Final published findings' : finding.source_mode === 'review' ? 'Review findings' : 'Analysis findings'} />
     <Detail label="Scope" value={finding.section_title ?? finding.scope_label} />
+    <Detail label="Issue" value={finding.issue_label} />
     <Detail label="Why this matters" value={finding.why_this_matters} />
     <Detail label="Recommended action" value={finding.recommended_action} />
     {!!finding.legal_anchors.length && <Detail label="Legal anchors" value={finding.legal_anchors.join(', ')} />}

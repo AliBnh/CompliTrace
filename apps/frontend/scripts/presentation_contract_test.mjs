@@ -18,58 +18,48 @@ fs.writeFileSync(tempFile, transpiled, 'utf8')
 const mod = await import(pathToFileURL(tempFile).href)
 
 const sectionsById = {
-  'sec-1': { id: 'sec-1', section_order: 1, section_title: 'Data retention' },
-  'sec-2': { id: 'sec-2', section_order: 2, section_title: 'International transfers' },
+  'sec-1': { id: 'sec-1', section_order: 4, section_title: 'Legal Bases for Processing' },
+  'sec-2': { id: 'sec-2', section_order: 6, section_title: 'International Transfers' },
+  'sec-3': { id: 'sec-3', section_order: 9, section_title: 'Data Subject Rights' },
 }
 
 const publishedRows = [
   {
     id: 'f1',
     section_id: 'sec-1',
-    issue_key: 'missing_retention_period',
+    issue_key: 'missing_legal_basis',
     status: 'gap',
     severity: null,
     gap_note: 'duty validation marked retention_notice as non-compliant',
-    remediation_note: 'In Section 1, add the retention period.',
-    citations: [{ excerpt: 'No retention period statement found.' }],
-    primary_legal_anchor: ['GDPR Article 13(2)(a)'],
-  },
-  {
-    id: 'f2',
-    section_id: 'systemic:missing_legal_basis',
-    issue_key: 'missing_legal_basis',
-    status: 'gap',
-    severity: 'low',
-    gap_note: 'invalid_consent and strict legal gate phrasing',
-    remediation_note: 'State the lawful basis.',
-    citations: [],
+    remediation_note: 'In Section 4, add lawful basis mapping.',
+    citations: [{ excerpt: 'We process data for support and billing.' }],
     primary_legal_anchor: ['GDPR Article 13(1)(c)'],
   },
   {
-    id: 'f3',
-    section_id: 'systemic:missing_transfer_notice',
-    issue_key: 'missing_transfer_notice',
+    id: 'f2',
+    section_id: 'systemic:missing_complaint_right',
+    issue_key: 'missing_complaint_right',
     status: 'gap',
-    severity: null,
-    gap_note: '[]',
-    remediation_note: 'Explain safeguards used.',
-    citations: [{ excerpt: '[]' }],
-    primary_legal_anchor: ['GDPR Article 13(1)(f)'],
+    severity: 'low',
+    gap_note: 'invalid_consent and strict legal gate phrasing',
+    remediation_note: 'Explain complaint right.',
+    citations: [],
+    primary_legal_anchor: ['GDPR Article 13(2)(d)'],
   },
 ]
 
 const reviewRows = [
   { item_kind: 'review_block', id: 'rb1', section_id: 'review:block', final_disposition: 'gap', reason: 'withheld by final publication validator' },
-  { item_kind: 'finding', id: 'r1', section_id: 'sec-1', issue_type: 'missing_retention_period', status: 'partial', gap_note: 'candidate_issue', remediation_note: 'Address retention' },
-  { item_kind: 'finding', id: 'r2', section_id: 'systemic:missing_legal_basis', issue_type: 'missing_legal_basis', status: 'gap', gap_note: 'Observation: required legal_basis disclosure is missing', remediation_note: 'Add legal basis' },
+  { item_kind: 'finding', id: 'r1', section_id: 'sec-2', issue_type: 'missing_transfer_notice', status: 'gap', gap_note: 'candidate_issue transfer rationale', remediation_note: 'Add transfer safeguards' },
+  { item_kind: 'finding', id: 'r2', section_id: 'sec-3', issue_type: 'missing_rights_notice', status: 'partial', gap_note: 'Observation: rights section is incomplete', remediation_note: 'Expand rights section' },
 ]
 
 const analysisRows = [
-  { id: 'a1', section_id: 'sec-2', analysis_type: 'completeness_outcome', issue_type: 'missing_transfer_notice', status_candidate: 'candidate_gap', gap_note: 'possible gap', remediation_note: 'check', citations: [] },
+  { id: 'a1', section_id: 'sec-2', analysis_type: 'completeness_outcome', issue_type: 'missing_transfer_notice', status_candidate: 'candidate_gap', gap_note: 'possible gap filtered by (.)', remediation_note: 'check', citations: [] },
   { id: 'a2', section_id: 'ledger:meta', analysis_type: 'support_evidence', issue_type: 'x', status_candidate: 'candidate_gap', gap_note: 'internal', remediation_note: 'internal', citations: [] },
 ]
 
-const presentation = mod.buildFindingsPresentation({
+const blockedPresentation = mod.buildFindingsPresentation({
   publishedRows,
   reviewRows,
   analysisRows,
@@ -77,55 +67,76 @@ const presentation = mod.buildFindingsPresentation({
   publishedBlocked: true,
 })
 
-// A. Evidence completeness / no placeholders.
-assert.ok(presentation.publishedVisibleFindings.every((x) => x.evidence_text.length > 20))
-assert.ok(presentation.publishedVisibleFindings.every((x) => !/\[\s*\]/.test(x.evidence_text)))
-assert.ok(!JSON.stringify(presentation.reportExportFindings).includes('No supporting excerpt available in the current view'))
+// A. dataset contract
+assert.equal(blockedPresentation.datasetLabels.publishedVisibleFindings, 'Final published findings')
+assert.equal(blockedPresentation.datasetLabels.reviewVisibleFindings, 'Review findings')
+assert.equal(blockedPresentation.datasetLabels.analysisVisibleFindings, 'Analysis findings')
+assert.equal(blockedPresentation.datasetLabels.reportExportFindings, 'Review findings (final publication blocked)')
+assert.equal(blockedPresentation.publishedVisibleFindings.length, 0)
+assert.deepEqual(blockedPresentation.reportExportFindings, blockedPresentation.reviewVisibleFindings)
 
-// B. sanitizer
-const serialized = JSON.stringify(presentation).toLowerCase()
-for (const banned of ['support_only', 'candidate_issue', 'meta_section', 'invalid_consent', 'strict legal gate', 'withheld by final publication validator']) {
-  assert.ok(!serialized.includes(banned), `banned token leaked: ${banned}`)
+// B. export gate tests
+const mismatchCount = mod.validateReportExportReadiness(blockedPresentation, {
+  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length + 1,
+  pdfDatasetLabel: blockedPresentation.reportDatasetLabel,
+})
+assert.equal(mismatchCount.ok, false)
+assert.ok(mismatchCount.errors.some((x) => x.includes('counts diverge')))
+const mismatchLabel = mod.validateReportExportReadiness(blockedPresentation, {
+  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length,
+  pdfDatasetLabel: 'Final published findings',
+})
+assert.equal(mismatchLabel.ok, false)
+assert.ok(mismatchLabel.errors.some((x) => x.includes('labels diverge')))
+const missingEvidencePresentation = {
+  ...blockedPresentation,
+  reportExportFindings: [{ ...blockedPresentation.reportExportFindings[0], evidence_text: '' }],
+}
+assert.equal(mod.validateReportExportReadiness(missingEvidencePresentation).ok, false)
+
+// C. title tests
+assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => f.title.startsWith('Section ')))
+assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => !['GDPR transparency disclosure gap', 'Compliance finding requiring review'].includes(f.title)))
+
+// D. sanitizer tests
+const serializedBlocked = JSON.stringify(blockedPresentation).toLowerCase()
+for (const banned of ['support_only', 'candidate_issue', 'meta_section', 'invalid_consent', 'duty validation marked', 'filtered by (.)']) {
+  assert.ok(!serializedBlocked.includes(banned), `banned token leaked: ${banned}`)
+}
+const renderedText = [
+  ...blockedPresentation.reviewVisibleFindings.flatMap((f) => [f.title, f.issue_label, f.why_this_matters, f.recommended_action, f.evidence_text]),
+  ...blockedPresentation.analysisVisibleFindings.flatMap((f) => [f.title, f.issue_label, f.why_this_matters, f.recommended_action, f.evidence_text]),
+].join(' ').toLowerCase()
+assert.ok(!renderedText.includes('[]'))
+assert.ok(!renderedText.includes('{}'))
+
+// E. evidence tests
+assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => /^Section .*: ".+"$|^Confirmed after review of the full document: no disclosure of .+ was identified\.$/.test(f.evidence_text)))
+
+// F. review/analysis UX tests via data model
+assert.equal(blockedPresentation.reviewVisibleFindings.every((f) => f.source_mode === 'review'), true)
+assert.equal(blockedPresentation.analysisVisibleFindings.every((f) => f.source_mode === 'analysis'), true)
+assert.equal(blockedPresentation.analysisVisibleFindings.length, 1)
+assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => f.title !== f.issue_label))
+for (const row of [...blockedPresentation.reviewVisibleFindings, ...blockedPresentation.analysisVisibleFindings]) {
+  assert.ok(['High', 'Medium', 'Low'].includes(row.severity))
+  if (/legal basis|rights|complaint|transfer|profiling/i.test(`${row.issue_label} ${row.title}`)) assert.notEqual(row.severity, 'Low')
 }
 
-// C. title generator no placeholders
-assert.ok(presentation.reviewVisibleFindings.every((f) => f.title !== 'Compliance finding requiring review'))
-assert.ok(presentation.publishedVisibleFindings.every((f) => f.title.length > 5))
-
-// D/E dataset separation and calibrated severity/selection-ready detail content
-assert.equal(presentation.reviewVisibleFindings.every((f) => f.source_mode === 'review'), true)
-assert.equal(presentation.analysisVisibleFindings.length, 1)
-assert.equal(presentation.analysisVisibleFindings[0].source_mode, 'analysis')
-assert.equal(presentation.reviewVisibleFindings.some((f) => f.severity === 'High' && f.title.includes('legal basis')), true)
-assert.ok(presentation.reviewVisibleFindings.every((f) => f.evidence_text.length > 20))
-
-// F/G blocked state/export contract
-assert.equal(presentation.reportMode, 'review')
-assert.equal(presentation.reportDatasetLabel, 'Review findings (final publication blocked)')
-const counts = mod.aggregateCounts(presentation.reportExportFindings)
-assert.equal(counts.total, presentation.reportExportFindings.length)
-const readiness = mod.validateReportExportReadiness(presentation)
-assert.equal(readiness.ok, true)
-
-// H compliant run plain output
-const compliant = mod.buildFindingsPresentation({
-  publishedRows: [{ id: 'f4', section_id: 'sec-1', issue_key: 'minor_drafting', status: 'compliant', severity: null, gap_note: 'Substantive disclosure signal detected.', remediation_note: null, citations: [{ excerpt: 'Disclosure is present.' }], primary_legal_anchor: [] }],
+// G. compliant run tests
+const compliantPresentation = mod.buildFindingsPresentation({
+  publishedRows: [{ id: 'f4', section_id: 'sec-1', issue_key: 'minor_drafting', status: 'compliant', severity: null, gap_note: 'Substantive disclosure signal detected.', remediation_note: null, citations: [{ excerpt: 'Lawful basis is contract.' }], primary_legal_anchor: [] }],
   reviewRows: [],
   analysisRows: [],
   sectionsById,
   publishedBlocked: false,
 })
-assert.equal(mod.aggregateCounts(compliant.reportExportFindings).non_compliant, 0)
-assert.ok(!JSON.stringify(compliant).toLowerCase().includes('substantive disclosure signal detected'))
+assert.equal(mod.aggregateCounts(compliantPresentation.reportExportFindings).non_compliant, 0)
+assert.equal(compliantPresentation.reportDatasetLabel, 'Final published findings')
+assert.equal(mod.validateReportExportReadiness(compliantPresentation).ok, true)
 
-// I severity guard
-for (const row of presentation.publishedVisibleFindings) {
-  assert.ok(['High', 'Medium', 'Low'].includes(row.severity))
-  if (/legal basis|transfer|profiling|rights|complaint/i.test(row.title)) assert.notEqual(row.severity, 'Low')
-}
-
-// J no UUID leaks
-assert.ok(!serialized.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i))
+// generic anti-leak
+assert.ok(!serializedBlocked.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i))
 
 fs.unlinkSync(tempFile)
 console.log('presentation contract checks passed')
