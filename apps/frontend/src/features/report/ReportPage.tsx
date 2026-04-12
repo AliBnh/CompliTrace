@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
-import { createReport, getFindings, getReport, getReview, reportDownloadUrl } from '../../lib/api'
-import { buildFindingsSnapshot } from '../../lib/presentation'
-import type { FindingOut, ReportOut, ReviewItemOut } from '../../lib/types'
+import { createReport, getAnalysis, getFindings, getReport, getReview, reportDownloadUrl } from '../../lib/api'
+import { aggregateCounts, buildFindingsPresentation } from '../../lib/presentation'
+import type { AnalysisItemOut, FindingOut, ReportOut, ReviewItemOut } from '../../lib/types'
 
 export function ReportPage() {
   const { auditId } = useAppState()
   const [reviewRows, setReviewRows] = useState<ReviewItemOut[]>([])
+  const [analysisRows, setAnalysisRows] = useState<AnalysisItemOut[]>([])
   const [publishedRows, setPublishedRows] = useState<FindingOut[]>([])
   const [report, setReport] = useState<ReportOut | null>(null)
   const [status, setStatus] = useState<'idle' | 'generating' | 'ready'>('idle')
@@ -15,11 +16,12 @@ export function ReportPage() {
 
   useEffect(() => {
     if (!auditId) return
-    Promise.allSettled([getReview(auditId), getFindings(auditId)]).then(([reviewResult, publishedResult]) => {
+    Promise.allSettled([getReview(auditId), getFindings(auditId), getAnalysis(auditId)]).then(([reviewResult, publishedResult, analysisResult]) => {
       if (reviewResult.status === 'fulfilled') setReviewRows(reviewResult.value)
-      else setError(reviewResult.reason?.message ?? 'Unable to load review findings')
+      else setError('Unable to load review findings')
       if (publishedResult.status === 'fulfilled') setPublishedRows(publishedResult.value)
       else setPublishedRows([])
+      setAnalysisRows(analysisResult.status === 'fulfilled' ? analysisResult.value : [])
     })
   }, [auditId])
 
@@ -31,20 +33,20 @@ export function ReportPage() {
         setReport(r)
         if (r.status === 'ready') setStatus('ready')
       } catch {
-        // ignore polling failures temporarily
+        // noop
       }
     }, 2500)
     return () => clearInterval(timer)
   }, [auditId, status])
 
-  const publishedBlocked = useMemo(
-    () => reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
-    [reviewRows],
-  )
-  const snapshot = useMemo(
-    () => buildFindingsSnapshot({ publishedRows, reviewRows, publishedBlocked }),
-    [publishedRows, reviewRows, publishedBlocked],
-  )
+  const presentation = useMemo(() => buildFindingsPresentation({
+    publishedRows,
+    reviewRows,
+    analysisRows,
+    sectionsById: {},
+    publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
+  }), [publishedRows, reviewRows, analysisRows])
+  const counts = aggregateCounts(presentation.reportVisibleFindings)
 
   async function generate() {
     if (!auditId) return
@@ -64,22 +66,27 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">Generate an executive-ready PDF with current audit outcomes and evidence references.</p>
+        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{presentation.reportMode === 'published' ? 'Final published findings' : 'Review findings (final publication blocked)'}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          {Object.entries(snapshot.counts).map(([label, count]) => (
-            <article key={label} className={`metric-card ${metricTone(label)}`}>
+          {[
+            ['Compliant', counts.compliant],
+            ['Partially compliant', counts.partially_compliant],
+            ['Non-compliant', counts.non_compliant],
+            ['Not applicable', counts.not_applicable],
+            ['Total', counts.total],
+          ].map(([label, count]) => (
+            <article key={String(label)} className={`metric-card ${metricTone(String(label))}`}>
               <div className="text-xs uppercase tracking-wide opacity-75">{label}</div>
               <div className="mt-2 text-2xl font-semibold">{count}</div>
             </article>
           ))}
         </div>
-        {snapshot.message && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{snapshot.message}</div>}
       </header>
 
       <article className="surface-card p-6">
         <h2 className="text-lg font-semibold text-slate-900">PDF generation</h2>
-        <p className="mt-1 text-sm text-slate-500">Use the latest visible findings dataset to create a shareable compliance report.</p>
+        <p className="mt-1 text-sm text-slate-500">This export uses the same dataset and counts shown above.</p>
 
         {error && <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
 

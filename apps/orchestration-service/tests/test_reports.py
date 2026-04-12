@@ -62,8 +62,9 @@ def test_generate_report_writes_valid_pdf(tmp_path: Path):
             assert "Document title:" in decoded
             assert "Audit started at:" in decoded
             assert "Audit completed at:" in decoded
-            assert "Report generation metadata" in decoded
-            assert "Report schema version:" in decoded
+            assert "Dataset used:" in decoded
+            assert "Report generation metadata" not in decoded
+            assert "Embedding model:" not in decoded
     finally:
         settings.reports_dir = old_reports_dir
 
@@ -123,3 +124,49 @@ def test_sanitize_user_text_strips_diagnostics():
     cleaned = _sanitize_user_text(text)
     assert cleaned is not None
     assert "Diagnostic:" not in cleaned
+
+
+def test_report_pdf_omits_internal_debug_terms(tmp_path: Path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    old_reports_dir = settings.reports_dir
+    settings.reports_dir = tmp_path
+    try:
+        with SessionLocal() as db:
+            audit = Audit(
+                id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                status="complete",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                model_provider="internal-provider",
+                model_name="internal-model",
+                model_temperature=0.1,
+                prompt_template_version="v1",
+                embedding_model="internal-embed",
+                corpus_version="corpus-v1",
+            )
+            db.add(audit)
+            db.flush()
+            db.add(
+                Finding(
+                    id=str(uuid.uuid4()),
+                    audit_id=audit.id,
+                    section_id="systemic:missing_legal_basis",
+                    status="gap",
+                    severity=None,
+                    gap_note="withheld by final publication validator",
+                    remediation_note="Add legal basis disclosure.",
+                    publication_state="blocked",
+                )
+            )
+            db.commit()
+            _, out_path = generate_report_text(db, audit.id)
+            decoded = out_path.read_bytes().decode("latin-1", errors="ignore").lower()
+            assert "validator" not in decoded
+            assert "embedding model" not in decoded
+            assert "corpus version" not in decoded
+            assert "dataset used: review findings" in decoded
+    finally:
+        settings.reports_dir = old_reports_dir

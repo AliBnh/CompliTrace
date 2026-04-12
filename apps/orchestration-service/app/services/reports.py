@@ -242,6 +242,12 @@ def _sanitize_user_text(text: str | None) -> str | None:
     cleaned = re.sub(r"Potential duplicate of section [^.;]+[.;]?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"chunk_id\s*=\s*gdpr-art-[a-z0-9-]+", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bgdpr-art-[a-z0-9-]+\b", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"(withheld by final publication validator|support_evidence|provisional_local|candidate_issue|meta_section|confirmed_document_gap|duty validation marked)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
 
@@ -277,6 +283,29 @@ def _normalize_status(status: str | None) -> str:
     return "not applicable"
 
 
+def _user_status_label(status: str | None) -> str:
+    normalized = _normalize_status(status)
+    if normalized == "gap":
+        return "Non-compliant"
+    if normalized == "partial":
+        return "Partially compliant"
+    if normalized == "compliant":
+        return "Compliant"
+    return "Not applicable"
+
+
+def _user_severity_label(severity: str | None, issue: str | None) -> str:
+    token = (severity or "").strip().lower()
+    if token in {"high", "medium", "low"}:
+        return token.title()
+    issue_token = (issue or "").lower()
+    if any(k in issue_token for k in ["legal_basis", "complaint", "rights", "transfer", "profil"]):
+        return "High"
+    if any(k in issue_token for k in ["retention", "recipient", "purpose"]):
+        return "Medium"
+    return "Low"
+
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -308,65 +337,39 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         row
         for row in findings
         if (
-            row.publication_state == "publishable"
-            or (row.publication_state in {"blocked", "internal_only"} and row.legal_requirement is not None)
+            row.publication_state in {"publishable", "blocked"}
+            or (row.publication_state in {"internal_only"} and row.legal_requirement is not None)
         )
         and not row.section_id.startswith("ledger:")
     ]
-    visible_review_analysis = [row for row in analysis_rows if not row.section_id.startswith("ledger:")]
-    review_statuses = [_normalize_status(row.status) for row in visible_review_findings] + [
-        _normalize_status(row.status_candidate) for row in visible_review_analysis
-    ]
-    systemic_findings = [
-        f
-        for f in findings
-        if _is_publishable_finding(f) and (f.finding_level == "systemic" or f.finding_type == "systemic")
-    ]
-    publishable_findings = [
-        f
-        for f in findings
-        if _is_publishable_finding(f) and (f.finding_level == "local" or f.finding_type == "local")
-    ]
-    not_assessable_findings = [f for f in publishable_findings if f.classification == "not_assessable"]
-    publishable_local_findings = [
-        f
-        for f in publishable_findings
-        if f.classification not in {"not_assessable", "diagnostic_internal_only"} and f.status != "not applicable"
-    ]
+    publishable_findings = [f for f in findings if _is_publishable_finding(f)]
+    published_blocked = len(publishable_findings) == 0 and len(visible_review_findings) > 0
+    report_rows = visible_review_findings if published_blocked else publishable_findings
 
-    total = len(review_statuses)
+    deduped_by_section: dict[str, Finding] = {}
+    for row in report_rows:
+        if row.classification in {"diagnostic_internal_only", "not_assessable"}:
+            continue
+        existing = deduped_by_section.get(row.section_id)
+        if not existing:
+            deduped_by_section[row.section_id] = row
+            continue
+        current_rank = {"gap": 4, "partial": 3, "compliant": 2, "not applicable": 1}.get(_normalize_status(row.status), 1)
+        existing_rank = {"gap": 4, "partial": 3, "compliant": 2, "not applicable": 1}.get(_normalize_status(existing.status), 1)
+        if current_rank > existing_rank:
+            deduped_by_section[row.section_id] = row
+
+    report_rows_deduped = list(deduped_by_section.values())
+    systemic_findings = [f for f in report_rows_deduped if f.section_id.startswith("systemic:")]
+    local_findings = [f for f in report_rows_deduped if not f.section_id.startswith("systemic:")]
+
+    total = len(report_rows_deduped)
     by_status = {
-        "compliant": sum(1 for s in review_statuses if s == "compliant"),
-        "partial": sum(1 for s in review_statuses if s == "partial"),
-        "gap": sum(1 for s in review_statuses if s == "gap"),
-        "needs review": sum(1 for s in review_statuses if s == "needs review"),
-        "not applicable": sum(1 for s in review_statuses if s == "not applicable"),
+        "compliant": sum(1 for row in report_rows_deduped if _user_status_label(row.status) == "Compliant"),
+        "partial": sum(1 for row in report_rows_deduped if _user_status_label(row.status) == "Partially compliant"),
+        "gap": sum(1 for row in report_rows_deduped if _user_status_label(row.status) == "Non-compliant"),
+        "not applicable": sum(1 for row in report_rows_deduped if _user_status_label(row.status) == "Not applicable"),
     }
-    by_classification = {
-        "clear_non_compliance": sum(1 for f in findings if f.classification == "clear_non_compliance"),
-        "probable_gap": sum(1 for f in findings if f.classification == "probable_gap"),
-        "not_assessable": sum(1 for f in findings if f.classification == "not_assessable"),
-    }
-    substantive = [f for f in findings if f.status in {"partial", "gap"}]
-    substantive_with_citations = sum(1 for f in substantive if len(f.citations) > 0)
-    citation_coverage = (substantive_with_citations / len(substantive)) if substantive else 1.0
-    parse_failures = sum(1 for f in findings if f.gap_note == "LLM parse failure")
-    parse_failure_rate = (parse_failures / total) if total else 0.0
-    needs_review_rate = (by_status["needs review"] / total) if total else 0.0
-    contradiction_hits = sum(
-        1 for f in findings if (f.gap_note and "insufficient legally compatible citation support" in f.gap_note.lower())
-    )
-    contradiction_rate = (contradiction_hits / total) if total else 0.0
-    systemic_ratio = (sum(1 for f in findings if f.classification == "systemic_violation") / total) if total else 0.0
-    quality_score = max(
-        0.0,
-        10.0
-        - (parse_failure_rate * 4.0)
-        - ((1.0 - citation_coverage) * 1.0)
-        - (needs_review_rate * 2.0)
-        - (contradiction_rate * 3.0)
-        + (systemic_ratio * 1.0),
-    )
     document_title, section_meta = _section_report_meta(audit)
     started_at = audit.started_at.isoformat(sep=" ", timespec="seconds") if isinstance(audit.started_at, datetime) else "n/a"
     completed_at = (
@@ -385,25 +388,17 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Document title: {document_title or 'Unavailable'}", font_size=10, top_gap=8),
         _TextBlock(f"Audit started at: {started_at}", font_size=10),
         _TextBlock(f"Audit completed at: {completed_at}", font_size=10),
-        _TextBlock(f"Model: {audit.model_provider}:{audit.model_name}", font_size=10),
-        _TextBlock(f"Embedding model: {audit.embedding_model}", font_size=10),
-        _TextBlock(f"Corpus version: {audit.corpus_version}", font_size=10),
         _TextBlock("Executive Summary", font_size=13, top_gap=14),
         _TextBlock(f"Total findings: {total}", bullet=True),
         _TextBlock(f"Compliant: {by_status['compliant']}", bullet=True),
-        _TextBlock(f"Partial: {by_status['partial']}", bullet=True),
-        _TextBlock(f"Gap: {by_status['gap']}", bullet=True),
-        _TextBlock(f"Needs review (internal only, not published): {by_status['needs review']}", bullet=True),
+        _TextBlock(f"Partially compliant: {by_status['partial']}", bullet=True),
+        _TextBlock(f"Non-compliant: {by_status['gap']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
-        _TextBlock(f"Substantive citation coverage: {citation_coverage:.0%}", bullet=True),
-        _TextBlock(f"Clear non-compliance findings: {by_classification['clear_non_compliance']}", bullet=True),
-        _TextBlock(f"Probable gap findings: {by_classification['probable_gap']}", bullet=True),
-        _TextBlock(f"Not assessable findings: {by_classification['not_assessable']}", bullet=True),
-        _TextBlock(f"LLM parse failure rate: {parse_failure_rate:.0%}", bullet=True),
-        _TextBlock(f"Needs review rate: {needs_review_rate:.0%}", bullet=True),
-        _TextBlock(f"Citation contradiction rate: {contradiction_rate:.0%}", bullet=True),
-        _TextBlock(f"Report quality score (heuristic): {quality_score:.1f}/10", bullet=True),
-        _TextBlock("Top Systemic Findings", font_size=13, top_gap=14),
+        _TextBlock(
+            "Dataset used: Review findings (final publication blocked)." if published_blocked else "Dataset used: Final published findings.",
+            bullet=True,
+        ),
+        _TextBlock("Document-wide findings", font_size=13, top_gap=14),
     ]
     scope_label = next((f.source_scope for f in systemic_findings if f.source_scope), None)
     if scope_label == "partial_notice_excerpt":
@@ -416,51 +411,30 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     for finding in systemic_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
-        blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
-        blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
+        issue_hint = (finding.legal_requirement or finding.section_id).replace("systemic:", "").replace("_", " ")
+        blocks.append(_TextBlock(f"Status: {_user_status_label(finding.status)}", bullet=True))
+        blocks.append(_TextBlock(f"Severity: {_user_severity_label(finding.severity, issue_hint)}", bullet=True))
         primary_anchors = _decode_json_list(finding.primary_legal_anchor)
-        secondary_anchors = _decode_json_list(finding.secondary_legal_anchors)
-        evidence_refs = _decode_json_list(finding.document_evidence_refs)
         if primary_anchors:
             blocks.append(_TextBlock(f"Legal basis: {', '.join(primary_anchors)}", bullet=True))
-        if secondary_anchors:
-            blocks.append(_TextBlock(f"Secondary anchors: {', '.join(secondary_anchors)}", bullet=True))
         if finding.citation_summary_text:
             blocks.append(_TextBlock(f"Why flagged: {_sanitize_user_text(finding.citation_summary_text)}", bullet=True))
-        if finding.assertion_level:
-            blocks.append(_TextBlock(f"Assertion level: {finding.assertion_level}", bullet=True))
-        if evidence_refs:
-            blocks.append(_TextBlock(f"Evidence sections: {', '.join(evidence_refs[:4])}", bullet=True))
         if finding.gap_note:
             blocks.append(_TextBlock(f"Gap note: {_sanitize_user_text(finding.gap_note)}", bullet=True))
         if finding.remediation_note:
             blocks.append(_TextBlock(f"Remediation: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
+    if not systemic_findings:
+        blocks.append(_TextBlock("No document-wide compliance issues were identified.", bullet=True))
 
-    blocks.append(_TextBlock("Unique Local Findings", font_size=13, top_gap=14))
-    for finding in publishable_local_findings:
+    blocks.append(_TextBlock("Section findings", font_size=13, top_gap=14))
+    for finding in local_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
-        if meta.page_range:
-            blocks.append(_TextBlock(f"Section page range: {meta.page_range}", bullet=True))
-        blocks.append(_TextBlock(f"Status: {finding.status}", bullet=True))
-        blocks.append(_TextBlock(f"Severity: {finding.severity or 'n/a'}", bullet=True))
-        if finding.classification:
-            blocks.append(_TextBlock(f"Classification: {finding.classification}", bullet=True))
-        if finding.confidence is not None:
-            blocks.append(_TextBlock(f"Confidence: {finding.confidence:.2f}", bullet=True))
-        if finding.confidence_overall is not None:
-            blocks.append(_TextBlock(f"Confidence (overall): {finding.confidence_overall:.2f}", bullet=True))
-        if finding.confidence_evidence is not None:
-            blocks.append(_TextBlock(f"Confidence (evidence): {finding.confidence_evidence:.2f}", bullet=True))
-        if finding.confidence_applicability is not None:
-            blocks.append(_TextBlock(f"Confidence (applicability): {finding.confidence_applicability:.2f}", bullet=True))
-        if finding.confidence_article_fit is not None:
-            blocks.append(_TextBlock(f"Confidence (article fit): {finding.confidence_article_fit:.2f}", bullet=True))
+        issue_hint = finding.legal_requirement or finding.section_id
+        blocks.append(_TextBlock(f"Status: {_user_status_label(finding.status)}", bullet=True))
+        blocks.append(_TextBlock(f"Severity: {_user_severity_label(finding.severity, issue_hint)}", bullet=True))
         safe_gap_note = _sanitize_user_text(finding.gap_note)
         safe_remediation_note = _sanitize_user_text(finding.remediation_note)
-        if finding.status == "needs review" and safe_gap_note and "insufficient legally compatible citation support" in safe_gap_note.lower():
-            safe_gap_note = "Not assessable with current excerpt quality; legal review needed with stronger evidence."
-            safe_remediation_note = "Provide complete section text and rerun audit."
         if safe_gap_note:
             blocks.append(_TextBlock(f"Gap note: {safe_gap_note}", bullet=True))
         if safe_remediation_note:
@@ -474,27 +448,14 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             )
             if citation.excerpt:
                 blocks.append(_TextBlock(f'Evidence: "{citation.excerpt}"', bullet=True))
-    if not_assessable_findings:
-        blocks.append(_TextBlock("Not Assessable from Provided Excerpt", font_size=13, top_gap=14))
-        for finding in not_assessable_findings:
-            meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
-            blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
-            if finding.gap_note:
-                blocks.append(_TextBlock(f"Constraint: {_sanitize_user_text(finding.gap_note)}", bullet=True))
-            if finding.missing_fact_if_unresolved:
-                blocks.append(_TextBlock(f"Missing context to resolve: {finding.missing_fact_if_unresolved}", bullet=True))
-            if finding.remediation_note:
-                blocks.append(_TextBlock(f"Next step: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
-    roadmap_items = [f for f in findings if _is_publishable_finding(f) and f.remediation_note]
+    roadmap_items = [f for f in report_rows_deduped if f.remediation_note]
     if roadmap_items:
-        blocks.append(_TextBlock("Prioritized Remediation Roadmap", font_size=13, top_gap=14))
+        blocks.append(_TextBlock("Recommended actions", font_size=13, top_gap=14))
         for finding in sorted(roadmap_items, key=lambda row: {"high": 0, "medium": 1, "low": 2}.get((row.severity or "low"), 3)):
             title = finding.gap_note or "Remediate transparency obligation gap."
             blocks.append(_TextBlock(_sanitize_user_text(title)[:180], bullet=True))
             blocks.append(_TextBlock(f"Action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
-    blocks.append(_TextBlock("Report generation metadata", font_size=12, top_gap=14))
     blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
-    blocks.append(_TextBlock(f"Report schema version: {REPORT_SCHEMA_VERSION}", bullet=True))
 
     out_path = settings.reports_dir / f"audit_{audit_id}_{report.id}.pdf"
     _write_pdf(blocks, out_path)
