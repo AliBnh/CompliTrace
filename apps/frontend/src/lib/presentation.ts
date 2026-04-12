@@ -5,25 +5,28 @@ export type UserSeverity = 'High' | 'Medium' | 'Low'
 export type SourceMode = 'published' | 'review' | 'analysis'
 export type DatasetKey = 'publishedVisibleFindings' | 'reviewVisibleFindings' | 'analysisVisibleFindings' | 'reportExportFindings'
 
-export type NormalizedFinding = {
-  stable_ui_id: string
-  title: string
-  issue_label: string
-  scope_type: 'section' | 'document'
-  scope_label: string
-  section_title: string | null
+export type Issue = {
+  issueKey: string
+  issueLabel: string
   status: UserStatus
   severity: UserSeverity
-  why_this_matters: string
-  recommended_action: string
-  legal_anchors: string[]
-  evidence_mode: 'excerpt' | 'full_document_absence'
-  evidence_text: string
-  visible: boolean
-  source_mode: SourceMode
-  section_key: string
-  details: string[]
+  whyThisMatters: string
+  recommendedAction: string
+  evidenceText: string
+  legalAnchors: string[]
 }
+
+export type SectionFinding = {
+  stable_ui_id: string
+  sectionId: string
+  sectionTitle: string
+  overallStatus: UserStatus
+  severity: UserSeverity
+  issues: Issue[]
+  sourceMode: SourceMode
+}
+
+export type NormalizedFinding = SectionFinding
 
 export type DatasetSummary = {
   compliant: number
@@ -34,95 +37,117 @@ export type DatasetSummary = {
 }
 
 export type FindingsPresentation = {
-  publishedVisibleFindings: NormalizedFinding[]
-  reviewVisibleFindings: NormalizedFinding[]
-  analysisVisibleFindings: NormalizedFinding[]
-  reportExportFindings: NormalizedFinding[]
+  publishedVisibleFindings: SectionFinding[]
+  reviewVisibleFindings: SectionFinding[]
+  analysisVisibleFindings: SectionFinding[]
+  reportExportFindings: SectionFinding[]
   datasetLabels: Record<DatasetKey, string>
   publishedBlocked: boolean
   publishedBlockers: string[]
   reportMode: 'published' | 'review'
-  reportDatasetLabel: 'Final published findings' | 'Review findings (final publication blocked)'
+  reportDatasetLabel: 'Final published findings' | 'Review findings (used because publication is blocked)'
 }
+
+const FALLBACK_CONTEXT = 'This issue requires additional context before publication.'
 
 const BANNED_PATTERNS = [
   'support_only', 'internal_only', 'candidate_issue', 'provisional_local', 'support_evidence', 'post_reviewer_snapshot',
   'meta_section', 'auditability gate', 'not-assessable', 'not_assessable', 'confirmed_document_gap', 'probable_document_gap',
   'clear_non_compliance', 'duty validation marked', 'filtered by', 'explicit violation validator matched', 'validator token',
-  'no explicit evidence refs from final map',
+  'no explicit evidence refs from final map', 'withheld by final publication validator',
 ]
 
-const ISSUE_TITLES: Record<string, string> = {
-  missing_complaint_right: 'Missing complaint-right disclosure',
-  missing_legal_basis: 'Missing legal basis disclosure',
-  missing_retention_period: 'Missing retention-period disclosure',
-  profiling_disclosure_gap: 'Profiling transparency gap',
-  recipients_disclosure_gap: 'Recipients disclosure gap',
-  purpose_specificity_gap: 'Purpose specificity gap',
-  missing_rights_notice: 'Missing rights-notice disclosure',
-  missing_transfer_notice: 'Missing transfer disclosure',
-  controller_processor_role_ambiguity: 'Role allocation needs clarification',
+const ISSUE_LABELS: Record<string, string> = {
+  legal_basis: 'Legal basis disclosure',
+  rights_notice: 'Data subject rights disclosure',
+  complaint_right: 'Complaint right disclosure',
+  transfers: 'Transfer safeguards disclosure',
+  cookies: 'Cookie transparency disclosure',
+  profiling: 'Profiling transparency',
+  governance: 'Governance and compliance disclosure',
+  contact: 'Contact information disclosure',
+  retention: 'Retention disclosure',
+  recipients: 'Recipients disclosure',
+  purpose: 'Purpose disclosure',
+  role_ambiguity: 'Role allocation disclosure',
+  wording_only: 'Wording clarity issue',
 }
 
-const ISSUE_LABELS: Record<string, string> = {
-  missing_complaint_right: 'Complaint-right disclosure',
-  missing_legal_basis: 'Legal basis disclosure',
-  missing_retention_period: 'Retention disclosure',
-  profiling_disclosure_gap: 'Profiling transparency',
-  recipients_disclosure_gap: 'Recipients disclosure',
-  purpose_specificity_gap: 'Purpose specificity',
-  missing_rights_notice: 'Rights notice disclosure',
-  missing_transfer_notice: 'Transfer disclosure',
-  controller_processor_role_ambiguity: 'Role allocation',
+const ISSUE_ALIASES: Record<string, string> = {
+  missing_legal_basis: 'legal_basis',
+  missing_rights_notice: 'rights_notice',
+  missing_complaint_right: 'complaint_right',
+  missing_transfer_notice: 'transfers',
+  profiling_disclosure_gap: 'profiling',
+  governance_disclosure_gap: 'governance',
+  contact_disclosure_gap: 'contact',
+  cookie_disclosure_gap: 'cookies',
+  missing_retention_period: 'retention',
+  recipients_disclosure_gap: 'recipients',
+  purpose_specificity_gap: 'purpose',
+  controller_processor_role_ambiguity: 'role_ambiguity',
+  role_ambiguity: 'role_ambiguity',
+  wording_only: 'wording_only',
 }
 
 const WHY_TEXT: Record<string, string> = {
-  missing_complaint_right: 'The notice does not explain the right to lodge a complaint with a supervisory authority.',
-  missing_legal_basis: 'The notice describes processing activities but does not state the lawful basis for those activities.',
-  missing_retention_period: 'The notice does not explain how long personal data is kept or the criteria used to decide retention periods.',
-  profiling_disclosure_gap: 'The notice refers to profiling but does not explain the logic, significance, or likely consequences for individuals.',
-  recipients_disclosure_gap: 'The notice does not clearly identify recipient categories for the personal data disclosed in the notice.',
-  purpose_specificity_gap: 'The categories of personal data are described, but the related purpose mapping is not sufficiently explicit.',
-  missing_rights_notice: 'The notice does not clearly explain the data subject rights that apply to this processing.',
-  missing_transfer_notice: 'The notice refers to international transfers but does not explain the safeguard relied upon.',
-  controller_processor_role_ambiguity: 'The notice does not clearly explain when the organisation acts as controller or processor.',
+  legal_basis: 'Missing lawful basis mapping means people cannot understand the legal grounds required under GDPR Articles 13 and 6.',
+  rights_notice: 'Missing rights disclosures prevents data subjects from understanding and exercising rights required by GDPR Articles 13 and 15-22.',
+  complaint_right: 'Missing complaint-right guidance prevents users from understanding supervisory authority recourse required by GDPR Article 13(2)(d).',
+  transfers: 'Missing transfer safeguards disclosure obscures Chapter V protections required when data is sent internationally.',
+  cookies: 'Missing cookie transparency prevents informed notice about cookie processing purposes and legal basis obligations under GDPR transparency duties.',
+  profiling: 'Missing profiling transparency hides decision logic and effects, undermining GDPR Articles 13(2)(f), 14(2)(g), and 22 safeguards.',
+  governance: 'Missing governance and compliance disclosure weakens accountability transparency expected under GDPR Articles 5(2) and 24.',
+  contact: 'Missing contact information prevents data subjects from reaching the controller or DPO as required by GDPR Article 13(1).',
+  retention: 'Missing retention disclosures means users cannot tell how long data is kept, violating GDPR Article 13(2)(a) transparency duties.',
+  recipients: 'Missing recipients disclosures prevents understanding of who receives data under GDPR Article 13(1)(e).',
+  purpose: 'Unclear purpose mapping reduces transparency about why data is processed, conflicting with GDPR Articles 5(1)(b) and 13(1)(c).',
+  role_ambiguity: 'Controller/processor ambiguity prevents users from understanding responsibility allocations required under GDPR accountability rules.',
+  wording_only: 'Ambiguous wording can still mislead users and undermine GDPR transparency even when core sections exist.',
 }
 
 const ACTION_TEXT: Record<string, string> = {
-  missing_complaint_right: 'Add a clear statement that individuals can lodge a complaint with their supervisory authority and include a practical route to do so.',
-  missing_legal_basis: 'Add the lawful basis for each processing purpose and link each basis to the relevant activity.',
-  missing_retention_period: 'Add concrete retention periods or objective retention criteria for each main data category.',
-  profiling_disclosure_gap: 'Add a profiling explanation covering logic used, significance, and likely effects on individuals.',
-  recipients_disclosure_gap: 'Add recipient categories for each purpose, including key third-party categories where relevant.',
-  purpose_specificity_gap: 'Clarify which personal data categories are used for each purpose so the mapping is explicit.',
-  missing_rights_notice: 'Add a rights section that lists access, rectification, erasure, restriction, portability, objection, and withdrawal rights where applicable.',
-  missing_transfer_notice: 'Add transfer details, destination context, and safeguard mechanism (for example SCCs) with a short explanation.',
-  controller_processor_role_ambiguity: 'Clarify controller and processor roles per processing context and align the notice language with that allocation.',
+  legal_basis: 'Add explicit lawful basis statements for each processing purpose.',
+  rights_notice: 'Add a complete rights section with access, rectification, erasure, objection, portability, and complaint routes.',
+  complaint_right: 'Add a clear supervisory authority complaint-right statement and practical submission instructions.',
+  transfers: 'Add transfer destinations and safeguard mechanisms (for example SCCs) with a concise explanation.',
+  cookies: 'Add cookie categories, purposes, legal basis, and user controls.',
+  profiling: 'Add profiling logic, significance, and likely consequences for affected individuals.',
+  governance: 'Add governance accountability information including compliance ownership and review cadence.',
+  contact: 'Add controller contact details and DPO contact details where applicable.',
+  retention: 'Add retention periods or objective retention criteria by data category.',
+  recipients: 'Add clear recipient categories and third-party sharing details.',
+  purpose: 'Add explicit mapping between personal data categories and processing purposes.',
+  role_ambiguity: 'Clarify controller versus processor role by processing context.',
+  wording_only: 'Revise language for plain, specific, unambiguous disclosures.',
 }
 
 function sanitizeUserFacingText(value?: string | null): string {
   let text = (value ?? '').trim()
   if (!text) return ''
+
   text = text
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+    .replace(/\b[a-z0-9_]+_without_[a-z0-9_]+\b/gi, ' ')
+    .replace(/withheld by final publication validator/gi, ' ')
+    .replace(/Section\s*\(\s*\)\.?/gi, ' ')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi, ' ')
     .replace(/\b(?:evi|section|evidence|chunk)_id\s*[:=]\s*[a-z0-9:_-]+/gi, ' ')
     .replace(/\b[a-z]+:[a-z0-9:_-]{10,}\b/gi, ' ')
     .replace(/\{\s*\}|\[\s*\]/g, ' ')
-    .replace(/filtered by\s*\([^)]*\)/gi, ' ')
-    .replace(/\bby\s+\./gi, ' ')
 
   for (const pattern of BANNED_PATTERNS) {
     text = text.replace(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ')
   }
 
-  text = text
-    .replace(/Observation:\s*/gi, '')
-    .replace(/substantive disclosure signal detected\.?/gi, 'The notice text suggests disclosure is present.')
-    .replace(/\s+/g, ' ')
-    .trim()
-
+  text = text.replace(/Observation:\s*/gi, '').replace(/\s+/g, ' ').trim()
   if (/^(n\/?a|null|none|undefined|-|\[\])$/i.test(text)) return ''
   return text
+}
+
+function sanitizeOrFallback(value?: string | null): string {
+  const sanitized = sanitizeUserFacingText(value)
+  return sanitized || FALLBACK_CONTEXT
 }
 
 function mapStatus(value?: string | null): UserStatus {
@@ -133,183 +158,211 @@ function mapStatus(value?: string | null): UserStatus {
   return 'Not applicable'
 }
 
-function mapSeverity(issue: string | null, severity?: string | null): UserSeverity {
-  const i = (issue ?? '').toLowerCase()
-  if (/(legal_basis|complaint|rights|transfer|profil)/.test(i)) return 'High'
-  if (/(retention|recipient|purpose|role)/.test(i)) return 'Medium'
-  const base = (severity ?? '').toLowerCase()
+function canonicalIssueKey(value?: string | null): string {
+  const normalized = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+  return ISSUE_ALIASES[normalized] ?? normalized
+}
+
+function issueLabel(issue: string): string {
+  return ISSUE_LABELS[issue] ?? 'Compliance disclosure issue'
+}
+
+function whyText(issue: string, fallback?: string | null): string {
+  return sanitizeOrFallback(WHY_TEXT[issue] ?? fallback)
+}
+
+function actionText(issue: string, fallback?: string | null): string {
+  return sanitizeOrFallback(ACTION_TEXT[issue] ?? fallback)
+}
+
+function mapSeverity(issue: string, raw?: string | null): UserSeverity {
+  if (['legal_basis', 'rights_notice', 'complaint_right', 'transfers', 'profiling'].includes(issue)) return 'High'
+  if (['retention', 'recipients', 'purpose', 'role_ambiguity'].includes(issue)) return 'Medium'
+  if (issue === 'wording_only') return 'Low'
+
+  const base = (raw ?? '').toLowerCase()
   if (base === 'high') return 'High'
   if (base === 'medium') return 'Medium'
   return 'Low'
 }
 
-function issueTitle(issue: string | null): string {
-  const normalized = (issue ?? '').trim().toLowerCase()
-  if (ISSUE_TITLES[normalized]) return ISSUE_TITLES[normalized]
-  return 'GDPR transparency disclosure issue'
-}
-
-function issueLabel(issue: string | null): string {
-  const normalized = (issue ?? '').trim().toLowerCase()
-  if (ISSUE_LABELS[normalized]) return ISSUE_LABELS[normalized]
-  return 'Transparency disclosure'
-}
-
-function whyText(issue: string | null, fallback?: string | null): string {
-  const normalized = (issue ?? '').trim().toLowerCase()
-  return sanitizeUserFacingText(WHY_TEXT[normalized]) || sanitizeUserFacingText(fallback) || 'The notice does not clearly disclose this GDPR transparency requirement.'
-}
-
-function actionText(issue: string | null, fallback?: string | null): string {
-  const normalized = (issue ?? '').trim().toLowerCase()
-  return sanitizeUserFacingText(ACTION_TEXT[normalized]) || sanitizeUserFacingText(fallback) || 'Update the notice with precise GDPR-required disclosure language for this issue.'
-}
-
-function scopeInfo(sectionId: string, sectionsById: Record<string, SectionOut>) {
-  if (sectionId.startsWith('systemic:')) {
-    const issue = sectionId.split('systemic:')[1] ?? ''
-    return { scope_type: 'document' as const, scope_label: 'Document-wide finding', section_key: sectionId, issue, section_title: null }
-  }
+function sectionTitleFor(sectionId: string, sectionsById: Record<string, SectionOut>): string | null {
+  if (sectionId.startsWith('systemic:')) return 'Document-wide finding'
   const section = sectionsById[sectionId]
-  if (!section?.section_title) return null
+  if (!section?.section_title?.trim()) return null
+  const title = sanitizeUserFacingText(section.section_title)
+  if (!title) return null
+  return `Section ${section.section_order}: ${title}`
+}
+
+function evidenceText(sectionTitle: string, excerpt?: string | null, issue?: string): string {
+  const sanitized = sanitizeUserFacingText(excerpt)
+  if (sanitized) return `${sectionTitle}: "${sanitized}"`
+  return `Confirmed after review of the full document: no disclosure of ${(issueLabel(issue ?? 'compliance_issue')).toLowerCase()} was identified.`
+}
+
+function hasInternalText(value: string): boolean {
+  const normalized = value.toLowerCase()
+  if (/\{\s*\}|\[\s*\]|\[.*\]|\(.*\)|\b[a-z0-9_]+_without_[a-z0-9_]+\b/.test(normalized)) return true
+  return BANNED_PATTERNS.some((pattern) => normalized.includes(pattern))
+}
+
+function severityRank(severity: UserSeverity): number {
+  if (severity === 'High') return 3
+  if (severity === 'Medium') return 2
+  return 1
+}
+
+function statusRank(status: UserStatus): number {
+  if (status === 'Non-compliant') return 4
+  if (status === 'Partially compliant') return 3
+  if (status === 'Not applicable') return 2
+  return 1
+}
+
+function buildIssue(params: {
+  issueKeyRaw?: string | null
+  statusRaw?: string | null
+  severityRaw?: string | null
+  gapNote?: string | null
+  remediationNote?: string | null
+  excerpt?: string | null
+  sectionTitle: string
+  legalAnchors?: string[] | null
+}): Issue {
+  const issueKey = canonicalIssueKey(params.issueKeyRaw)
   return {
-    scope_type: 'section' as const,
-    scope_label: 'Section finding',
-    section_key: sectionId,
-    issue: null,
-    section_title: `Section ${section.section_order}: ${sanitizeUserFacingText(section.section_title)}`,
+    issueKey,
+    issueLabel: issueLabel(issueKey),
+    status: mapStatus(params.statusRaw),
+    severity: mapSeverity(issueKey, params.severityRaw),
+    whyThisMatters: whyText(issueKey, params.gapNote),
+    recommendedAction: actionText(issueKey, params.remediationNote),
+    evidenceText: sanitizeOrFallback(evidenceText(params.sectionTitle, params.excerpt, issueKey)),
+    legalAnchors: (params.legalAnchors ?? []).map((x) => sanitizeUserFacingText(x)).filter(Boolean),
   }
 }
 
-function rowTitle(scopeType: 'section' | 'document', sectionTitle: string | null, issue: string | null): string {
-  return scopeType === 'section' ? (sectionTitle ?? 'Document section') : issueTitle(issue)
+function normalizePublished(rows: FindingOut[], sectionsById: Record<string, SectionOut>): SectionFinding[] {
+  return rows.flatMap((row) => {
+    const visibilityToken = `${row.classification ?? ''} ${row.publish_flag ?? ''} ${row.finding_type ?? ''}`.toLowerCase()
+    if (/(support_only|internal_only|diagnostic_internal_only)/.test(visibilityToken)) return []
+    const sectionTitle = sectionTitleFor(row.section_id, sectionsById)
+    if (!sectionTitle) return []
+    return [{
+      stable_ui_id: `published:${row.id}`,
+      sectionId: row.section_id,
+      sectionTitle,
+      overallStatus: mapStatus(row.status),
+      severity: 'Low' as UserSeverity,
+      issues: [
+        buildIssue({
+          issueKeyRaw: row.issue_key ?? row.section_id.split('systemic:')[1],
+          statusRaw: row.status,
+          severityRaw: row.severity,
+          gapNote: row.gap_note,
+          remediationNote: row.remediation_note,
+          excerpt: row.citations?.[0]?.excerpt ?? row.citation_summary_text,
+          sectionTitle,
+          legalAnchors: row.primary_legal_anchor ?? [],
+        }),
+      ],
+      sourceMode: 'published',
+    }]
+  })
 }
 
-function evidenceText(sectionTitle: string | null, excerpt: string, issue: string | null): { mode: 'excerpt' | 'full_document_absence'; text: string } {
-  const e = sanitizeUserFacingText(excerpt)
-  if (e) return { mode: 'excerpt', text: `${sectionTitle ?? 'Section'}: "${e}"` }
-  return {
-    mode: 'full_document_absence',
-    text: `Confirmed after review of the full document: no disclosure of ${issueLabel(issue).toLowerCase()} was identified.`,
+function normalizeReview(rows: ReviewItemOut[], sectionsById: Record<string, SectionOut>): SectionFinding[] {
+  return rows.flatMap((row) => {
+    if (row.item_kind === 'review_block' || row.section_id.startsWith('ledger:') || row.section_id.startsWith('review:')) return []
+    const sectionTitle = sectionTitleFor(row.section_id, sectionsById)
+    if (!sectionTitle) return []
+    return [{
+      stable_ui_id: `review:${row.id}`,
+      sectionId: row.section_id,
+      sectionTitle,
+      overallStatus: mapStatus(row.status ?? row.final_disposition),
+      severity: 'Low' as UserSeverity,
+      issues: [
+        buildIssue({
+          issueKeyRaw: row.issue_type,
+          statusRaw: row.status ?? row.final_disposition,
+          gapNote: row.gap_note ?? row.reason,
+          remediationNote: row.remediation_note,
+          excerpt: row.reason ?? row.gap_note,
+          sectionTitle,
+        }),
+      ],
+      sourceMode: 'review',
+    }]
+  })
+}
+
+function normalizeAnalysis(rows: AnalysisItemOut[], sectionsById: Record<string, SectionOut>): SectionFinding[] {
+  return rows.flatMap((row) => {
+    if (/(support_evidence|meta_section|internal)/i.test(`${row.analysis_type} ${row.artifact_role ?? ''} ${row.section_id}`)) return []
+    if (row.section_id.startsWith('ledger:')) return []
+    const sectionTitle = sectionTitleFor(row.section_id, sectionsById)
+    if (!sectionTitle) return []
+    return [{
+      stable_ui_id: `analysis:${row.id}`,
+      sectionId: row.section_id,
+      sectionTitle,
+      overallStatus: mapStatus(row.status_candidate),
+      severity: 'Low' as UserSeverity,
+      issues: [
+        buildIssue({
+          issueKeyRaw: row.issue_type,
+          statusRaw: row.status_candidate,
+          gapNote: row.gap_note,
+          remediationNote: row.remediation_note,
+          excerpt: row.citations?.[0]?.excerpt ?? row.gap_note,
+          sectionTitle,
+        }),
+      ],
+      sourceMode: 'analysis',
+    }]
+  })
+}
+
+function collapseToSectionRows(rows: SectionFinding[]): SectionFinding[] {
+  const map = new Map<string, SectionFinding>()
+  for (const row of rows) {
+    const key = `${row.sourceMode}:${row.sectionId}`
+    const existing = map.get(key)
+    if (!existing) {
+      map.set(key, { ...row })
+      continue
+    }
+    const seen = new Set(existing.issues.map((x) => x.issueKey))
+    for (const issue of row.issues) {
+      if (!seen.has(issue.issueKey)) {
+        existing.issues.push(issue)
+        seen.add(issue.issueKey)
+      }
+    }
   }
+
+  return Array.from(map.values())
+    .map((row) => {
+      const issues = [...row.issues].sort((a, b) => a.issueLabel.localeCompare(b.issueLabel))
+      const overallStatus = issues.reduce((worst, issue) => (statusRank(issue.status) > statusRank(worst) ? issue.status : worst), 'Compliant' as UserStatus)
+      const severity = issues.reduce((worst, issue) => (severityRank(issue.severity) > severityRank(worst) ? issue.severity : worst), 'Low' as UserSeverity)
+      return {
+        ...row,
+        stable_ui_id: `${row.sourceMode}:${row.sectionId}`,
+        issues,
+        overallStatus,
+        severity,
+      }
+    })
+    .sort((a, b) => a.sectionTitle.localeCompare(b.sectionTitle))
 }
 
-function hasHumanEvidence(finding: NormalizedFinding): boolean {
-  const text = sanitizeUserFacingText(finding.evidence_text)
-  if (!text) return false
-  return /^Section .*: ".+"$/.test(text) || /^Confirmed after review of the full document: no disclosure of .+ was identified\.$/.test(text)
-}
-
-function passesSanitizer(finding: NormalizedFinding): boolean {
-  const blob = [
-    finding.title,
-    finding.issue_label,
-    finding.why_this_matters,
-    finding.recommended_action,
-    finding.evidence_text,
-    ...finding.legal_anchors,
-    ...finding.details,
-  ].join(' ').toLowerCase()
-
-  if (!blob.trim()) return false
-  if (/\{\s*\}|\[\s*\]|filtered by\s*\([^)]*\)|\bby\s+\./.test(blob)) return false
-  if (/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i.test(blob)) return false
-  if (/\b(?:section|evidence|chunk)_id\b/.test(blob)) return false
-  return !BANNED_PATTERNS.some((term) => blob.includes(term.toLowerCase()))
-}
-
-function finalizeFinding(finding: NormalizedFinding): NormalizedFinding | null {
-  if (!hasHumanEvidence(finding)) return null
-  if (!passesSanitizer(finding)) return null
-  if (!finding.title || finding.title === 'GDPR transparency disclosure gap' || finding.title === 'Compliance finding requiring review') return null
-  return finding
-}
-
-function normalizePublished(row: FindingOut, sectionsById: Record<string, SectionOut>): NormalizedFinding | null {
-  const visibilityToken = `${row.classification ?? ''} ${row.publish_flag ?? ''} ${row.finding_type ?? ''}`.toLowerCase()
-  if (/(support_only|internal_only|diagnostic_internal_only)/.test(visibilityToken)) return null
-  const scope = scopeInfo(row.section_id, sectionsById)
-  if (!scope) return null
-  const issue = row.issue_key ?? scope.issue
-  const evidence = evidenceText(scope.scope_type === 'section' ? scope.section_title : 'Section', row.citations?.[0]?.excerpt ?? row.citation_summary_text ?? '', issue)
-  return finalizeFinding({
-    stable_ui_id: `published:${row.id}`,
-    title: rowTitle(scope.scope_type, scope.section_title, issue),
-    issue_label: issueLabel(issue),
-    scope_type: scope.scope_type,
-    scope_label: scope.scope_label,
-    section_title: scope.scope_type === 'section' ? scope.section_title : null,
-    status: mapStatus(row.status),
-    severity: mapSeverity(issue, row.severity),
-    why_this_matters: whyText(issue, row.gap_note),
-    recommended_action: actionText(issue, row.remediation_note),
-    legal_anchors: (row.primary_legal_anchor ?? []).map((a) => sanitizeUserFacingText(a)).filter(Boolean),
-    evidence_mode: evidence.mode,
-    evidence_text: evidence.text,
-    visible: true,
-    source_mode: 'published',
-    section_key: scope.section_key,
-    details: [],
-  })
-}
-
-function normalizeReview(row: ReviewItemOut, sectionsById: Record<string, SectionOut>): NormalizedFinding | null {
-  if (row.item_kind === 'review_block' || row.section_id.startsWith('ledger:') || row.section_id.startsWith('review:')) return null
-  const scope = scopeInfo(row.section_id, sectionsById)
-  if (!scope) return null
-  const issue = row.issue_type ?? scope.issue
-  const evidence = evidenceText(scope.scope_type === 'section' ? scope.section_title : 'Section', row.reason ?? row.gap_note ?? '', issue)
-  return finalizeFinding({
-    stable_ui_id: `review:${row.id}`,
-    title: rowTitle(scope.scope_type, scope.section_title, issue),
-    issue_label: issueLabel(issue),
-    scope_type: scope.scope_type,
-    scope_label: scope.scope_label,
-    section_title: scope.scope_type === 'section' ? scope.section_title : null,
-    status: mapStatus(row.status ?? row.final_disposition),
-    severity: mapSeverity(issue, null),
-    why_this_matters: whyText(issue, row.gap_note ?? row.reason),
-    recommended_action: actionText(issue, row.remediation_note),
-    legal_anchors: [],
-    evidence_mode: evidence.mode,
-    evidence_text: evidence.text,
-    visible: true,
-    source_mode: 'review',
-    section_key: scope.section_key,
-    details: [],
-  })
-}
-
-function normalizeAnalysis(row: AnalysisItemOut, sectionsById: Record<string, SectionOut>): NormalizedFinding | null {
-  if (/(support_evidence|meta_section|internal)/i.test(`${row.analysis_type} ${row.artifact_role ?? ''} ${row.section_id}`)) return null
-  if (row.section_id.startsWith('ledger:')) return null
-  const scope = scopeInfo(row.section_id, sectionsById)
-  if (!scope) return null
-  const issue = row.issue_type ?? scope.issue
-  const evidence = evidenceText(scope.scope_type === 'section' ? scope.section_title : 'Section', row.citations?.[0]?.excerpt ?? row.gap_note ?? '', issue)
-  return finalizeFinding({
-    stable_ui_id: `analysis:${row.id}`,
-    title: rowTitle(scope.scope_type, scope.section_title, issue),
-    issue_label: issueLabel(issue),
-    scope_type: scope.scope_type,
-    scope_label: scope.scope_label,
-    section_title: scope.scope_type === 'section' ? scope.section_title : null,
-    status: mapStatus(row.status_candidate),
-    severity: mapSeverity(issue, null),
-    why_this_matters: whyText(issue, row.gap_note),
-    recommended_action: actionText(issue, row.remediation_note),
-    legal_anchors: [],
-    evidence_mode: evidence.mode,
-    evidence_text: evidence.text,
-    visible: true,
-    source_mode: 'analysis',
-    section_key: scope.section_key,
-    details: [],
-  })
-}
-
-function sortFindings(rows: NormalizedFinding[]): NormalizedFinding[] {
-  return [...rows].sort((a, b) => `${a.title}|${a.issue_label}`.localeCompare(`${b.title}|${b.issue_label}`))
+function computeBlockedReviewRows(reviewRows: ReviewItemOut[]): string[] {
+  return reviewRows
+    .filter((r) => r.item_kind === 'review_block' && mapStatus(r.final_disposition) !== 'Compliant')
+    .map((r) => sanitizeOrFallback(r.reason))
 }
 
 export function buildFindingsPresentation(params: {
@@ -319,18 +372,16 @@ export function buildFindingsPresentation(params: {
   sectionsById: Record<string, SectionOut>
   publishedBlocked: boolean
 }): FindingsPresentation {
-  const blockers = params.reviewRows
-    .filter((r) => r.item_kind === 'review_block' && mapStatus(r.final_disposition) !== 'Compliant')
-    .map((r) => sanitizeUserFacingText(r.reason) || 'Some findings still require review before final publication.')
+  const publishedVisibleFindings = params.publishedBlocked
+    ? []
+    : collapseToSectionRows(normalizePublished(params.publishedRows, params.sectionsById))
 
-  const computedPublished = sortFindings(params.publishedRows.map((r) => normalizePublished(r, params.sectionsById)).filter(Boolean) as NormalizedFinding[])
-  const reviewVisibleFindings = sortFindings(params.reviewRows.map((r) => normalizeReview(r, params.sectionsById)).filter(Boolean) as NormalizedFinding[])
-  const analysisVisibleFindings = sortFindings(params.analysisRows.map((r) => normalizeAnalysis(r, params.sectionsById)).filter(Boolean) as NormalizedFinding[])
-  const publishedVisibleFindings = params.publishedBlocked ? [] : computedPublished
+  const reviewVisibleFindings = collapseToSectionRows(normalizeReview(params.reviewRows, params.sectionsById))
+  const analysisVisibleFindings = collapseToSectionRows(normalizeAnalysis(params.analysisRows, params.sectionsById))
 
   const reportMode: 'published' | 'review' = params.publishedBlocked ? 'review' : 'published'
   const reportExportFindings = reportMode === 'published' ? publishedVisibleFindings : reviewVisibleFindings
-  const reportDatasetLabel = reportMode === 'published' ? 'Final published findings' : 'Review findings (final publication blocked)'
+  const reportDatasetLabel = reportMode === 'published' ? 'Final published findings' : 'Review findings (used because publication is blocked)'
 
   return {
     publishedVisibleFindings,
@@ -344,18 +395,18 @@ export function buildFindingsPresentation(params: {
       reportExportFindings: reportDatasetLabel,
     },
     publishedBlocked: params.publishedBlocked,
-    publishedBlockers: blockers,
+    publishedBlockers: computeBlockedReviewRows(params.reviewRows),
     reportMode,
     reportDatasetLabel,
   }
 }
 
-export function aggregateCounts(rows: NormalizedFinding[]): DatasetSummary {
+export function aggregateCounts(rows: SectionFinding[]): DatasetSummary {
   const out: DatasetSummary = { compliant: 0, partially_compliant: 0, non_compliant: 0, not_applicable: 0, total: rows.length }
   for (const row of rows) {
-    if (row.status === 'Compliant') out.compliant += 1
-    else if (row.status === 'Partially compliant') out.partially_compliant += 1
-    else if (row.status === 'Non-compliant') out.non_compliant += 1
+    if (row.overallStatus === 'Compliant') out.compliant += 1
+    else if (row.overallStatus === 'Partially compliant') out.partially_compliant += 1
+    else if (row.overallStatus === 'Non-compliant') out.non_compliant += 1
     else out.not_applicable += 1
   }
   return out
@@ -363,34 +414,76 @@ export function aggregateCounts(rows: NormalizedFinding[]): DatasetSummary {
 
 export function validateReportExportReadiness(
   presentation: FindingsPresentation,
-  pdfMeta?: { pdfRenderedFindingsCount: number; pdfDatasetLabel: string },
+  pdfMeta?: { pdfRenderedFindingsCount: number; pdfDatasetLabel: string; pdfRows?: SectionFinding[] },
 ): { ok: boolean; errors: string[] } {
-  const errors: string[] = []
-  const rows = presentation.reportExportFindings
-  for (const row of rows) {
-    if (!hasHumanEvidence(row)) errors.push(`Missing evidence for ${row.title} / ${row.issue_label}`)
-    if (!passesSanitizer(row)) errors.push(`Unsanitized text remains in ${row.title} / ${row.issue_label}`)
-    if (!['High', 'Medium', 'Low'].includes(row.severity)) errors.push(`Invalid severity for ${row.title} / ${row.issue_label}`)
-  }
-
-  const pdfRenderedFindingsCount = pdfMeta?.pdfRenderedFindingsCount ?? rows.length
-  const pdfDatasetLabel = pdfMeta?.pdfDatasetLabel ?? presentation.reportDatasetLabel
-  if (rows.length !== pdfRenderedFindingsCount) errors.push('Report Center and PDF finding counts diverge')
-  if (presentation.reportDatasetLabel !== pdfDatasetLabel) errors.push('Report Center and PDF dataset labels diverge')
-  if (rows.length > 0 && pdfRenderedFindingsCount === 0) errors.push('Report Center has findings but PDF would export zero findings')
-
+  const errors = validatePresentationInvariants(presentation, pdfMeta)
   return { ok: errors.length === 0, errors }
 }
 
-export function buildReviewSummary(findings: NormalizedFinding[]): string | null {
-  const nonCompliant = findings.filter((f) => f.status === 'Non-compliant' || f.status === 'Partially compliant')
-  if (nonCompliant.length === 0) return null
-  const uniqueLabels = Array.from(new Set(nonCompliant.map((f) => f.issue_label))).slice(0, 4)
+export function validatePresentationInvariants(
+  presentation: FindingsPresentation,
+  pdfMeta?: { pdfRenderedFindingsCount: number; pdfDatasetLabel: string; pdfRows?: SectionFinding[] },
+): string[] {
+  const errors: string[] = []
+
+  const reportCounts = aggregateCounts(presentation.reportExportFindings)
+  const reportCountSum = reportCounts.compliant + reportCounts.partially_compliant + reportCounts.non_compliant + reportCounts.not_applicable
+  if (reportCountSum !== presentation.reportExportFindings.length) errors.push('Report counts must equal report dataset length')
+
+  if (presentation.publishedBlocked && JSON.stringify(presentation.reportExportFindings) !== JSON.stringify(presentation.reviewVisibleFindings)) {
+    errors.push('Report dataset must equal review dataset when publication is blocked')
+  }
+
+  const pdfCount = pdfMeta?.pdfRenderedFindingsCount ?? presentation.reportExportFindings.length
+  const pdfLabel = pdfMeta?.pdfDatasetLabel ?? presentation.reportDatasetLabel
+  const pdfRows = pdfMeta?.pdfRows ?? presentation.reportExportFindings
+
+  if (pdfCount !== presentation.reportExportFindings.length) errors.push('PDF dataset must equal reportExportFindings count')
+  if (pdfLabel !== presentation.reportDatasetLabel) errors.push('PDF dataset label must equal Report Center label')
+  if (JSON.stringify(pdfRows) !== JSON.stringify(presentation.reportExportFindings)) errors.push('PDF dataset must equal reportExportFindings')
+
+  const datasets: Array<[string, SectionFinding[]]> = [
+    ['publishedVisibleFindings', presentation.publishedVisibleFindings],
+    ['reviewVisibleFindings', presentation.reviewVisibleFindings],
+    ['analysisVisibleFindings', presentation.analysisVisibleFindings],
+    ['reportExportFindings', presentation.reportExportFindings],
+  ]
+
+  for (const [name, rows] of datasets) {
+    const keys = new Set<string>()
+    for (const row of rows) {
+      const dedupeKey = `${row.sourceMode}:${row.sectionId}`
+      if (keys.has(dedupeKey)) errors.push(`Duplicate section rows detected in ${name}`)
+      keys.add(dedupeKey)
+
+      if (!sanitizeUserFacingText(row.sectionTitle)) errors.push(`Missing valid sectionTitle in ${name}`)
+      if (!row.issues.length) errors.push(`Missing issues in ${name} for section ${row.sectionId}`)
+
+      for (const issue of row.issues) {
+        if (!sanitizeUserFacingText(issue.whyThisMatters)) errors.push(`Missing Why this matters in ${name} for section ${row.sectionId}`)
+        if (hasInternalText(issue.whyThisMatters) || hasInternalText(issue.evidenceText) || hasInternalText(issue.recommendedAction)) {
+          errors.push(`Unsanitized content in ${name} for section ${row.sectionId}`)
+        }
+      }
+    }
+  }
+
+  if (presentation.reportExportFindings.length === 0 && (presentation.reviewVisibleFindings.length > 0 || presentation.publishedVisibleFindings.length > 0)) {
+    errors.push('Report dataset empty while UI has findings')
+  }
+
+  return errors
+}
+
+export function buildReviewSummary(findings: SectionFinding[]): string | null {
+  const issues = findings
+    .filter((f) => f.overallStatus === 'Non-compliant' || f.overallStatus === 'Partially compliant')
+    .flatMap((f) => f.issues.map((i) => i.issueLabel))
+  if (!issues.length) return null
+  const uniqueLabels = Array.from(new Set(issues)).slice(0, 4)
   return `Review identified likely issues with ${uniqueLabels.join(', ').toLowerCase()}.`
 }
 
 export function containsBannedUserText(value: string): boolean {
-  const normalized = value.toLowerCase()
-  if (/\{\s*\}|\[\s*\]|filtered by\s*\([^)]*\)|\bby\s+\./.test(normalized)) return true
-  return BANNED_PATTERNS.some((term) => normalized.includes(term))
+  return hasInternalText(value)
 }

@@ -43,7 +43,7 @@ export function FindingsPage() {
         setPublishedError(null)
       } else {
         setFindings([])
-        setPublishedError('Final published findings are not yet available because some findings still require review.')
+        setPublishedError('Final findings are not available yet because review is still in progress.')
       }
       setReviewItems(r.status === 'fulfilled' ? r.value : [])
       setAnalysisItems(a.status === 'fulfilled' ? a.value : [])
@@ -72,6 +72,8 @@ export function FindingsPage() {
     : viewMode === 'review'
       ? presentation.reviewVisibleFindings
       : presentation.analysisVisibleFindings
+
+  const isPublishedBlockedView = viewMode === 'published' && presentation.publishedBlocked
   const counts = aggregateCounts(activeRows)
   const reviewSummary = buildReviewSummary(presentation.reviewVisibleFindings)
 
@@ -103,14 +105,14 @@ export function FindingsPage() {
           </div>
           <p className="mt-3 text-xs text-slate-600">
             {viewMode === 'published' && (presentation.publishedBlocked
-              ? 'Final published findings are not yet available because some findings still require review.'
+              ? 'Final findings are not available yet because review is still in progress.'
               : `Using dataset: ${presentation.datasetLabels.publishedVisibleFindings}.`)}
             {viewMode === 'review' && `Using dataset: ${presentation.datasetLabels.reviewVisibleFindings}.`}
             {viewMode === 'analysis' && `Using dataset: ${presentation.datasetLabels.analysisVisibleFindings}.`}
           </p>
           {presentation.publishedBlocked && viewMode === 'published' && (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Final published findings are not yet available because some findings still require review.
+              Final findings are not available yet because review is still in progress.
             </div>
           )}
           {viewMode === 'review' && reviewSummary && (
@@ -118,40 +120,44 @@ export function FindingsPage() {
               {reviewSummary}
             </div>
           )}
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-            {[
-              ['Compliant', counts.compliant],
-              ['Partially compliant', counts.partially_compliant],
-              ['Non-compliant', counts.non_compliant],
-              ['Not applicable', counts.not_applicable],
-              ['Total', counts.total],
-            ].map(([label, value]) => (
-              <article key={String(label)} className={`metric-card ${countChipClass(String(label))}`}><div className="text-xs">{label}</div><div className="text-xl font-semibold">{value}</div></article>
-            ))}
-          </div>
+          {!isPublishedBlockedView && (
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+              {[
+                ['Compliant', counts.compliant],
+                ['Partially compliant', counts.partially_compliant],
+                ['Non-compliant', counts.non_compliant],
+                ['Not applicable', counts.not_applicable],
+                ['Total', counts.total],
+              ].map(([label, value]) => (
+                <article key={String(label)} className={`metric-card ${countChipClass(String(label))}`}><div className="text-xs">{label}</div><div className="text-xl font-semibold">{value}</div></article>
+              ))}
+            </div>
+          )}
         </header>
 
-        <div className="surface-card overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-100/80 text-left text-xs uppercase tracking-wide text-slate-500">
-              <tr><th className="px-4 py-3">Title</th><th className="px-4 py-3">Issue</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Severity</th></tr>
-            </thead>
-            <tbody>
-              {activeRows.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No findings in this dataset.</td></tr> : activeRows.map((finding) => (
-                <tr key={finding.stable_ui_id} onClick={() => setSelectedByView((c) => ({ ...c, [viewMode]: finding.stable_ui_id }))} className={`cursor-pointer border-t ${selected?.stable_ui_id === finding.stable_ui_id ? 'bg-sky-50/80' : 'bg-white'}`}>
-                  <td className="px-4 py-3">{finding.title}</td>
-                  <td className="px-4 py-3">{finding.issue_label}</td>
-                  <td className="px-4 py-3"><StatusBadge status={finding.status.toLowerCase()} /></td>
-                  <td className="px-4 py-3">{finding.severity}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        {!isPublishedBlockedView && (
+          <div className="surface-card overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-100/80 text-left text-xs uppercase tracking-wide text-slate-500">
+                <tr><th className="px-4 py-3">Section</th><th className="px-4 py-3">Issues</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Severity</th></tr>
+              </thead>
+              <tbody>
+                {activeRows.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No findings in this dataset.</td></tr> : activeRows.map((finding) => (
+                  <tr key={finding.stable_ui_id} onClick={() => setSelectedByView((c) => ({ ...c, [viewMode]: finding.stable_ui_id }))} className={`cursor-pointer border-t ${selected?.stable_ui_id === finding.stable_ui_id ? 'bg-sky-50/80' : 'bg-white'}`}>
+                    <td className="px-4 py-3">{finding.sectionTitle}</td>
+                    <td className="px-4 py-3">{finding.issues.map((x) => x.issueLabel).join(', ')}</td>
+                    <td className="px-4 py-3"><StatusBadge status={finding.overallStatus.toLowerCase()} /></td>
+                    <td className="px-4 py-3">{finding.severity}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <aside className="surface-card sticky top-24 h-fit p-5">
-        {!selected ? <p className="text-sm text-slate-600">Select a finding to view details.</p> : <FindingDetail finding={selected} />}
+        {!selected || isPublishedBlockedView ? <p className="text-sm text-slate-600">Select a finding to view details.</p> : <FindingDetail finding={selected} />}
       </aside>
     </section>
   )
@@ -159,16 +165,19 @@ export function FindingsPage() {
 
 function FindingDetail({ finding }: { finding: NormalizedFinding }) {
   return <div className="space-y-3">
-    <h2 className="text-lg font-semibold text-slate-900">{finding.title}</h2>
-    <div className="flex gap-2"><StatusBadge status={finding.status.toLowerCase()} /><span className="rounded-full border px-2.5 py-1 text-xs">Severity {finding.severity}</span></div>
-    <Detail label="Dataset" value={finding.source_mode === 'published' ? 'Final published findings' : finding.source_mode === 'review' ? 'Review findings' : 'Analysis findings'} />
-    <Detail label="Scope" value={finding.section_title ?? finding.scope_label} />
-    <Detail label="Issue" value={finding.issue_label} />
-    <Detail label="Why this matters" value={finding.why_this_matters} />
-    <Detail label="Recommended action" value={finding.recommended_action} />
-    {!!finding.legal_anchors.length && <Detail label="Legal anchors" value={finding.legal_anchors.join(', ')} />}
-    <Detail label="Evidence" value={finding.evidence_text} />
-    {!!finding.details.length && <Detail label="Additional merged details" value={finding.details.join('\n')} />}
+    <h2 className="text-lg font-semibold text-slate-900">{finding.sectionTitle}</h2>
+    <div className="flex gap-2"><StatusBadge status={finding.overallStatus.toLowerCase()} /><span className="rounded-full border px-2.5 py-1 text-xs">Severity {finding.severity}</span></div>
+    <Detail label="Dataset" value={finding.sourceMode === 'published' ? 'Final published findings' : finding.sourceMode === 'review' ? 'Review findings' : 'Analysis findings'} />
+    <Detail label="Section" value={finding.sectionTitle} />
+    {finding.issues.map((issue) => (
+      <div key={`${finding.stable_ui_id}:${issue.issueKey}`} className="rounded-lg border border-slate-200 p-3">
+        <Detail label="Issue" value={issue.issueLabel} />
+        <Detail label="Why this matters" value={issue.whyThisMatters} />
+        <Detail label="Recommended action" value={issue.recommendedAction} />
+        {!!issue.legalAnchors.length && <Detail label="Legal anchors" value={issue.legalAnchors.join(', ')} />}
+        <Detail label="Evidence" value={issue.evidenceText} />
+      </div>
+    ))}
   </div>
 }
 

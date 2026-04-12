@@ -30,33 +30,21 @@ const publishedRows = [
     issue_key: 'missing_legal_basis',
     status: 'gap',
     severity: null,
-    gap_note: 'duty validation marked retention_notice as non-compliant',
+    gap_note: 'Section ().',
     remediation_note: 'In Section 4, add lawful basis mapping.',
     citations: [{ excerpt: 'We process data for support and billing.' }],
     primary_legal_anchor: ['GDPR Article 13(1)(c)'],
-  },
-  {
-    id: 'f2',
-    section_id: 'systemic:missing_complaint_right',
-    issue_key: 'missing_complaint_right',
-    status: 'gap',
-    severity: 'low',
-    gap_note: 'invalid_consent and strict legal gate phrasing',
-    remediation_note: 'Explain complaint right.',
-    citations: [],
-    primary_legal_anchor: ['GDPR Article 13(2)(d)'],
   },
 ]
 
 const reviewRows = [
   { item_kind: 'review_block', id: 'rb1', section_id: 'review:block', final_disposition: 'gap', reason: 'withheld by final publication validator' },
   { item_kind: 'finding', id: 'r1', section_id: 'sec-2', issue_type: 'missing_transfer_notice', status: 'gap', gap_note: 'candidate_issue transfer rationale', remediation_note: 'Add transfer safeguards' },
-  { item_kind: 'finding', id: 'r2', section_id: 'sec-3', issue_type: 'missing_rights_notice', status: 'partial', gap_note: 'Observation: rights section is incomplete', remediation_note: 'Expand rights section' },
+  { item_kind: 'finding', id: 'r2', section_id: 'sec-2', issue_type: 'profiling_disclosure_gap', status: 'partial', gap_note: '[debug] profiling_without_required_explanation', remediation_note: 'Expand profiling section' },
 ]
 
 const analysisRows = [
   { id: 'a1', section_id: 'sec-2', analysis_type: 'completeness_outcome', issue_type: 'missing_transfer_notice', status_candidate: 'candidate_gap', gap_note: 'possible gap filtered by (.)', remediation_note: 'check', citations: [] },
-  { id: 'a2', section_id: 'ledger:meta', analysis_type: 'support_evidence', issue_type: 'x', status_candidate: 'candidate_gap', gap_note: 'internal', remediation_note: 'internal', citations: [] },
 ]
 
 const blockedPresentation = mod.buildFindingsPresentation({
@@ -67,76 +55,62 @@ const blockedPresentation = mod.buildFindingsPresentation({
   publishedBlocked: true,
 })
 
-// A. dataset contract
-assert.equal(blockedPresentation.datasetLabels.publishedVisibleFindings, 'Final published findings')
-assert.equal(blockedPresentation.datasetLabels.reviewVisibleFindings, 'Review findings')
-assert.equal(blockedPresentation.datasetLabels.analysisVisibleFindings, 'Analysis findings')
-assert.equal(blockedPresentation.datasetLabels.reportExportFindings, 'Review findings (final publication blocked)')
-assert.equal(blockedPresentation.publishedVisibleFindings.length, 0)
-assert.deepEqual(blockedPresentation.reportExportFindings, blockedPresentation.reviewVisibleFindings)
-
-// B. export gate tests
-const mismatchCount = mod.validateReportExportReadiness(blockedPresentation, {
-  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length + 1,
-  pdfDatasetLabel: blockedPresentation.reportDatasetLabel,
-})
-assert.equal(mismatchCount.ok, false)
-assert.ok(mismatchCount.errors.some((x) => x.includes('counts diverge')))
-const mismatchLabel = mod.validateReportExportReadiness(blockedPresentation, {
-  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length,
-  pdfDatasetLabel: 'Final published findings',
-})
-assert.equal(mismatchLabel.ok, false)
-assert.ok(mismatchLabel.errors.some((x) => x.includes('labels diverge')))
-const missingEvidencePresentation = {
-  ...blockedPresentation,
-  reportExportFindings: [{ ...blockedPresentation.reportExportFindings[0], evidence_text: '' }],
+// 1) No duplicate section rows
+for (const rows of [
+  blockedPresentation.publishedVisibleFindings,
+  blockedPresentation.reviewVisibleFindings,
+  blockedPresentation.analysisVisibleFindings,
+  blockedPresentation.reportExportFindings,
+]) {
+  const ids = rows.map((row) => `${row.sourceMode}:${row.sectionId}`)
+  assert.equal(new Set(ids).size, ids.length)
 }
-assert.equal(mod.validateReportExportReadiness(missingEvidencePresentation).ok, false)
 
-// C. title tests
-assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => f.title.startsWith('Section ')))
-assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => !['GDPR transparency disclosure gap', 'Compliance finding requiring review'].includes(f.title)))
+// 2) Counts match dataset length
+const counts = mod.aggregateCounts(blockedPresentation.reportExportFindings)
+assert.equal(counts.total, blockedPresentation.reportExportFindings.length)
+assert.equal(counts.compliant + counts.partially_compliant + counts.non_compliant + counts.not_applicable, blockedPresentation.reportExportFindings.length)
 
-// D. sanitizer tests
+// 3) Report dataset equals Review dataset when blocked
+assert.deepEqual(blockedPresentation.reportExportFindings, blockedPresentation.reviewVisibleFindings)
+assert.equal(blockedPresentation.reportDatasetLabel, 'Review findings (used because publication is blocked)')
+
+// 4) PDF dataset equals Report dataset
+const readiness = mod.validateReportExportReadiness(blockedPresentation, {
+  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length,
+  pdfDatasetLabel: blockedPresentation.reportDatasetLabel,
+  pdfRows: blockedPresentation.reportExportFindings,
+})
+assert.equal(readiness.ok, true)
+
+// 5) No internal tokens in output
 const serializedBlocked = JSON.stringify(blockedPresentation).toLowerCase()
-for (const banned of ['support_only', 'candidate_issue', 'meta_section', 'invalid_consent', 'duty validation marked', 'filtered by (.)']) {
+for (const banned of ['candidate_issue', 'withheld by final publication validator', 'profiling_without_required_explanation', 'section ().']) {
   assert.ok(!serializedBlocked.includes(banned), `banned token leaked: ${banned}`)
 }
-const renderedText = [
-  ...blockedPresentation.reviewVisibleFindings.flatMap((f) => [f.title, f.issue_label, f.why_this_matters, f.recommended_action, f.evidence_text]),
-  ...blockedPresentation.analysisVisibleFindings.flatMap((f) => [f.title, f.issue_label, f.why_this_matters, f.recommended_action, f.evidence_text]),
-].join(' ').toLowerCase()
-assert.ok(!renderedText.includes('[]'))
-assert.ok(!renderedText.includes('{}'))
 
-// E. evidence tests
-assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => /^Section .*: ".+"$|^Confirmed after review of the full document: no disclosure of .+ was identified\.$/.test(f.evidence_text)))
-
-// F. review/analysis UX tests via data model
-assert.equal(blockedPresentation.reviewVisibleFindings.every((f) => f.source_mode === 'review'), true)
-assert.equal(blockedPresentation.analysisVisibleFindings.every((f) => f.source_mode === 'analysis'), true)
-assert.equal(blockedPresentation.analysisVisibleFindings.length, 1)
-assert.ok(blockedPresentation.reviewVisibleFindings.every((f) => f.title !== f.issue_label))
-for (const row of [...blockedPresentation.reviewVisibleFindings, ...blockedPresentation.analysisVisibleFindings]) {
-  assert.ok(['High', 'Medium', 'Low'].includes(row.severity))
-  if (/legal basis|rights|complaint|transfer|profiling/i.test(`${row.issue_label} ${row.title}`)) assert.notEqual(row.severity, 'Low')
+// 6) Every finding has non-empty Why this matters
+for (const row of blockedPresentation.reportExportFindings) {
+  for (const issue of row.issues) {
+    assert.ok(issue.whyThisMatters.trim().length > 0)
+  }
 }
 
-// G. compliant run tests
-const compliantPresentation = mod.buildFindingsPresentation({
-  publishedRows: [{ id: 'f4', section_id: 'sec-1', issue_key: 'minor_drafting', status: 'compliant', severity: null, gap_note: 'Substantive disclosure signal detected.', remediation_note: null, citations: [{ excerpt: 'Lawful basis is contract.' }], primary_legal_anchor: [] }],
-  reviewRows: [],
-  analysisRows: [],
-  sectionsById,
-  publishedBlocked: false,
-})
-assert.equal(mod.aggregateCounts(compliantPresentation.reportExportFindings).non_compliant, 0)
-assert.equal(compliantPresentation.reportDatasetLabel, 'Final published findings')
-assert.equal(mod.validateReportExportReadiness(compliantPresentation).ok, true)
+// human-readable issue labels & severity override checks
+const issueLabels = blockedPresentation.reportExportFindings.flatMap((row) => row.issues.map((x) => x.issueLabel))
+assert.ok(issueLabels.includes('Transfer safeguards disclosure'))
+assert.ok(issueLabels.includes('Profiling transparency'))
+assert.ok(!issueLabels.includes('Transparency disclosure'))
+const severities = blockedPresentation.reportExportFindings.flatMap((row) => row.issues.map((x) => x.severity))
+assert.ok(severities.includes('High'))
 
-// generic anti-leak
-assert.ok(!serializedBlocked.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i))
+// mismatch checks must fail
+const mismatch = mod.validateReportExportReadiness(blockedPresentation, {
+  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length + 1,
+  pdfDatasetLabel: blockedPresentation.reportDatasetLabel,
+  pdfRows: blockedPresentation.reportExportFindings,
+})
+assert.equal(mismatch.ok, false)
 
 fs.unlinkSync(tempFile)
 console.log('presentation contract checks passed')

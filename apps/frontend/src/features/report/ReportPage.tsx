@@ -1,18 +1,26 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
-import { createReport, getAnalysis, getFindings, getReport, getReview, reportDownloadUrl } from '../../lib/api'
+import { createReport, getAnalysis, getFindings, getReport, getReview, getSections, reportDownloadUrl } from '../../lib/api'
 import { aggregateCounts, buildFindingsPresentation, validateReportExportReadiness } from '../../lib/presentation'
-import type { AnalysisItemOut, FindingOut, ReportOut, ReviewItemOut } from '../../lib/types'
+import type { AnalysisItemOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function ReportPage() {
-  const { auditId } = useAppState()
+  const { auditId, documentId } = useAppState()
   const [reviewRows, setReviewRows] = useState<ReviewItemOut[]>([])
   const [analysisRows, setAnalysisRows] = useState<AnalysisItemOut[]>([])
   const [publishedRows, setPublishedRows] = useState<FindingOut[]>([])
+  const [sectionsById, setSectionsById] = useState<Record<string, SectionOut>>({})
   const [report, setReport] = useState<ReportOut | null>(null)
   const [status, setStatus] = useState<'idle' | 'generating' | 'ready'>('idle')
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!documentId) return
+    getSections(documentId)
+      .then((sections) => setSectionsById(Object.fromEntries(sections.map((s) => [s.id, s]))))
+      .catch(() => setSectionsById({}))
+  }, [documentId])
 
   useEffect(() => {
     if (!auditId) return
@@ -43,17 +51,22 @@ export function ReportPage() {
     publishedRows,
     reviewRows,
     analysisRows,
-    sectionsById: {},
+    sectionsById,
     publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
-  }), [publishedRows, reviewRows, analysisRows])
+  }), [publishedRows, reviewRows, analysisRows, sectionsById])
   const counts = aggregateCounts(presentation.reportExportFindings)
 
   async function generate() {
     if (!auditId) return
     setError(null)
     setStatus('generating')
-    const readiness = validateReportExportReadiness(presentation, { pdfRenderedFindingsCount: presentation.reportExportFindings.length, pdfDatasetLabel: presentation.reportDatasetLabel })
+    const readiness = validateReportExportReadiness(presentation, {
+      pdfRenderedFindingsCount: presentation.reportExportFindings.length,
+      pdfDatasetLabel: presentation.reportDatasetLabel,
+      pdfRows: presentation.reportExportFindings,
+    })
     if (!readiness.ok) {
+      console.error('Report export invariants failed', readiness.errors)
       setStatus('idle')
       setError(`PDF export blocked until presentation integrity checks pass: ${readiness.errors[0]}`)
       return
@@ -73,7 +86,7 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">PDF source dataset (`reportExportFindings`): <span className="font-medium">{presentation.reportDatasetLabel}</span>.</p>
+        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{presentation.reportDatasetLabel}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
