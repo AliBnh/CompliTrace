@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
 import { createReport, getAnalysis, getFindings, getReport, getReview, reportDownloadUrl } from '../../lib/api'
-import { aggregateCounts, buildFindingsPresentation } from '../../lib/presentation'
+import { aggregateCounts, buildFindingsPresentation, validateReportExportReadiness } from '../../lib/presentation'
 import type { AnalysisItemOut, FindingOut, ReportOut, ReviewItemOut } from '../../lib/types'
 
 export function ReportPage() {
@@ -46,12 +46,19 @@ export function ReportPage() {
     sectionsById: {},
     publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
   }), [publishedRows, reviewRows, analysisRows])
-  const counts = aggregateCounts(presentation.reportVisibleFindings)
+  const counts = aggregateCounts(presentation.reportExportFindings)
 
   async function generate() {
     if (!auditId) return
     setError(null)
     setStatus('generating')
+    const readiness = validateReportExportReadiness(presentation)
+    if (!readiness.ok) {
+      setStatus('idle')
+      setError(`PDF export blocked until presentation integrity checks pass: ${readiness.errors[0]}`)
+      return
+    }
+
     try {
       await createReport(auditId)
     } catch (e) {
@@ -66,7 +73,7 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{presentation.reportMode === 'published' ? 'Final published findings' : 'Review findings (final publication blocked)'}</span>.</p>
+        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{presentation.reportDatasetLabel}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
