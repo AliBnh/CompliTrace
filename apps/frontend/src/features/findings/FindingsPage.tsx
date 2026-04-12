@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
 import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
-import { aggregateCounts, buildFindingsPresentation, buildReviewSummary, splitFindingsByScope, type NormalizedFinding } from '../../lib/presentation'
+import { aggregateCounts, buildFindingsPresentation, buildReviewSummary, severityDisplayForStatus, splitFindingsByScope, type NormalizedFinding } from '../../lib/presentation'
 import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function FindingsPage() {
@@ -145,9 +145,9 @@ export function FindingsPage() {
               <div className="mt-3 space-y-2">
                 {documentFindings.map((finding) => (
                   <article key={finding.stable_ui_id} className="rounded-lg border border-slate-200 p-3 text-sm">
-                    <div className="font-medium text-slate-900">{finding.sectionTitle}</div>
-                    <div className="mt-1 text-slate-600">Scope: Document-wide</div>
-                    <div className="mt-1 text-slate-700">{finding.issues.map((x) => x.issueLabel).join(', ')}</div>
+                    <div className="font-medium text-slate-900">{finding.title}</div>
+                    <div className="mt-1 text-slate-600">Scope: Entire document</div>
+                    <div className="mt-1 text-slate-700">{finding.whyThisMatters}</div>
                   </article>
                 ))}
               </div>
@@ -165,9 +165,9 @@ export function FindingsPage() {
                 {sectionFindings.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No section findings in this dataset.</td></tr> : sectionFindings.map((finding) => (
                   <tr key={finding.stable_ui_id} onClick={() => setSelectedByView((c) => ({ ...c, [viewMode]: finding.stable_ui_id }))} className={`cursor-pointer border-t ${selected?.stable_ui_id === finding.stable_ui_id ? 'bg-sky-50/80' : 'bg-white'}`}>
                     <td className="px-4 py-3">{finding.sectionTitle}</td>
-                    <td className="px-4 py-3">{finding.issues.map((x) => x.issueLabel).join(', ')}</td>
+                    <td className="px-4 py-3">{finding.primaryIssueLabel} {finding.issueCount > 1 ? `(+${finding.issueCount - 1})` : ''}</td>
                     <td className="px-4 py-3"><StatusBadge status={finding.overallStatus.toLowerCase()} /></td>
-                    <td className="px-4 py-3">{finding.severity}</td>
+                    <td className="px-4 py-3">{severityDisplayForStatus(finding.overallStatus, finding.overallSeverity) ?? <span className="text-slate-400">—</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -186,9 +186,14 @@ export function FindingsPage() {
 function FindingDetail({ finding }: { finding: NormalizedFinding }) {
   return <div className="space-y-3">
     <h2 className="text-lg font-semibold text-slate-900">{finding.sectionTitle}</h2>
-    <div className="flex gap-2"><StatusBadge status={finding.overallStatus.toLowerCase()} /><span className="rounded-full border px-2.5 py-1 text-xs">Severity {finding.severity}</span></div>
+    <div className="flex flex-wrap items-center gap-2">
+      <StatusBadge status={finding.overallStatus.toLowerCase()} />
+      {severityDisplayForStatus(finding.overallStatus, finding.overallSeverity) && (
+        <span className="rounded-full border px-2.5 py-1 text-xs">Severity {finding.overallSeverity}</span>
+      )}
+    </div>
     <Detail label="Dataset" value={finding.sourceMode === 'published' ? 'Final published findings' : finding.sourceMode === 'review' ? 'Review findings' : 'Analysis findings'} />
-    <Detail label="Section" value={finding.sectionTitle} />
+    <Detail label="Section/scope" value={finding.scope === 'Document-wide' ? 'Entire document' : finding.sectionTitle} />
     {finding.issues.map((issue) => (
       <div key={`${finding.stable_ui_id}:${issue.issueKey}`} className="rounded-lg border border-slate-200 p-3">
         <Detail label="Issue" value={issue.issueLabel} />
