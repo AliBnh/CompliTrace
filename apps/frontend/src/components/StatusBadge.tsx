@@ -22,5 +22,5 @@ export function StatusBadge({ status }: { status: string }) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
-  return <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${styles[key] ?? styles['needs review']}`}>{label}</span>
+  return <span className={`inline-flex h-6 min-w-[7.25rem] items-center justify-center whitespace-nowrap rounded-full border px-3 text-xs font-medium leading-none ${styles[key] ?? styles['needs review']}`}>{label}</span>
 }

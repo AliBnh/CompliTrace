@@ -241,7 +241,7 @@ def _section_report_meta(audit: Audit) -> tuple[str | None, dict[str, _SectionRe
     labels: dict[str, _SectionReportMeta] = {}
     for section in sections:
         if section.section_title.strip():
-            label = f"Section {section.section_order}: {section.section_title}"
+            label = section.section_title.strip()
         else:
             label = f"Section {section.section_order}"
         labels[section.id] = _SectionReportMeta(label=label, page_range=_format_page_range(section))

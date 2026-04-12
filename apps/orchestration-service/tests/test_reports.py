@@ -101,7 +101,7 @@ def test_section_report_meta_uses_human_readable_titles(monkeypatch):
     title, labels = _section_report_meta(audit)
 
     assert title == "Employee Privacy Policy"
-    assert labels["sec-1"].label == "Section 1: Purpose and Scope"
+    assert labels["sec-1"].label == "Purpose and Scope"
     assert labels["sec-1"].page_range == "Page 1"
 
 
