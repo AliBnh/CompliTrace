@@ -4,7 +4,7 @@ import re
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -362,33 +362,17 @@ def _is_safe_for_export(row: Finding, section_label: str) -> bool:
         return False
     return True
 
-def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
-    audit = db.get(Audit, audit_id)
-    if not audit:
-        raise ValueError("Audit not found")
 
-    report = Report(audit_id=audit_id, status="pending")
-    db.add(report)
-    db.commit()
-    db.refresh(report)
-
+def build_export_contract(
+    db: Session,
+    audit_id: str,
+) -> tuple[dict[str, Any], list[Finding], bool]:
     findings = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
         .order_by(Finding.section_id.asc())
     ).all()
-    analysis_rows = db.scalars(
-        select(AuditAnalysisItem)
-        .where(AuditAnalysisItem.audit_id == audit_id)
-        .where(
-            AuditAnalysisItem.analysis_type.in_(
-                ["completeness_outcome", "referenced_but_unseen", "not_assessable_core_duty", "support_evidence", "excerpt_scope_fact"]
-            )
-        )
-        .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
-    ).all()
-
     visible_review_findings = [
         row
         for row in findings
@@ -400,6 +384,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     ]
     publishable_findings = [f for f in findings if _is_publishable_finding(f)]
     published_blocked = len(publishable_findings) == 0 and len(visible_review_findings) > 0
+    dataset_used = "review" if published_blocked else "published"
     report_rows = visible_review_findings if published_blocked else publishable_findings
 
     deduped_by_section: dict[str, Finding] = {}
@@ -415,8 +400,9 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         if current_rank > existing_rank:
             deduped_by_section[row.section_id] = row
 
-    document_title, section_meta = _section_report_meta(audit)
-    report_rows_deduped = [
+    audit = db.get(Audit, audit_id)
+    _, section_meta = _section_report_meta(audit) if audit else (None, {})
+    export_rows = [
         row
         for row in deduped_by_section.values()
         if _is_safe_for_export(
@@ -424,6 +410,55 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             section_meta.get(row.section_id, _SectionReportMeta(label="Document section", page_range=None)).label,
         )
     ]
+    finding_ids = sorted([row.id for row in export_rows])
+    contract = {
+        "report_type": "Review report (final publication pending)" if dataset_used == "review" else "Published report",
+        "dataset_used": dataset_used,
+        "export_allowed": True,
+        "blocker_reasons": [],
+        "counts_by_status": {
+            "compliant": sum(1 for row in export_rows if _user_status_label(row.status) == "Compliant"),
+            "partially_compliant": sum(1 for row in export_rows if _user_status_label(row.status) == "Partially compliant"),
+            "non_compliant": sum(1 for row in export_rows if _user_status_label(row.status) == "Non-compliant"),
+            "not_applicable": sum(1 for row in export_rows if _user_status_label(row.status) == "Not applicable"),
+            "total": len(export_rows),
+        },
+        "finding_ids": finding_ids,
+        "document_wide_finding_ids": sorted([row.id for row in export_rows if row.section_id.startswith("systemic:")]),
+        "section_finding_ids": sorted([row.id for row in export_rows if not row.section_id.startswith("systemic:")]),
+        "generated_from_audit_id": audit_id,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    if len(report_rows) > 0 and len(export_rows) == 0:
+        contract["export_allowed"] = False
+        contract["blocker_reasons"] = ["no_exportable_findings_after_safety_filters"]
+    return contract, export_rows, published_blocked
+
+def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
+    audit = db.get(Audit, audit_id)
+    if not audit:
+        raise ValueError("Audit not found")
+
+    report = Report(audit_id=audit_id, status="pending")
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+
+    contract, report_rows_deduped, published_blocked = build_export_contract(db, audit_id)
+    if not contract["export_allowed"]:
+        raise ValueError(f"Export blocked: {', '.join(contract['blocker_reasons'])}")
+    analysis_rows = db.scalars(
+        select(AuditAnalysisItem)
+        .where(AuditAnalysisItem.audit_id == audit_id)
+        .where(
+            AuditAnalysisItem.analysis_type.in_(
+                ["completeness_outcome", "referenced_but_unseen", "not_assessable_core_duty", "support_evidence", "excerpt_scope_fact"]
+            )
+        )
+        .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
+    ).all()
+
+    document_title, section_meta = _section_report_meta(audit)
     systemic_findings = [f for f in report_rows_deduped if f.section_id.startswith("systemic:")]
     local_findings = [f for f in report_rows_deduped if not f.section_id.startswith("systemic:")]
 
@@ -457,10 +492,8 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Partially compliant: {by_status['partial']}", bullet=True),
         _TextBlock(f"Non-compliant: {by_status['gap']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
-        _TextBlock(
-            "Dataset used: Review findings (publication blocked)" if published_blocked else "Dataset used: Final published findings.",
-            bullet=True,
-        ),
+        _TextBlock(f"Report type: {contract['report_type']}", bullet=True),
+        _TextBlock(f"Dataset used: {'Review findings (publication blocked)' if contract['dataset_used'] == 'review' else 'Final published findings'}", bullet=True),
         _TextBlock("Document-wide findings", font_size=13, top_gap=14),
     ]
     scope_label = next((f.source_scope for f in systemic_findings if f.source_scope), None)
@@ -523,9 +556,23 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
             blocks.append(_TextBlock(_sanitize_user_text(title)[:180], bullet=True))
             blocks.append(_TextBlock(f"Action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
     blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
+    blocks.append(_TextBlock(f"Export-ready findings: {contract['counts_by_status']['total']}", bullet=True))
+    blocks.append(_TextBlock(f"Finding IDs: {', '.join(contract['finding_ids'])}", bullet=True))
 
     out_path = settings.reports_dir / f"audit_{audit_id}_{report.id}.pdf"
     _write_pdf(blocks, out_path)
+
+    decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
+    expected_label = "Review findings (publication blocked)" if contract["dataset_used"] == "review" else "Final published findings"
+    pdf_count = decoded.count("Finding:")
+    if pdf_count != len(report_rows_deduped):
+        raise ValueError("PDF export mismatch: report finding count != pdf finding count")
+    if "Dataset used:" not in decoded or ("Review findings" not in decoded and contract["dataset_used"] == "review") or ("Final published findings" not in decoded and contract["dataset_used"] == "published"):
+        raise ValueError("PDF export mismatch: report dataset label != pdf dataset label")
+    if "Finding IDs:" not in decoded or any(fid not in decoded for fid in contract["finding_ids"]):
+        raise ValueError("PDF export mismatch: report finding ids != pdf finding ids")
+    if report_rows_deduped and not pdf_count:
+        raise ValueError("PDF export mismatch: report has findings but pdf payload is empty")
 
     report.status = "ready"
     report.pdf_path = str(out_path)

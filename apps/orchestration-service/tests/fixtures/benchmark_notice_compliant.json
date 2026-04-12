@@ -1,0 +1,21 @@
+{
+  "name": "benchmark_notice_compliant",
+  "expected_overall_verdict": "compliant_or_minor_only",
+  "required_findings": [],
+  "forbidden_findings": [
+    "Legal basis disclosure",
+    "Data subject rights disclosure",
+    "Complaint-right disclosure",
+    "Retention disclosure",
+    "Transfer safeguards disclosure",
+    "Profiling transparency"
+  ],
+  "expected_counts_by_family": {
+    "major": 0
+  },
+  "expected_report_counts": {
+    "non_compliant": 0
+  },
+  "expected_citations_presence": true,
+  "expected_export_dataset_label": "published"
+}
