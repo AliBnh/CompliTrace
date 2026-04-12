@@ -29,6 +29,28 @@ PDF_SAFE_CHAR_REPLACEMENTS = str.maketrans(
 )
 
 
+BANNED_USER_TOKENS = [
+    'support_only', 'internal_only', 'candidate_issue', 'provisional_local', 'support_evidence',
+    'post_reviewer_snapshot', 'meta_section', 'auditability gate', 'not_assessable',
+    'confirmed_document_gap', 'probable_document_gap', 'clear_non_compliance',
+    'withheld by final publication validator', 'explicit violation validator matched',
+    'duty validation marked', 'invalid_consent', 'profiling_without_required_explanation',
+    'weak_transfer_safeguards', 'embedding model', 'corpus version', 'parse failure rate',
+    'contradiction rate', 'heuristic quality score', 'confidence component breakdown',
+]
+
+ISSUE_TITLE_MAP = {
+    'missing_legal_basis': 'Missing legal basis disclosure',
+    'missing_retention_period': 'Missing retention-period disclosure',
+    'missing_rights_notice': 'Missing rights-notice disclosure',
+    'missing_complaint_right': 'Missing complaint-right disclosure',
+    'missing_transfer_notice': 'Missing transfer disclosure',
+    'profiling_disclosure_gap': 'Profiling transparency gap',
+    'recipients_disclosure_gap': 'Recipients disclosure gap',
+    'purpose_specificity_gap': 'Purpose specificity gap',
+    'controller_processor_role_ambiguity': 'Role allocation needs clarification',
+}
+
 class _TextBlock(NamedTuple):
     text: str
     font_size: int = 10
@@ -242,12 +264,13 @@ def _sanitize_user_text(text: str | None) -> str | None:
     cleaned = re.sub(r"Potential duplicate of section [^.;]+[.;]?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"chunk_id\s*=\s*gdpr-art-[a-z0-9-]+", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bgdpr-art-[a-z0-9-]+\b", "GDPR evidence reference", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(
-        r"(withheld by final publication validator|support_evidence|provisional_local|candidate_issue|meta_section|confirmed_document_gap|duty validation marked)",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
+    cleaned = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[\s*\]", "", cleaned)
+    cleaned = re.sub(r"The reviewed notice content triggers GDPR transparency analysis\.?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"Observation:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"Substantive disclosure signal detected\.?", "The notice text suggests disclosure is present, but key details remain unclear.", cleaned, flags=re.IGNORECASE)
+    for token in BANNED_USER_TOKENS:
+        cleaned = re.sub(re.escape(token), "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
 
@@ -306,6 +329,39 @@ def _user_severity_label(severity: str | None, issue: str | None) -> str:
     return "Low"
 
 
+
+def _issue_from_section_id(section_id: str) -> str | None:
+    if section_id.startswith('systemic:'):
+        return section_id.split('systemic:', 1)[1]
+    return None
+
+
+def _title_for_row(row: Finding) -> str:
+    issue = _issue_from_section_id(row.section_id)
+    if issue and issue in ISSUE_TITLE_MAP:
+        return ISSUE_TITLE_MAP[issue]
+    candidate = _sanitize_user_text(row.legal_requirement) or _sanitize_user_text(row.gap_note)
+    return candidate[:90] if candidate else 'GDPR transparency disclosure gap'
+
+
+def _evidence_for_row(row: Finding, section_label: str) -> str:
+    excerpt = next((c.excerpt for c in row.citations if _sanitize_user_text(c.excerpt)), None)
+    if excerpt:
+        return f"{section_label}: {_sanitize_user_text(excerpt)}"
+    title = _title_for_row(row).lower()
+    return f"Confirmed after review of the full document: no disclosure of {title} was identified."
+
+
+def _is_safe_for_export(row: Finding, section_label: str) -> bool:
+    title = _title_for_row(row)
+    evidence = _evidence_for_row(row, section_label)
+    blob = f"{title} {_sanitize_user_text(row.gap_note) or ''} {_sanitize_user_text(row.remediation_note) or ''} {evidence}".lower()
+    if not evidence.strip() or '[ ]' in blob or '[]' in blob:
+        return False
+    if any(token in blob for token in BANNED_USER_TOKENS):
+        return False
+    return True
+
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     audit = db.get(Audit, audit_id)
     if not audit:
@@ -359,7 +415,15 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         if current_rank > existing_rank:
             deduped_by_section[row.section_id] = row
 
-    report_rows_deduped = list(deduped_by_section.values())
+    document_title, section_meta = _section_report_meta(audit)
+    report_rows_deduped = [
+        row
+        for row in deduped_by_section.values()
+        if _is_safe_for_export(
+            row,
+            section_meta.get(row.section_id, _SectionReportMeta(label="Document section", page_range=None)).label,
+        )
+    ]
     systemic_findings = [f for f in report_rows_deduped if f.section_id.startswith("systemic:")]
     local_findings = [f for f in report_rows_deduped if not f.section_id.startswith("systemic:")]
 
@@ -370,7 +434,6 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         "gap": sum(1 for row in report_rows_deduped if _user_status_label(row.status) == "Non-compliant"),
         "not applicable": sum(1 for row in report_rows_deduped if _user_status_label(row.status) == "Not applicable"),
     }
-    document_title, section_meta = _section_report_meta(audit)
     started_at = audit.started_at.isoformat(sep=" ", timespec="seconds") if isinstance(audit.started_at, datetime) else "n/a"
     completed_at = (
         audit.completed_at.isoformat(sep=" ", timespec="seconds")
@@ -411,6 +474,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     for finding in systemic_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
+        blocks.append(_TextBlock(f"Finding: {_title_for_row(finding)}", bullet=True))
         issue_hint = (finding.legal_requirement or finding.section_id).replace("systemic:", "").replace("_", " ")
         blocks.append(_TextBlock(f"Status: {_user_status_label(finding.status)}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {_user_severity_label(finding.severity, issue_hint)}", bullet=True))
@@ -420,9 +484,10 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         if finding.citation_summary_text:
             blocks.append(_TextBlock(f"Why flagged: {_sanitize_user_text(finding.citation_summary_text)}", bullet=True))
         if finding.gap_note:
-            blocks.append(_TextBlock(f"Gap note: {_sanitize_user_text(finding.gap_note)}", bullet=True))
+            blocks.append(_TextBlock(f"Why this matters: {_sanitize_user_text(finding.gap_note)}", bullet=True))
         if finding.remediation_note:
-            blocks.append(_TextBlock(f"Remediation: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
+            blocks.append(_TextBlock(f"Recommended action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
+        blocks.append(_TextBlock(f"Evidence: {_evidence_for_row(finding, meta.label)}", bullet=True))
     if not systemic_findings:
         blocks.append(_TextBlock("No document-wide compliance issues were identified.", bullet=True))
 
@@ -430,15 +495,17 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     for finding in local_findings:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
+        blocks.append(_TextBlock(f"Finding: {_title_for_row(finding)}", bullet=True))
         issue_hint = finding.legal_requirement or finding.section_id
         blocks.append(_TextBlock(f"Status: {_user_status_label(finding.status)}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {_user_severity_label(finding.severity, issue_hint)}", bullet=True))
         safe_gap_note = _sanitize_user_text(finding.gap_note)
         safe_remediation_note = _sanitize_user_text(finding.remediation_note)
         if safe_gap_note:
-            blocks.append(_TextBlock(f"Gap note: {safe_gap_note}", bullet=True))
+            blocks.append(_TextBlock(f"Why this matters: {safe_gap_note}", bullet=True))
         if safe_remediation_note:
-            blocks.append(_TextBlock(f"Remediation: {safe_remediation_note}", bullet=True))
+            blocks.append(_TextBlock(f"Recommended action: {safe_remediation_note}", bullet=True))
+        blocks.append(_TextBlock(f"Evidence: {_evidence_for_row(finding, meta.label)}", bullet=True))
         for citation in finding.citations:
             blocks.append(
                 _TextBlock(
@@ -446,8 +513,8 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
                     bullet=True,
                 )
             )
-            if citation.excerpt:
-                blocks.append(_TextBlock(f'Evidence: "{citation.excerpt}"', bullet=True))
+            if citation.excerpt and _sanitize_user_text(citation.excerpt):
+                blocks.append(_TextBlock(f'Evidence excerpt: "{_sanitize_user_text(citation.excerpt)}"', bullet=True))
     roadmap_items = [f for f in report_rows_deduped if f.remediation_note]
     if roadmap_items:
         blocks.append(_TextBlock("Recommended actions", font_size=13, top_gap=14))

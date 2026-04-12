@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppState } from '../../app/state'
 import { StatusBadge } from '../../components/StatusBadge'
 import { getAnalysis, getAudit, getFindings, getReview, getSections } from '../../lib/api'
-import { aggregateCounts, buildFindingsPresentation, type NormalizedFinding } from '../../lib/presentation'
+import { aggregateCounts, buildFindingsPresentation, buildReviewSummary, type NormalizedFinding } from '../../lib/presentation'
 import type { AnalysisItemOut, FindingOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function FindingsPage() {
@@ -73,6 +73,7 @@ export function FindingsPage() {
       ? presentation.reviewVisibleFindings
       : presentation.analysisVisibleFindings
   const counts = aggregateCounts(activeRows)
+  const reviewSummary = buildReviewSummary(presentation.reviewVisibleFindings)
 
   useEffect(() => {
     setSelectedByView((current) => {
@@ -101,19 +102,21 @@ export function FindingsPage() {
             ))}
           </div>
           <p className="mt-3 text-xs text-slate-600">
-            {viewMode === 'published' && 'Showing final published findings only.'}
-            {viewMode === 'review' && 'Showing review-stage findings used when publication is blocked.'}
-            {viewMode === 'analysis' && 'Showing early-stage analysis findings for reviewer triage.'}
+            {viewMode === 'published' && (presentation.publishedBlocked
+              ? 'Final published findings are not yet available because some findings still require review.'
+              : 'Showing final published findings only.')}
+            {viewMode === 'review' && 'Showing review-stage findings only.'}
+            {viewMode === 'analysis' && 'Showing early-stage analysis findings only.'}
           </p>
           {presentation.publishedBlocked && viewMode === 'published' && (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
               Final published findings are not available yet because some findings still require review.
             </div>
           )}
-          {presentation.publishedBlockers.length > 0 && viewMode === 'review' && (
-            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-amber-800">
-              {presentation.publishedBlockers.map((b, i) => <li key={`${i}-${b}`}>{b}</li>)}
-            </ul>
+          {viewMode === 'review' && reviewSummary && (
+            <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+              {reviewSummary}
+            </div>
           )}
           <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
             {[
@@ -158,6 +161,7 @@ function FindingDetail({ finding }: { finding: NormalizedFinding }) {
   return <div className="space-y-3">
     <h2 className="text-lg font-semibold text-slate-900">{finding.title}</h2>
     <div className="flex gap-2"><StatusBadge status={finding.status.toLowerCase()} /><span className="rounded-full border px-2.5 py-1 text-xs">Severity {finding.severity}</span></div>
+    <Detail label="Dataset" value={finding.source_mode === 'published' ? 'Final published findings' : finding.source_mode === 'review' ? 'Review findings' : 'Analysis findings'} />
     <Detail label="Scope" value={finding.section_title ?? finding.scope_label} />
     <Detail label="Why this matters" value={finding.why_this_matters} />
     <Detail label="Recommended action" value={finding.recommended_action} />

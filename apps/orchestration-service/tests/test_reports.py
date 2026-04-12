@@ -170,3 +170,50 @@ def test_report_pdf_omits_internal_debug_terms(tmp_path: Path):
             assert "dataset used: review findings" in decoded
     finally:
         settings.reports_dir = old_reports_dir
+
+
+def test_report_pdf_contains_auditor_grade_titles_and_evidence(tmp_path: Path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    old_reports_dir = settings.reports_dir
+    settings.reports_dir = tmp_path
+    try:
+        with SessionLocal() as db:
+            audit = Audit(
+                id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                status="complete",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                model_provider="test",
+                model_name="test-model",
+                model_temperature=0.1,
+                prompt_template_version="v1",
+                embedding_model="embed",
+                corpus_version="corpus-v1",
+            )
+            db.add(audit)
+            db.flush()
+            db.add(
+                Finding(
+                    id=str(uuid.uuid4()),
+                    audit_id=audit.id,
+                    section_id="systemic:missing_legal_basis",
+                    status="gap",
+                    severity=None,
+                    gap_note="Observation: legal basis disclosure is missing",
+                    remediation_note="Add legal basis disclosure language.",
+                    publication_state="blocked",
+                )
+            )
+            db.commit()
+            _, out_path = generate_report_text(db, audit.id)
+            decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
+            assert "Finding: Missing legal basis disclosure" in decoded
+            assert "Why this matters:" in decoded
+            assert "Recommended action:" in decoded
+            assert "Evidence: Confirmed after review of the full document:" in decoded
+            assert "[]" not in decoded
+    finally:
+        settings.reports_dir = old_reports_dir
