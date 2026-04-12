@@ -102,6 +102,7 @@ class ReportTriggerOut(BaseModel):
 
 
 class ExportContractOut(BaseModel):
+    report_type: str
     dataset_used: str
     export_allowed: bool
     blocker_reasons: list[str]
@@ -209,3 +210,4 @@ class ReviewItemOut(BaseModel):
     reason: str | None = None
     source_scope_dependency: str | None = None
     publication_recommendation: str | None = None
+    citations: list[CitationOut] | None = None

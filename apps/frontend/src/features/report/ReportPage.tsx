@@ -56,21 +56,26 @@ export function ReportPage() {
     sectionsById,
     publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
   }), [publishedRows, reviewRows, analysisRows, sectionsById])
-  const counts = exportContract?.counts_by_status ?? aggregateCounts(presentation.reportExportFindings)
-  const { documentFindings, sectionFindings } = splitFindingsByScope(presentation.reportExportFindings)
+  const exportRows = (exportContract?.dataset_used === 'review'
+    ? presentation.reviewVisibleFindings
+    : exportContract?.dataset_used === 'published'
+      ? presentation.publishedVisibleFindings
+      : presentation.reportExportFindings)
+  const counts = exportContract?.counts_by_status ?? aggregateCounts(exportRows)
+  const { documentFindings, sectionFindings } = splitFindingsByScope(exportRows)
   const readiness = useMemo(() => validateReportExportReadiness(presentation, {
-    pdfRenderedFindingsCount: presentation.reportExportFindings.length,
-    pdfDatasetLabel: presentation.reportDatasetLabel,
-    pdfRows: presentation.reportExportFindings,
-    pdfStatusCounts: aggregateCounts(presentation.reportExportFindings),
-  }), [presentation, counts])
+    pdfRenderedFindingsCount: exportRows.length,
+    pdfDatasetLabel: exportContract?.dataset_used === 'review' ? 'Review findings (used because publication is blocked)' : 'Final published findings',
+    pdfRows: exportRows,
+    pdfStatusCounts: aggregateCounts(exportRows),
+  }), [presentation, exportRows, exportContract])
 
   async function generate() {
     if (!auditId) return
     setError(null)
     setStatus('generating')
-    const pdfFindings = presentation.reportExportFindings
-    assertPdfDatasetIntegrity(pdfFindings, presentation.reportExportFindings)
+    const pdfFindings = exportRows
+    assertPdfDatasetIntegrity(pdfFindings, exportRows)
     if (!readiness.ok || exportContract?.export_allowed === false) {
       console.error('Report export invariants failed', readiness.errors)
       setStatus('idle')
@@ -93,7 +98,7 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'}</span>.</p>
+        <p className="section-subtitle">{exportContract?.report_type ?? 'Report'} • PDF source dataset: <span className="font-medium">{exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
@@ -135,7 +140,7 @@ export function ReportPage() {
       </article>
       <article className="surface-card p-6">
         <h2 className="text-lg font-semibold text-slate-900">Export preview</h2>
-        <p className="mt-1 text-sm text-slate-500">Dataset: {exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'}</p>
+        <p className="mt-1 text-sm text-slate-500">Dataset: {exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'} • Report type: {exportContract?.report_type ?? 'Report'}</p>
         <div className="mt-4 grid gap-5 lg:grid-cols-2">
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Top document-wide findings</h3>

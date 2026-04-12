@@ -9,10 +9,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models.audit import Audit, Finding
+from app.models.audit import Audit, Finding, FindingCitation
 from app.services.clients import DocumentData
 from app.services.clients import SectionData
-from app.services.reports import _format_citation_label, _sanitize_user_text, _section_report_meta, generate_report_text
+from app.services.reports import _format_citation_label, _sanitize_user_text, _section_report_meta, build_export_contract, generate_report_text
 import json
 
 
@@ -272,3 +272,58 @@ def test_benchmark_fixture_files_are_locked_and_complete():
     assert noncompliant["name"] == "benchmark_notice_noncompliant"
     assert "Legal basis disclosure" in compliant["forbidden_findings"]
     assert "Legal basis disclosure" in noncompliant["required_findings"]
+
+
+def test_export_fallback_uses_review_dataset_when_published_unavailable(tmp_path: Path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    old_reports_dir = settings.reports_dir
+    settings.reports_dir = tmp_path
+    try:
+        with SessionLocal() as db:
+            audit = Audit(
+                id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                status="complete",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                model_provider="test",
+                model_name="test-model",
+                model_temperature=0.1,
+                prompt_template_version="v1",
+                embedding_model="embed",
+                corpus_version="corpus-v1",
+            )
+            db.add(audit)
+            blocked = Finding(
+                audit_id=audit.id,
+                section_id="systemic:missing_transfer_notice",
+                status="gap",
+                severity="high",
+                publication_state="blocked",
+                gap_note="Transfer safeguards are not disclosed.",
+                remediation_note="Add SCC/adequacy safeguard wording.",
+            )
+            db.add(blocked)
+            db.flush()
+            db.add(
+                FindingCitation(
+                    finding_id=blocked.id,
+                    chunk_id="chunk-1",
+                    article_number="13",
+                    paragraph_ref="1(f)",
+                    article_title="Transfer disclosures",
+                    excerpt="We transfer data globally without safeguards.",
+                )
+            )
+            db.commit()
+            contract, rows, _ = build_export_contract(db, audit.id)
+            assert contract["dataset_used"] == "review"
+            assert contract["report_type"] == "Review report (final publication pending)"
+            assert contract["counts_by_status"]["total"] == len(rows) == 1
+            report, pdf_path = generate_report_text(db, audit.id)
+            assert report.status == "ready"
+            assert pdf_path.exists()
+    finally:
+        settings.reports_dir = old_reports_dir

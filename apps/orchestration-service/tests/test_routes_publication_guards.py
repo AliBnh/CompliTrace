@@ -103,6 +103,7 @@ def test_export_contract_is_backend_authoritative(db_session: Session):
     db_session.commit()
 
     contract = get_export_contract(audit.id, db_session)
+    assert contract.report_type == "Review report (final publication pending)"
     assert contract.dataset_used == "review"
     assert contract.export_allowed is True
     assert contract.counts_by_status["total"] == 1

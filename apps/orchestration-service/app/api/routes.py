@@ -2076,6 +2076,7 @@ def get_analysis(
 def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = Depends(get_db)) -> list[ReviewItemOut]:
     findings = db.scalars(
         select(Finding)
+        .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
         .where(
             (Finding.publication_state == "publishable")
@@ -2148,6 +2149,20 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
             remediation_note=_sanitize_review_text(
                 _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1], debug=debug
             ),
+            citations=[
+                CitationOut(
+                    chunk_id=c.chunk_id,
+                    evidence_id=f"evi:chunk:{c.chunk_id}" if c.chunk_id else None,
+                    source_type="gdpr_chunk",
+                    source_ref=c.chunk_id,
+                    article_number=c.article_number,
+                    paragraph_ref=c.paragraph_ref,
+                    article_title=c.article_title,
+                    excerpt=_sanitize_review_text(c.excerpt, debug=debug) or "",
+                )
+                for c in row.citations
+                if c.excerpt
+            ] or None,
         )
         for row in findings
     )

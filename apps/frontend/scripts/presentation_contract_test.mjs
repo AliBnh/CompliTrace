@@ -39,10 +39,10 @@ const publishedRows = [
 
 const reviewRows = [
   { item_kind: 'review_block', id: 'rb1', section_id: 'review:block', final_disposition: 'gap', reason: 'withheld by final publication validator' },
-  { item_kind: 'finding', id: 'r1', section_id: 'sec-2', issue_type: 'missing_transfer_notice', status: 'gap', gap_note: 'candidate_issue transfer rationale', remediation_note: 'Add transfer safeguards' },
-  { item_kind: 'finding', id: 'r2', section_id: 'sec-2', issue_type: 'profiling_disclosure_gap', status: 'partial', gap_note: '[debug] profiling_without_required_explanation', remediation_note: 'Expand profiling section' },
+  { item_kind: 'finding', id: 'r1', section_id: 'sec-2', issue_type: 'missing_transfer_notice', status: 'gap', gap_note: 'candidate_issue transfer rationale', remediation_note: 'Add transfer safeguards', citations: [{ chunk_id: 'c1', article_number: '13', paragraph_ref: '1', article_title: 'Info', excerpt: 'Transfer wording lacks safeguards.' }] },
+  { item_kind: 'finding', id: 'r2', section_id: 'sec-2', issue_type: 'profiling_disclosure_gap', status: 'partial', gap_note: '[debug] profiling_without_required_explanation', remediation_note: 'Expand profiling section', citations: [{ chunk_id: 'c2', article_number: '13', paragraph_ref: '2', article_title: 'Info', excerpt: 'Profiling effects are not described.' }] },
   { item_kind: 'finding', id: 'r3', section_id: 'systemic:missing_retention_period', issue_type: 'missing_retention_period', status: 'gap', gap_note: 'Substantive disclosure signal detected', remediation_note: 'Add retention timelines' },
-  { item_kind: 'finding', id: 'r4', section_id: 'sec-3', issue_type: 'purpose_specificity_gap', status: 'compliant', gap_note: 'legal gate reconciliation', remediation_note: 'Clarify purpose mapping', reason: '' },
+  { item_kind: 'finding', id: 'r4', section_id: 'sec-3', issue_type: 'purpose_specificity_gap', status: 'compliant', gap_note: 'legal gate reconciliation', remediation_note: 'Clarify purpose mapping', reason: '', citations: [{ chunk_id: 'c3', article_number: '5', paragraph_ref: null, article_title: 'Principles', excerpt: 'Purpose text exists.' }] },
 ]
 
 const analysisRows = [

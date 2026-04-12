@@ -31,6 +31,7 @@ export type Issue = {
   recommendedAction: string
   evidenceText: string
   legalAnchors: string[]
+  citations: Array<{ source_section_title: string; excerpt_text: string; gdpr_articles: string[]; evidence_reasoning_link: string }>
 }
 
 export type SectionFinding = {
@@ -243,7 +244,7 @@ function sectionTitleFor(sectionId: string, sectionsById: Record<string, Section
   if (sectionId.startsWith('systemic:')) return null
   const section = sectionsById[sectionId]
   if (!section?.section_title?.trim()) return null
-  return sanitizeUserFacingText(section.section_title)
+  return sanitizeUserFacingText(section.section_title).replace(/^\d+(\.\d+)*\s*[-:.)]?\s*/g, '')
 }
 
 function evidenceText(sectionTitle: string, excerpt?: string | null, issue?: string): string {
@@ -292,6 +293,7 @@ function buildIssue(params: {
     recommendedAction: actionText(issueKey, params.remediationNote),
     evidenceText: sanitizeOrFallback(evidenceText(params.sectionTitle, params.excerpt, issueKey)),
     legalAnchors: (params.legalAnchors ?? []).map((x) => sanitizeUserFacingText(x)).filter(Boolean),
+    citations: [],
   }
 }
 
@@ -317,7 +319,20 @@ function normalizePublished(rows: FindingOut[], sectionsById: Record<string, Sec
         sectionTitle,
         legalAnchors: row.primary_legal_anchor ?? [],
       }),
-    }]
+    }].map((seed) => ({
+      ...seed,
+      issue: {
+        ...seed.issue,
+        citations: (row.citations ?? [])
+          .filter((c) => sanitizeUserFacingText(c.excerpt))
+          .map((c) => ({
+            source_section_title: sectionTitle,
+            excerpt_text: sanitizeOrFallback(c.excerpt),
+            gdpr_articles: [`GDPR Article ${c.article_number}`],
+            evidence_reasoning_link: sanitizeOrFallback(row.gap_reasoning ?? row.gap_note),
+          })),
+      },
+    }))
   })
 }
 
@@ -345,10 +360,24 @@ function normalizeReview(rows: ReviewItemOut[], sectionsById: Record<string, Sec
         statusRaw: row.status ?? row.final_disposition,
         gapNote: row.gap_note ?? row.reason,
         remediationNote: row.remediation_note,
-        excerpt: row.reason ?? row.gap_note,
+        excerpt: row.citations?.[0]?.excerpt ?? row.reason ?? row.gap_note,
         sectionTitle,
       }),
     }]
+    .map((seed) => ({
+      ...seed,
+      issue: {
+        ...seed.issue,
+        citations: (row.citations ?? [])
+          .filter((c) => sanitizeUserFacingText(c.excerpt))
+          .map((c) => ({
+            source_section_title: sectionTitle,
+            excerpt_text: sanitizeOrFallback(c.excerpt),
+            gdpr_articles: [`GDPR Article ${c.article_number}`],
+            evidence_reasoning_link: sanitizeOrFallback(row.reason ?? row.gap_note),
+          })),
+      },
+    }))
   })
 }
 
@@ -521,6 +550,9 @@ export function validatePresentationInvariants(
         }
         if (hasInternalText(issue.whyThisMatters) || hasInternalText(issue.evidenceText) || hasInternalText(issue.recommendedAction)) {
           errors.push(`Unsanitized content in ${name} for section ${row.sectionId}`)
+        }
+        if (name !== 'analysisVisibleFindings' && row.scope === 'Section' && issue.citations.length === 0) {
+          errors.push(`Missing citations for section finding in ${name} for section ${row.sectionId}`)
         }
       }
     }

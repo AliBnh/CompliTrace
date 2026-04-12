@@ -89,6 +89,7 @@ export type ReportOut = {
 }
 
 export type ExportContractOut = {
+  report_type: 'Published report' | 'Review report (final publication pending)'
   dataset_used: 'published' | 'review'
   export_allowed: boolean
   blocker_reasons: string[]
@@ -147,4 +148,5 @@ export type ReviewItemOut = {
   reason?: string | null
   source_scope_dependency?: string | null
   publication_recommendation?: string | null
+  citations?: CitationOut[] | null
 }

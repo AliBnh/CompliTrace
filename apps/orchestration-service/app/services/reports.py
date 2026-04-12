@@ -412,6 +412,7 @@ def build_export_contract(
     ]
     finding_ids = sorted([row.id for row in export_rows])
     contract = {
+        "report_type": "Review report (final publication pending)" if dataset_used == "review" else "Published report",
         "dataset_used": dataset_used,
         "export_allowed": True,
         "blocker_reasons": [],
@@ -491,6 +492,7 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Partially compliant: {by_status['partial']}", bullet=True),
         _TextBlock(f"Non-compliant: {by_status['gap']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
+        _TextBlock(f"Report type: {contract['report_type']}", bullet=True),
         _TextBlock(f"Dataset used: {'Review findings (publication blocked)' if contract['dataset_used'] == 'review' else 'Final published findings'}", bullet=True),
         _TextBlock("Document-wide findings", font_size=13, top_gap=14),
     ]
