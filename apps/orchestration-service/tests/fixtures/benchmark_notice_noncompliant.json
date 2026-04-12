@@ -1,0 +1,22 @@
+{
+  "name": "benchmark_notice_noncompliant",
+  "expected_overall_verdict": "non_compliant",
+  "required_findings": [
+    "Legal basis disclosure",
+    "Retention disclosure",
+    "Transfer safeguards disclosure",
+    "Data subject rights disclosure",
+    "Complaint-right disclosure",
+    "Cookie transparency disclosure",
+    "Profiling transparency"
+  ],
+  "forbidden_findings": [],
+  "expected_counts_by_family": {
+    "major": 7
+  },
+  "expected_report_counts": {
+    "non_compliant": 7
+  },
+  "expected_citations_presence": true,
+  "expected_export_dataset_label": "review"
+}

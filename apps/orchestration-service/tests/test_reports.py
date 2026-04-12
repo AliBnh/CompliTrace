@@ -13,6 +13,7 @@ from app.models.audit import Audit, Finding
 from app.services.clients import DocumentData
 from app.services.clients import SectionData
 from app.services.reports import _format_citation_label, _sanitize_user_text, _section_report_meta, generate_report_text
+import json
 
 
 def test_generate_report_writes_valid_pdf(tmp_path: Path):
@@ -217,3 +218,57 @@ def test_report_pdf_contains_auditor_grade_titles_and_evidence(tmp_path: Path):
             assert "[]" not in decoded
     finally:
         settings.reports_dir = old_reports_dir
+
+
+def test_report_pdf_contains_contract_dataset_and_ids(tmp_path: Path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    old_reports_dir = settings.reports_dir
+    settings.reports_dir = tmp_path
+    try:
+        with SessionLocal() as db:
+            audit = Audit(
+                id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                status="complete",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                model_provider="test",
+                model_name="test-model",
+                model_temperature=0.1,
+                prompt_template_version="v1",
+                embedding_model="embed",
+                corpus_version="corpus-v1",
+            )
+            db.add(audit)
+            db.flush()
+            finding = Finding(
+                id=str(uuid.uuid4()),
+                audit_id=audit.id,
+                section_id="systemic:missing_complaint_right",
+                status="gap",
+                severity="high",
+                gap_note="Complaint-right notice missing.",
+                remediation_note="Add complaint-right notice.",
+                publication_state="blocked",
+            )
+            db.add(finding)
+            db.commit()
+            _, out_path = generate_report_text(db, audit.id)
+            decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
+            assert "Dataset used:" in decoded
+            assert "Review findings" in decoded
+            assert finding.id in decoded
+    finally:
+        settings.reports_dir = old_reports_dir
+
+
+def test_benchmark_fixture_files_are_locked_and_complete():
+    root = Path(__file__).resolve().parent / "fixtures"
+    compliant = json.loads((root / "benchmark_notice_compliant.json").read_text())
+    noncompliant = json.loads((root / "benchmark_notice_noncompliant.json").read_text())
+    assert compliant["name"] == "benchmark_notice_compliant"
+    assert noncompliant["name"] == "benchmark_notice_noncompliant"
+    assert "Legal basis disclosure" in compliant["forbidden_findings"]
+    assert "Legal basis disclosure" in noncompliant["required_findings"]

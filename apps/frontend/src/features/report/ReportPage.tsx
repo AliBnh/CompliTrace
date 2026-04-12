@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
-import { createReport, getAnalysis, getFindings, getReport, getReview, getSections, reportDownloadUrl } from '../../lib/api'
+import { createReport, getAnalysis, getExportContract, getFindings, getReport, getReview, getSections, reportDownloadUrl } from '../../lib/api'
 import { aggregateCounts, assertPdfDatasetIntegrity, buildFindingsPresentation, splitFindingsByScope, validateReportExportReadiness } from '../../lib/presentation'
-import type { AnalysisItemOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from '../../lib/types'
+import type { AnalysisItemOut, ExportContractOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function ReportPage() {
   const { auditId, documentId } = useAppState()
@@ -12,6 +12,7 @@ export function ReportPage() {
   const [publishedRows, setPublishedRows] = useState<FindingOut[]>([])
   const [sectionsById, setSectionsById] = useState<Record<string, SectionOut>>({})
   const [report, setReport] = useState<ReportOut | null>(null)
+  const [exportContract, setExportContract] = useState<ExportContractOut | null>(null)
   const [status, setStatus] = useState<'idle' | 'generating' | 'ready'>('idle')
   const [error, setError] = useState<string | null>(null)
 
@@ -31,6 +32,7 @@ export function ReportPage() {
       else setPublishedRows([])
       setAnalysisRows(analysisResult.status === 'fulfilled' ? analysisResult.value : [])
     })
+    getExportContract(auditId).then(setExportContract).catch(() => setExportContract(null))
   }, [auditId])
 
   useEffect(() => {
@@ -54,13 +56,13 @@ export function ReportPage() {
     sectionsById,
     publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
   }), [publishedRows, reviewRows, analysisRows, sectionsById])
-  const counts = aggregateCounts(presentation.reportExportFindings)
+  const counts = exportContract?.counts_by_status ?? aggregateCounts(presentation.reportExportFindings)
   const { documentFindings, sectionFindings } = splitFindingsByScope(presentation.reportExportFindings)
   const readiness = useMemo(() => validateReportExportReadiness(presentation, {
     pdfRenderedFindingsCount: presentation.reportExportFindings.length,
     pdfDatasetLabel: presentation.reportDatasetLabel,
     pdfRows: presentation.reportExportFindings,
-    pdfStatusCounts: counts,
+    pdfStatusCounts: aggregateCounts(presentation.reportExportFindings),
   }), [presentation, counts])
 
   async function generate() {
@@ -69,10 +71,11 @@ export function ReportPage() {
     setStatus('generating')
     const pdfFindings = presentation.reportExportFindings
     assertPdfDatasetIntegrity(pdfFindings, presentation.reportExportFindings)
-    if (!readiness.ok) {
+    if (!readiness.ok || exportContract?.export_allowed === false) {
       console.error('Report export invariants failed', readiness.errors)
       setStatus('idle')
-      setError(`PDF export blocked until presentation integrity checks pass: ${readiness.errors[0]}`)
+      const reason = exportContract?.blocker_reasons?.[0] ?? readiness.errors[0]
+      setError(`PDF export blocked until backend export contract is satisfied: ${reason}`)
       return
     }
 
@@ -90,7 +93,7 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{presentation.reportDatasetLabel}</span>.</p>
+        <p className="section-subtitle">PDF source dataset: <span className="font-medium">{exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
@@ -107,8 +110,8 @@ export function ReportPage() {
           ))}
         </div>
         <div className={`mt-4 rounded-xl border p-3 text-sm ${readiness.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
-          Export readiness: {readiness.ok ? 'Ready for export' : 'Blocked due to dataset invariant failure'}
-          {!readiness.ok && <div className="mt-1">Blocker reason: {readiness.errors[0]}</div>}
+          Export readiness: {(readiness.ok && exportContract?.export_allowed !== false) ? 'Ready for export' : 'Blocked due to dataset invariant failure'}
+          {(exportContract?.export_allowed === false || !readiness.ok) && <div className="mt-1">Blocker reason: {exportContract?.blocker_reasons?.[0] ?? readiness.errors[0]}</div>}
         </div>
       </header>
 
@@ -119,7 +122,7 @@ export function ReportPage() {
         {error && <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <button onClick={generate} disabled={status === 'generating' || !readiness.ok} className="btn-primary min-w-40">
+          <button onClick={generate} disabled={status === 'generating' || !readiness.ok || exportContract?.export_allowed === false} className="btn-primary min-w-40">
             {status === 'generating' ? 'Generating…' : 'Generate PDF'}
           </button>
           {status === 'ready' && (
@@ -132,7 +135,7 @@ export function ReportPage() {
       </article>
       <article className="surface-card p-6">
         <h2 className="text-lg font-semibold text-slate-900">Export preview</h2>
-        <p className="mt-1 text-sm text-slate-500">Dataset: {presentation.reportDatasetLabel}</p>
+        <p className="mt-1 text-sm text-slate-500">Dataset: {exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'}</p>
         <div className="mt-4 grid gap-5 lg:grid-cols-2">
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Top document-wide findings</h3>
