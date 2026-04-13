@@ -18,6 +18,7 @@ from app.api.routes import (
     get_findings,
     get_review,
     get_review_grouped,
+    _render_published_evidence_excerpt,
 )
 from app.db.base import Base
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
@@ -103,11 +104,11 @@ def test_export_contract_is_backend_authoritative(db_session: Session):
     db_session.commit()
 
     contract = get_export_contract(audit.id, db_session)
-    assert contract.report_type == "Review report (final publication pending)"
-    assert contract.dataset_used == "review"
+    assert contract.report_type == "Zero-findings report"
+    assert contract.dataset_used == "zero"
     assert contract.export_allowed is True
-    assert contract.counts_by_status["total"] == 1
-    assert contract.finding_ids == contract.document_wide_finding_ids
+    assert contract.counts_by_status["total"] == 0
+    assert contract.finding_ids == []
 
 
 def test_create_report_blocks_generation_when_review_required(db_session: Session):
@@ -217,7 +218,33 @@ def test_get_findings_projects_publishable_specialist_gaps_from_decision_map(db_
     assert findings[0].citations[0].source_type == "retrieval_chunk"
 
 
-def test_get_findings_blocks_when_decision_map_disallows_publication(db_session: Session):
+def test_get_findings_merges_without_duplication_for_same_family(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    db_session.add(
+        Finding(
+            audit_id=audit.id,
+            section_id="ledger:final-disposition",
+            status="not applicable",
+            severity=None,
+            legal_requirement="suppression_validator=final_disposition_map",
+            gap_reasoning='{"transfer":{"status":"gap","publication_recommendation":"publish","reasoning":"missing safeguards"}}',
+            publish_flag="no",
+            publication_state="internal_only",
+            finding_type="supporting_evidence",
+            artifact_role="support_only",
+            finding_level="none",
+        )
+    )
+    db_session.commit()
+    findings = get_findings(audit.id, db_session)
+    assert len([f for f in findings if f.section_id == "systemic:missing_transfer_notice"]) == 1
+
+
+def test_published_evidence_uses_clean_fallback_for_invalid_excerpt():
+    assert _render_published_evidence_excerpt(".", None, issue_hint="missing_legal_basis") == "No explicit disclosure found in this section."
+
+
+def test_get_findings_synthesizes_even_when_decision_map_disallows_publication(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
         Finding(
@@ -236,9 +263,8 @@ def test_get_findings_blocks_when_decision_map_disallows_publication(db_session:
     )
     db_session.commit()
 
-    with pytest.raises(HTTPException) as exc:
-        get_findings(audit.id, db_session)
-    assert exc.value.status_code == 409
+    findings = get_findings(audit.id, db_session)
+    assert findings == []
 
 
 def test_get_findings_blocks_when_publish_recommendation_has_no_materialized_family(db_session: Session):

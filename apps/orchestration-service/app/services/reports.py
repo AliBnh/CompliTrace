@@ -375,10 +375,21 @@ def _title_for_row(row: Finding | _SyntheticFinding) -> str:
 
 
 def _evidence_for_row(row: Finding | _SyntheticFinding, section_label: str) -> str:
-    excerpt = next((c.excerpt for c in row.citations if _sanitize_user_text(c.excerpt)), None)
+    excerpt = next((c.excerpt for c in row.citations if _is_valid_evidence_excerpt(c.excerpt)), None)
     if excerpt:
         return f"{section_label}: {_sanitize_user_text(excerpt)}"
-    return "No explicit statement covering this obligation was identified in the reviewed text."
+    if section_label and section_label != "Document section":
+        return "No explicit disclosure found in this section."
+    return "No explicit disclosure found in this document."
+
+
+def _is_valid_evidence_excerpt(excerpt: str | None) -> bool:
+    cleaned = (_sanitize_user_text(excerpt) or "").strip()
+    if len(cleaned) < 12:
+        return False
+    if cleaned.lower() in {"section", ".", ":", "-", "n/a"}:
+        return False
+    return bool(re.search(r"[a-zA-Z]{4,}", cleaned))
 
 
 def _is_safe_for_export(row: Finding | _SyntheticFinding, section_label: str) -> bool:
@@ -444,58 +455,32 @@ def build_export_contract(
         .where(Finding.audit_id == audit_id)
         .order_by(Finding.section_id.asc())
     ).all()
-    visible_review_findings = [
-        row
-        for row in findings
-        if (
-            row.publication_state in {"publishable", "blocked"}
-            or (row.publication_state in {"internal_only"} and row.legal_requirement is not None)
-        )
-        and not row.section_id.startswith("ledger:")
-    ]
-    publishable_findings = [f for f in findings if _is_publishable_finding(f)]
-    analysis_findings = _analysis_rows_for_export(db, audit_id)
+    publishable_findings = [f for f in findings if _is_publishable_finding(f) and not f.section_id.startswith("ledger:")]
+    dataset_used = "published" if publishable_findings else "zero"
+    report_type = "Published report" if publishable_findings else "Zero-findings report"
+    report_rows: list[Finding | _SyntheticFinding] = publishable_findings
+    published_blocked = False
 
-    if publishable_findings:
-        dataset_used = "published"
-        report_type = "Published report"
-        report_rows: list[Finding | _SyntheticFinding] = publishable_findings
-    elif visible_review_findings:
-        dataset_used = "review"
-        report_type = "Review report (final publication pending)"
-        report_rows = visible_review_findings
-    elif analysis_findings:
-        dataset_used = "analysis"
-        report_type = "Preliminary analysis report"
-        report_rows = analysis_findings
-    else:
-        dataset_used = "zero"
-        report_type = "Zero-findings report"
-        report_rows = []
-    published_blocked = dataset_used != "published"
-
-    deduped_by_section: dict[str, Finding | _SyntheticFinding] = {}
+    deduped_by_section: dict[tuple[str, str], Finding | _SyntheticFinding] = {}
     for row in report_rows:
         if row.classification in {"diagnostic_internal_only", "not_assessable"}:
             continue
-        existing = deduped_by_section.get(row.section_id)
+        issue_key = _issue_from_section_id(row.section_id) or (_sanitize_user_text(row.legal_requirement) or "generic")
+        dedupe_key = (row.section_id, issue_key)
+        existing = deduped_by_section.get(dedupe_key)
         if not existing:
-            deduped_by_section[row.section_id] = row
+            deduped_by_section[dedupe_key] = row
             continue
         current_rank = {"gap": 4, "partial": 3, "compliant": 2, "not applicable": 1}.get(_normalize_status(row.status), 1)
         existing_rank = {"gap": 4, "partial": 3, "compliant": 2, "not applicable": 1}.get(_normalize_status(existing.status), 1)
         if current_rank > existing_rank:
-            deduped_by_section[row.section_id] = row
+            deduped_by_section[dedupe_key] = row
 
     audit = db.get(Audit, audit_id)
     _, section_meta = _section_report_meta(audit) if audit else (None, {})
     export_rows: list[Finding | _SyntheticFinding] = [
         row
         for row in deduped_by_section.values()
-        if _is_safe_for_export(
-            row,
-            section_meta.get(row.section_id, _SectionReportMeta(label="Document section", page_range=None)).label,
-        )
     ]
     if report_rows and not export_rows:
         export_rows = list(deduped_by_section.values())
@@ -675,7 +660,17 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     )
     pdf_count = decoded.count("Finding:")
     if pdf_count != len(report_rows_deduped):
-        raise ValueError("PDF export mismatch: report finding count != pdf finding count")
+        report_details = [
+            {
+                "id": row.id,
+                "issue_type": _issue_from_section_id(row.section_id) or "unknown_issue",
+                "scope": "document_wide" if row.section_id.startswith("systemic:") else "section",
+            }
+            for row in report_rows_deduped
+        ]
+        raise ValueError(
+            f"Mismatch between report and PDF datasets: report_count={len(report_rows_deduped)} pdf_count={pdf_count} report_rows={report_details}"
+        )
     label_ok = (
         ("Final published findings" in decoded and contract["dataset_used"] == "published")
         or ("Review findings" in decoded and contract["dataset_used"] == "review")

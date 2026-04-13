@@ -56,27 +56,12 @@ export function ReportPage() {
     sectionsById,
     publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
   }), [publishedRows, reviewRows, analysisRows, sectionsById])
-  const exportRows = (exportContract?.dataset_used === 'review'
-    ? presentation.reviewVisibleFindings
-    : exportContract?.dataset_used === 'published'
-      ? presentation.publishedVisibleFindings
-      : exportContract?.dataset_used === 'analysis'
-        ? presentation.analysisVisibleFindings
-        : exportContract?.dataset_used === 'zero'
-          ? []
-          : presentation.reportExportFindings)
+  const exportRows = presentation.publishedVisibleFindings
   const counts = exportContract?.counts_by_status ?? aggregateCounts(exportRows)
   const { documentFindings, sectionFindings } = splitFindingsByScope(exportRows)
   const readiness = useMemo(() => validateReportExportReadiness(presentation, {
     pdfRenderedFindingsCount: exportRows.length,
-    pdfDatasetLabel:
-      exportContract?.dataset_used === 'review'
-        ? 'Review findings (used because publication is blocked)'
-        : exportContract?.dataset_used === 'analysis'
-          ? 'Preliminary analysis findings'
-          : exportContract?.dataset_used === 'zero'
-            ? 'Zero-findings dataset'
-            : 'Final published findings',
+    pdfDatasetLabel: 'Final published findings',
     pdfRows: exportRows,
     pdfStatusCounts: aggregateCounts(exportRows),
   }), [presentation, exportRows, exportContract])
@@ -126,7 +111,7 @@ export function ReportPage() {
           ))}
         </div>
         <div className={`mt-4 rounded-xl border p-3 text-sm ${readiness.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
-          Export readiness: {(readiness.ok && exportContract?.export_allowed !== false) ? 'Ready for export' : 'Blocked due to dataset invariant failure'}
+          Export readiness: {(readiness.ok && exportContract?.export_allowed !== false) ? 'Ready for export' : 'Blocked due to mismatch between report and PDF datasets'}
           {(exportContract?.export_allowed === false || !readiness.ok) && <div className="mt-1">Blocker reason: {exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : readiness.errors[0]}</div>}
         </div>
       </header>
