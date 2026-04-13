@@ -3899,6 +3899,76 @@ def _build_final_disposition_map(
     return families
 
 
+def _readable_evidence(issue: str) -> str:
+    duty = issue.replace("missing_", "").replace("_", " ")
+    return f"This notice does not clearly disclose the required information regarding {duty}."
+
+
+def _enforce_review_publish_invariant(
+    db: Session,
+    audit_id: str,
+    final_disposition_map: dict[str, dict[str, str | bool]],
+) -> None:
+    family_to_issue = {
+        "controller_identity_contact": "missing_controller_contact",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights_notice": "missing_rights_notice",
+        "complaint_right": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+        "article14_source": "article_14_indirect_collection_gap",
+        "recipients": "recipients_disclosure_gap",
+        "special_category": "special_category_basis_unclear",
+        "dpo_contact": "dpo_contact_gap",
+        "purpose_mapping": "purpose_specificity_gap",
+    }
+    required_issues = {
+        family_to_issue.get(family, str(item.get("issue_key") or ""))
+        for family, item in final_disposition_map.items()
+        if str(item.get("status") or "") == "gap" and str(item.get("publication_recommendation") or "") == "publish"
+    }
+    required_issues = {issue for issue in required_issues if issue}
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    for row in rows:
+        issue = _finding_issue_id(row)
+        if issue not in required_issues:
+            continue
+        row.publish_flag = "yes"
+        row.publication_state = "publishable"
+        row.artifact_role = "publishable_finding"
+        row.finding_type = "systemic" if row.section_id.startswith("systemic:") else "local"
+        row.finding_level = "systemic" if row.section_id.startswith("systemic:") else "local"
+        if row.classification == "not_assessable":
+            row.classification = "probable_gap"
+            row.status = "gap" if row.status == "gap" else "partial"
+            row.gap_note = row.gap_note or "Disclosure is incomplete or unclear based on available text."
+        if not (row.policy_evidence_excerpt or "").strip():
+            row.policy_evidence_excerpt = _readable_evidence(issue)
+    existing_issues = {_finding_issue_id(r) for r in rows if r.publication_state == "publishable"}
+    for issue in sorted(required_issues - existing_issues):
+        db.add(
+            Finding(
+                audit_id=audit_id,
+                section_id=f"systemic:{issue}",
+                status="gap",
+                severity="high" if issue in {"missing_legal_basis", "missing_retention_period"} else "medium",
+                classification="systemic_violation",
+                finding_type="systemic",
+                publish_flag="yes",
+                artifact_role="publishable_finding",
+                finding_level="systemic",
+                publication_state="publishable",
+                gap_note="Disclosure is incomplete or unclear based on available text.",
+                policy_evidence_excerpt=_readable_evidence(issue),
+                legal_requirement=(SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary") or [f"GDPR duty for {issue.replace('_', ' ')}"])[0],
+                remediation_note=_issue_specific_remediation(issue, "privacy_notice", systemic=True),
+            )
+        )
+    db.commit()
+
+
 def _state_invariant_validator(rows: list[Finding]) -> list[str]:
     errors: list[str] = []
     for row in rows:
@@ -5347,6 +5417,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
     rows_for_disposition = db.query(Finding).filter(Finding.audit_id == audit.id).all()
     final_disposition_map = _build_final_disposition_map(rows_for_disposition, sections, obligation_map, duty_validation)
     _final_publication_validator(db, audit.id, final_disposition_map, source_scope)
+    _enforce_review_publish_invariant(db, audit.id, final_disposition_map)
     _record_suppression_ledger(
         db,
         audit.id,
