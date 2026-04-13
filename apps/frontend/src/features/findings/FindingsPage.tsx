@@ -193,7 +193,7 @@ function FindingDetail({ finding }: { finding: NormalizedFinding }) {
       )}
     </div>
     <Detail label="Dataset" value={finding.sourceMode === 'published' ? 'Final published findings' : finding.sourceMode === 'review' ? 'Review findings' : 'Analysis findings'} />
-    <Detail label="Section/scope" value={finding.scope === 'Document-wide' ? 'Entire document' : finding.sectionTitle} />
+    <Detail label="Scope" value={finding.scope === 'Document-wide' ? 'Entire document' : `Section: ${finding.sectionTitle}`} />
     {finding.issues.map((issue) => (
       <div key={`${finding.stable_ui_id}:${issue.issueKey}`} className="rounded-lg border border-slate-200 p-3">
         <Detail label="Issue" value={issue.issueLabel} />
@@ -201,6 +201,20 @@ function FindingDetail({ finding }: { finding: NormalizedFinding }) {
         <Detail label="Recommended action" value={issue.recommendedAction} />
         {!!issue.legalAnchors.length && <Detail label="Legal anchors" value={issue.legalAnchors.join(', ')} />}
         <Detail label="Evidence" value={issue.evidenceText} />
+        {issue.citations.length > 0 && (
+          <div className="mt-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Citations</h3>
+            <ul className="mt-1 space-y-1 text-sm text-slate-700">
+              {issue.citations.map((citation, idx) => (
+                <li key={`${finding.stable_ui_id}:${issue.issueKey}:citation:${idx}`} className="rounded border border-slate-200 p-2">
+                  <div className="font-medium">{citation.source_section_title}</div>
+                  <div>{citation.excerpt_text}</div>
+                  <div className="text-xs text-slate-500">{citation.gdpr_articles.join(', ')}</div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     ))}
   </div>

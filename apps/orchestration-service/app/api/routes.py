@@ -16,12 +16,14 @@ from app.schemas.audit import (
     AuditOut,
     CitationOut,
     FindingOut,
+    FinalDecisionLedgerRowOut,
+    ExportContractOut,
     ReportOut,
     ReportTriggerOut,
     ReviewItemOut,
 )
 from app.services.audit_runner import run_audit
-from app.services.reports import generate_report_text
+from app.services.reports import build_export_contract, generate_report_text
 
 
 router = APIRouter()
@@ -97,6 +99,25 @@ def _issue_from_finding_section(section_id: str) -> str | None:
     return None
 
 
+def _issue_subtype_for_row(row: Finding) -> str:
+    text = f"{row.gap_note or ''} {row.remediation_note or ''}".lower()
+    if "indefinite" in text or "invalid" in text:
+        return "invalid"
+    if "contradict" in text:
+        return "contradictory"
+    if "unclear" in text:
+        return "present_but_unclear"
+    if "overbroad" in text:
+        return "present_but_overbroad"
+    if row.status == "partial":
+        return "incomplete"
+    return "missing"
+
+
+def _canonical_issue_key(issue: str | None) -> str:
+    return (issue or "governance_disclosure_gap").strip().lower()
+
+
 def _apply_family_fallback(issue_type: str | None, gap_note: str | None, remediation_note: str | None) -> tuple[str | None, str | None]:
     if not issue_type:
         return gap_note, remediation_note
@@ -154,6 +175,22 @@ FAMILY_ANCHOR_TEMPLATES: dict[str, list[str]] = {
     "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
     "missing_rights_notice": ["GDPR Article 13(2)(b)", "GDPR Article 14(2)(c)"],
     "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)"],
+}
+
+CANONICAL_ISSUE_TAXONOMY: dict[str, str] = {
+    "missing_legal_basis": "Legal basis disclosure",
+    "missing_rights_notice": "Data subject rights disclosure",
+    "missing_complaint_right": "Complaint-right disclosure",
+    "missing_retention_period": "Retention disclosure",
+    "missing_transfer_notice": "Transfer safeguards disclosure",
+    "profiling_disclosure_gap": "Profiling transparency",
+    "cookie_disclosure_gap": "Cookie transparency disclosure",
+    "missing_controller_contact": "Contact information disclosure",
+    "missing_controller_identity": "Contact information disclosure",
+    "governance_disclosure_gap": "Governance and compliance disclosure",
+    "purpose_specificity_gap": "Purpose specificity disclosure",
+    "recipients_disclosure_gap": "Recipients disclosure",
+    "controller_processor_role_ambiguity": "Role allocation disclosure",
 }
 
 
@@ -2039,6 +2076,7 @@ def get_analysis(
 def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = Depends(get_db)) -> list[ReviewItemOut]:
     findings = db.scalars(
         select(Finding)
+        .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
         .where(
             (Finding.publication_state == "publishable")
@@ -2111,6 +2149,20 @@ def get_review(audit_id: str, debug: bool = Query(default=False), db: Session = 
             remediation_note=_sanitize_review_text(
                 _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1], debug=debug
             ),
+            citations=[
+                CitationOut(
+                    chunk_id=c.chunk_id,
+                    evidence_id=f"evi:chunk:{c.chunk_id}" if c.chunk_id else None,
+                    source_type="gdpr_chunk",
+                    source_ref=c.chunk_id,
+                    article_number=c.article_number,
+                    paragraph_ref=c.paragraph_ref,
+                    article_title=c.article_title,
+                    excerpt=_sanitize_review_text(c.excerpt, debug=debug) or "",
+                )
+                for c in row.citations
+                if c.excerpt
+            ] or None,
         )
         for row in findings
     )
@@ -2261,6 +2313,66 @@ def get_review_grouped(audit_id: str, debug: bool = Query(default=False), db: Se
             ]
         )
     return grouped
+
+
+@router.get("/audits/{audit_id}/final-decision-ledger", response_model=list[FinalDecisionLedgerRowOut])
+def get_final_decision_ledger(audit_id: str, db: Session = Depends(get_db)) -> list[FinalDecisionLedgerRowOut]:
+    audit = db.get(Audit, audit_id)
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    rows = db.scalars(
+        select(Finding).options(selectinload(Finding.citations)).where(Finding.audit_id == audit_id).order_by(Finding.id.asc())
+    ).all()
+    output: list[FinalDecisionLedgerRowOut] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.section_id.startswith("ledger:"):
+            continue
+        issue = _issue_from_finding_section(row.section_id) or _infer_issue_from_text(None, row.gap_note, row.remediation_note) or "governance_disclosure_gap"
+        issue_type = CANONICAL_ISSUE_TAXONOMY.get(issue, "Governance and compliance disclosure")
+        scope_type = "document_wide" if row.section_id.startswith("systemic:") else "section"
+        canonical_key = f"{scope_type}:{row.section_id}:{_canonical_issue_key(issue)}"
+        if canonical_key in seen:
+            continue
+        seen.add(canonical_key)
+        citation_refs = [f"evi:chunk:{c.chunk_id}" for c in row.citations if c.chunk_id]
+        document_refs = _deserialize_json_list(row.document_evidence_refs) or []
+        evidence_refs = sorted(set([*citation_refs, *document_refs]))
+        evidence_mode = "direct_excerpt" if row.citations else "explicit_absence_statement"
+        blockers = []
+        if row.publication_state in {"blocked", "internal_only"}:
+            blockers.append("publication_blocked")
+        output.append(
+            FinalDecisionLedgerRowOut(
+                canonical_issue_key=canonical_key,
+                scope_type=scope_type,
+                scope_id=row.section_id,
+                scope_title=row.section_id,
+                issue_type=issue_type,
+                issue_subtype=_issue_subtype_for_row(row),
+                final_status=row.status,
+                final_severity=row.severity,
+                legal_anchors=_deserialize_json_list(row.primary_legal_anchor) or [],
+                evidence_refs=evidence_refs,
+                evidence_mode=evidence_mode,
+                review_visible=True,
+                published_visible=row.publication_state == "publishable",
+                report_visible=row.publication_state in {"publishable", "blocked", "internal_only"},
+                export_visible=row.publication_state == "publishable" or row.publication_state == "blocked",
+                blocker_reason_codes=blockers,
+                normalization_metadata={"classification": row.classification or "", "publication_state": row.publication_state or ""},
+            )
+        )
+    return output
+
+
+@router.get("/audits/{audit_id}/export-contract", response_model=ExportContractOut)
+def get_export_contract(audit_id: str, db: Session = Depends(get_db)) -> ExportContractOut:
+    audit = db.get(Audit, audit_id)
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    contract, _rows, _blocked = build_export_contract(db, audit_id)
+    return ExportContractOut.model_validate(contract)
 
 
 @router.post("/audits/{audit_id}/report", response_model=ReportTriggerOut)

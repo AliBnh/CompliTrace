@@ -88,6 +88,25 @@ export type ReportOut = {
   created_at: string
 }
 
+export type ExportContractOut = {
+  report_type: 'Published report' | 'Review report (final publication pending)' | 'Preliminary analysis report' | 'Zero-findings report'
+  dataset_used: 'published' | 'review' | 'analysis' | 'zero'
+  export_allowed: boolean
+  blocker_reasons: string[]
+  counts_by_status: {
+    compliant: number
+    partially_compliant: number
+    non_compliant: number
+    not_applicable: number
+    total: number
+  }
+  finding_ids: string[]
+  document_wide_finding_ids: string[]
+  section_finding_ids: string[]
+  generated_from_audit_id: UUID
+  generated_at: string
+}
+
 export type AnalysisCitationOut = CitationOut
 
 export type AnalysisItemOut = {
@@ -129,4 +148,5 @@ export type ReviewItemOut = {
   reason?: string | null
   source_scope_dependency?: string | null
   publication_recommendation?: string | null
+  citations?: CitationOut[] | null
 }
