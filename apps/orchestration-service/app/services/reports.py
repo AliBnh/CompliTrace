@@ -5,12 +5,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple, Any
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.models.audit import Audit, AuditAnalysisItem, Finding, Report
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, Report
 from app.services.clients import IngestionClient, SectionData
 
 
@@ -56,6 +57,31 @@ class _TextBlock(NamedTuple):
     font_size: int = 10
     top_gap: int = 0
     bullet: bool = False
+
+
+@dataclass
+class _SyntheticCitation:
+    chunk_id: str
+    article_number: str
+    paragraph_ref: str | None
+    article_title: str
+    excerpt: str
+
+
+@dataclass
+class _SyntheticFinding:
+    id: str
+    section_id: str
+    status: str
+    severity: str | None
+    classification: str | None
+    legal_requirement: str | None
+    gap_note: str | None
+    remediation_note: str | None
+    citations: list[_SyntheticCitation]
+    source_scope: str | None = None
+    primary_legal_anchor: str | None = None
+    citation_summary_text: str | None = None
 
 
 def _wrap_text(text: str, max_chars: int, initial_indent: str = "", continuation_indent: str = "") -> list[str]:
@@ -340,7 +366,7 @@ def _issue_from_section_id(section_id: str) -> str | None:
     return None
 
 
-def _title_for_row(row: Finding) -> str:
+def _title_for_row(row: Finding | _SyntheticFinding) -> str:
     issue = _issue_from_section_id(row.section_id)
     if issue and issue in ISSUE_TITLE_MAP:
         return ISSUE_TITLE_MAP[issue]
@@ -348,15 +374,14 @@ def _title_for_row(row: Finding) -> str:
     return candidate[:90] if candidate else 'GDPR transparency disclosure gap'
 
 
-def _evidence_for_row(row: Finding, section_label: str) -> str:
+def _evidence_for_row(row: Finding | _SyntheticFinding, section_label: str) -> str:
     excerpt = next((c.excerpt for c in row.citations if _sanitize_user_text(c.excerpt)), None)
     if excerpt:
         return f"{section_label}: {_sanitize_user_text(excerpt)}"
-    title = _title_for_row(row).lower()
-    return f"Confirmed after review of the full document: no disclosure of {title} was identified."
+    return "No explicit statement covering this obligation was identified in the reviewed text."
 
 
-def _is_safe_for_export(row: Finding, section_label: str) -> bool:
+def _is_safe_for_export(row: Finding | _SyntheticFinding, section_label: str) -> bool:
     title = _title_for_row(row)
     evidence = _evidence_for_row(row, section_label)
     blob = f"{title} {_sanitize_user_text(row.gap_note) or ''} {_sanitize_user_text(row.remediation_note) or ''} {evidence}".lower()
@@ -367,10 +392,52 @@ def _is_safe_for_export(row: Finding, section_label: str) -> bool:
     return True
 
 
+def _analysis_rows_for_export(db: Session, audit_id: str) -> list[_SyntheticFinding]:
+    rows = db.scalars(
+        select(AuditAnalysisItem)
+        .options(selectinload(AuditAnalysisItem.citations))
+        .where(AuditAnalysisItem.audit_id == audit_id)
+        .where(AuditAnalysisItem.analysis_outcome.in_(["candidate_gap", "candidate_partial", "referenced_but_unseen"]))
+        .order_by(AuditAnalysisItem.section_id.asc(), AuditAnalysisItem.id.asc())
+    ).all()
+    out: list[_SyntheticFinding] = []
+    for row in rows:
+        if row.section_id.startswith("ledger:") or row.analysis_type in {"support_evidence", "meta_section"}:
+            continue
+        citations = [
+            _SyntheticCitation(
+                chunk_id=c.chunk_id,
+                article_number=c.article_number,
+                paragraph_ref=c.paragraph_ref,
+                article_title=c.article_title,
+                excerpt=_sanitize_user_text(c.excerpt) or "",
+            )
+            for c in row.citations
+            if _sanitize_user_text(c.excerpt)
+        ]
+        out.append(
+            _SyntheticFinding(
+                id=f"analysis:{row.id}",
+                section_id=row.section_id,
+                status=_normalize_status(row.status_candidate),
+                severity=row.finding_severity,
+                classification=row.classification_candidate,
+                legal_requirement=row.legal_requirement_candidate,
+                gap_note=row.gap_note,
+                remediation_note=row.remediation_note,
+                citations=citations,
+                source_scope=row.source_scope,
+                primary_legal_anchor=row.article_candidates,
+                citation_summary_text=row.qualification_summary,
+            )
+        )
+    return out
+
+
 def build_export_contract(
     db: Session,
     audit_id: str,
-) -> tuple[dict[str, Any], list[Finding], bool]:
+) -> tuple[dict[str, Any], list[Finding | _SyntheticFinding], bool]:
     findings = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
@@ -387,11 +454,27 @@ def build_export_contract(
         and not row.section_id.startswith("ledger:")
     ]
     publishable_findings = [f for f in findings if _is_publishable_finding(f)]
-    published_blocked = len(publishable_findings) == 0 and len(visible_review_findings) > 0
-    dataset_used = "review" if published_blocked else "published"
-    report_rows = visible_review_findings if published_blocked else publishable_findings
+    analysis_findings = _analysis_rows_for_export(db, audit_id)
 
-    deduped_by_section: dict[str, Finding] = {}
+    if publishable_findings:
+        dataset_used = "published"
+        report_type = "Published report"
+        report_rows: list[Finding | _SyntheticFinding] = publishable_findings
+    elif visible_review_findings:
+        dataset_used = "review"
+        report_type = "Review report (final publication pending)"
+        report_rows = visible_review_findings
+    elif analysis_findings:
+        dataset_used = "analysis"
+        report_type = "Preliminary analysis report"
+        report_rows = analysis_findings
+    else:
+        dataset_used = "zero"
+        report_type = "Zero-findings report"
+        report_rows = []
+    published_blocked = dataset_used != "published"
+
+    deduped_by_section: dict[str, Finding | _SyntheticFinding] = {}
     for row in report_rows:
         if row.classification in {"diagnostic_internal_only", "not_assessable"}:
             continue
@@ -406,7 +489,7 @@ def build_export_contract(
 
     audit = db.get(Audit, audit_id)
     _, section_meta = _section_report_meta(audit) if audit else (None, {})
-    export_rows = [
+    export_rows: list[Finding | _SyntheticFinding] = [
         row
         for row in deduped_by_section.values()
         if _is_safe_for_export(
@@ -414,9 +497,11 @@ def build_export_contract(
             section_meta.get(row.section_id, _SectionReportMeta(label="Document section", page_range=None)).label,
         )
     ]
+    if report_rows and not export_rows:
+        export_rows = list(deduped_by_section.values())
     finding_ids = sorted([row.id for row in export_rows])
     contract = {
-        "report_type": "Review report (final publication pending)" if dataset_used == "review" else "Published report",
+        "report_type": report_type,
         "dataset_used": dataset_used,
         "export_allowed": True,
         "blocker_reasons": [],
@@ -434,7 +519,7 @@ def build_export_contract(
         "generated_at": datetime.utcnow().isoformat(),
     }
     if len(report_rows) > 0 and len(export_rows) == 0:
-        contract["blocker_reasons"] = ["no_exportable_findings_after_safety_filters"]
+        contract["blocker_reasons"] = ["fallback_dataset_empty_after_filters"]
     return contract, export_rows, published_blocked
 
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
@@ -494,7 +579,11 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         _TextBlock(f"Non-compliant: {by_status['gap']}", bullet=True),
         _TextBlock(f"Not applicable: {by_status['not applicable']}", bullet=True),
         _TextBlock(f"Report type: {contract['report_type']}", bullet=True),
-        _TextBlock(f"Dataset used: {'Review findings (publication blocked)' if contract['dataset_used'] == 'review' else 'Final published findings'}", bullet=True),
+        _TextBlock(
+            f"Dataset used: "
+            f"{'Final published findings' if contract['dataset_used'] == 'published' else 'Review findings (publication blocked)' if contract['dataset_used'] == 'review' else 'Preliminary analysis findings' if contract['dataset_used'] == 'analysis' else 'Zero-findings dataset'}",
+            bullet=True,
+        ),
         _TextBlock("Document-wide findings", font_size=13, top_gap=14),
     ]
     scope_label = next((f.source_scope for f in systemic_findings if f.source_scope), None)
@@ -575,11 +664,25 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     _write_pdf(blocks, out_path)
 
     decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
-    expected_label = "Review findings (publication blocked)" if contract["dataset_used"] == "review" else "Final published findings"
+    expected_label = (
+        "Final published findings"
+        if contract["dataset_used"] == "published"
+        else "Review findings (publication blocked)"
+        if contract["dataset_used"] == "review"
+        else "Preliminary analysis findings"
+        if contract["dataset_used"] == "analysis"
+        else "Zero-findings dataset"
+    )
     pdf_count = decoded.count("Finding:")
     if pdf_count != len(report_rows_deduped):
         raise ValueError("PDF export mismatch: report finding count != pdf finding count")
-    if "Dataset used:" not in decoded or ("Review findings" not in decoded and contract["dataset_used"] == "review") or ("Final published findings" not in decoded and contract["dataset_used"] == "published"):
+    label_ok = (
+        ("Final published findings" in decoded and contract["dataset_used"] == "published")
+        or ("Review findings" in decoded and contract["dataset_used"] == "review")
+        or ("Preliminary analysis findings" in decoded and contract["dataset_used"] == "analysis")
+        or ("Zero-findings dataset" in decoded and contract["dataset_used"] == "zero")
+    )
+    if "Dataset used:" not in decoded or not label_ok:
         raise ValueError("PDF export mismatch: report dataset label != pdf dataset label")
     if "Finding IDs:" not in decoded or any(fid not in decoded for fid in contract["finding_ids"]):
         raise ValueError("PDF export mismatch: report finding ids != pdf finding ids")

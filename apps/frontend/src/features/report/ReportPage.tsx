@@ -60,12 +60,23 @@ export function ReportPage() {
     ? presentation.reviewVisibleFindings
     : exportContract?.dataset_used === 'published'
       ? presentation.publishedVisibleFindings
-      : presentation.reportExportFindings)
+      : exportContract?.dataset_used === 'analysis'
+        ? presentation.analysisVisibleFindings
+        : exportContract?.dataset_used === 'zero'
+          ? []
+          : presentation.reportExportFindings)
   const counts = exportContract?.counts_by_status ?? aggregateCounts(exportRows)
   const { documentFindings, sectionFindings } = splitFindingsByScope(exportRows)
   const readiness = useMemo(() => validateReportExportReadiness(presentation, {
     pdfRenderedFindingsCount: exportRows.length,
-    pdfDatasetLabel: exportContract?.dataset_used === 'review' ? 'Review findings (used because publication is blocked)' : 'Final published findings',
+    pdfDatasetLabel:
+      exportContract?.dataset_used === 'review'
+        ? 'Review findings (used because publication is blocked)'
+        : exportContract?.dataset_used === 'analysis'
+          ? 'Preliminary analysis findings'
+          : exportContract?.dataset_used === 'zero'
+            ? 'Zero-findings dataset'
+            : 'Final published findings',
     pdfRows: exportRows,
     pdfStatusCounts: aggregateCounts(exportRows),
   }), [presentation, exportRows, exportContract])
@@ -79,7 +90,7 @@ export function ReportPage() {
     if (!readiness.ok || exportContract?.export_allowed === false) {
       console.error('Report export invariants failed', readiness.errors)
       setStatus('idle')
-      const reason = exportContract?.blocker_reasons?.[0] ?? readiness.errors[0]
+      const reason = exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : readiness.errors[0]
       setError(`PDF export blocked until backend export contract is satisfied: ${reason}`)
       return
     }
@@ -98,7 +109,7 @@ export function ReportPage() {
     <section className="space-y-5">
       <header className="surface-card p-6">
         <h1 className="section-title">Report center</h1>
-        <p className="section-subtitle">{exportContract?.report_type ?? 'Report'} • PDF source dataset: <span className="font-medium">{exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'}</span>.</p>
+        <p className="section-subtitle">{exportContract?.report_type ?? 'Report'} • PDF source dataset: <span className="font-medium">{datasetLabel(exportContract?.dataset_used)}</span>.</p>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
@@ -116,7 +127,7 @@ export function ReportPage() {
         </div>
         <div className={`mt-4 rounded-xl border p-3 text-sm ${readiness.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
           Export readiness: {(readiness.ok && exportContract?.export_allowed !== false) ? 'Ready for export' : 'Blocked due to dataset invariant failure'}
-          {(exportContract?.export_allowed === false || !readiness.ok) && <div className="mt-1">Blocker reason: {exportContract?.blocker_reasons?.[0] ?? readiness.errors[0]}</div>}
+          {(exportContract?.export_allowed === false || !readiness.ok) && <div className="mt-1">Blocker reason: {exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : readiness.errors[0]}</div>}
         </div>
       </header>
 
@@ -140,7 +151,7 @@ export function ReportPage() {
       </article>
       <article className="surface-card p-6">
         <h2 className="text-lg font-semibold text-slate-900">Export preview</h2>
-        <p className="mt-1 text-sm text-slate-500">Dataset: {exportContract?.dataset_used === 'review' ? 'Review findings (publication blocked)' : 'Final published findings'} • Report type: {exportContract?.report_type ?? 'Report'}</p>
+        <p className="mt-1 text-sm text-slate-500">Dataset: {datasetLabel(exportContract?.dataset_used)} • Report type: {exportContract?.report_type ?? 'Report'}</p>
         <div className="mt-4 grid gap-5 lg:grid-cols-2">
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Top document-wide findings</h3>
@@ -169,4 +180,16 @@ function metricTone(label: string): string {
   if (label === 'Partially compliant') return 'border-amber-200 bg-amber-50 text-amber-800'
   if (label === 'Non-compliant') return 'border-rose-200 bg-rose-50 text-rose-800'
   return 'border-slate-200 bg-slate-50 text-slate-700'
+}
+
+function datasetLabel(dataset?: 'published' | 'review' | 'analysis' | 'zero'): string {
+  if (dataset === 'review') return 'Review findings (publication blocked)'
+  if (dataset === 'analysis') return 'Preliminary analysis findings'
+  if (dataset === 'zero') return 'Zero-findings dataset'
+  return 'Final published findings'
+}
+
+function toUserBlocker(code: string): string {
+  if (code === 'fallback_dataset_empty_after_filters') return 'No high-confidence items were retained after quality checks; a clean report can still be generated.'
+  return 'Export is temporarily unavailable for this dataset.'
 }

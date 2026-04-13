@@ -93,6 +93,7 @@ const BANNED_PATTERNS = [
   'no explicit evidence refs from final map', 'withheld by final publication validator',
   'signal detected', 'legal gate', 'duty-level', 'reconciliation', 'suppressed',
   'not assessable from provided excerpt', 'finding promoted to substantive non-compliance', 'strict legal gate',
+  'no_exportable_findings_after_safety_filters', 'invariant',
 ]
 
 const ISSUE_ALIASES: Record<string, string> = {

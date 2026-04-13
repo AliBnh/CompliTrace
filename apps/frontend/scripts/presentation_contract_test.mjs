@@ -111,7 +111,7 @@ for (const row of blockedPresentation.reportExportFindings) {
   }
 }
 const serializedBlocked = JSON.stringify(blockedPresentation).toLowerCase()
-for (const banned of ['candidate_issue', 'withheld by final publication validator', 'profiling_without_required_explanation', 'signal detected', 'legal gate', 'duty-level', 'reconciliation', 'suppressed']) {
+for (const banned of ['candidate_issue', 'withheld by final publication validator', 'profiling_without_required_explanation', 'signal detected', 'legal gate', 'duty-level', 'reconciliation', 'suppressed', 'no_exportable_findings_after_safety_filters', 'invariant']) {
   assert.ok(!serializedBlocked.includes(banned), `banned token leaked: ${banned}`)
 }
 

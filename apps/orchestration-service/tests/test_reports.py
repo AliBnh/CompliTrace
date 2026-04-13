@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models.audit import Audit, Finding, FindingCitation
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, FindingCitation
 from app.services.clients import DocumentData
 from app.services.clients import SectionData
 from app.services.reports import _format_citation_label, _sanitize_user_text, _section_report_meta, build_export_contract, generate_report_text
@@ -214,7 +214,7 @@ def test_report_pdf_contains_auditor_grade_titles_and_evidence(tmp_path: Path):
             assert "Finding: Missing legal basis disclosure" in decoded
             assert "Why this matters:" in decoded
             assert "Recommended action:" in decoded
-            assert "Evidence: Confirmed after review of the full document:" in decoded
+            assert "No explicit statement covering this obligation" in decoded
             assert "[]" not in decoded
     finally:
         settings.reports_dir = old_reports_dir
@@ -359,5 +359,65 @@ def test_zero_findings_still_generates_pdf(tmp_path: Path):
             assert report.status == "ready"
             decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
             assert "No material issues identified in the selected report dataset." in decoded
+            assert "no_exportable_findings_after_safety_filters" not in decoded
+    finally:
+        settings.reports_dir = old_reports_dir
+
+
+def test_analysis_fallback_used_when_published_and_review_empty(tmp_path: Path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    old_reports_dir = settings.reports_dir
+    settings.reports_dir = tmp_path
+    try:
+        with SessionLocal() as db:
+            audit = Audit(
+                id=str(uuid.uuid4()),
+                document_id=str(uuid.uuid4()),
+                status="complete",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                model_provider="test",
+                model_name="test-model",
+                model_temperature=0.1,
+                prompt_template_version="v1",
+                embedding_model="embed",
+                corpus_version="corpus-v1",
+            )
+            db.add(audit)
+            db.flush()
+            item = AuditAnalysisItem(
+                audit_id=audit.id,
+                section_id="sec-1",
+                analysis_outcome="candidate_gap",
+                analysis_type="provisional_local",
+                status_candidate="gap",
+                finding_severity="medium",
+                gap_note="Missing purpose mapping detail.",
+                remediation_note="Add specific purpose mappings.",
+            )
+            db.add(item)
+            db.flush()
+            db.add(
+                AnalysisCitation(
+                    analysis_item_id=item.id,
+                    chunk_id="a-cit-1",
+                    article_number="13",
+                    paragraph_ref="1(c)",
+                    article_title="Information to be provided",
+                    excerpt="Purposes are broad and not specific.",
+                )
+            )
+            db.commit()
+            contract, rows, _ = build_export_contract(db, audit.id)
+            assert contract["dataset_used"] == "analysis"
+            assert contract["report_type"] == "Preliminary analysis report"
+            assert len(rows) == 1
+            report, out_path = generate_report_text(db, audit.id)
+            assert report.status == "ready"
+            decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
+            assert "Dataset used: Preliminary analysis findings" in decoded
+            assert "Report type: Preliminary analysis report" in decoded
     finally:
         settings.reports_dir = old_reports_dir

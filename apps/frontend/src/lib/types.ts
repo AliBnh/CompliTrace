@@ -89,8 +89,8 @@ export type ReportOut = {
 }
 
 export type ExportContractOut = {
-  report_type: 'Published report' | 'Review report (final publication pending)'
-  dataset_used: 'published' | 'review'
+  report_type: 'Published report' | 'Review report (final publication pending)' | 'Preliminary analysis report' | 'Zero-findings report'
+  dataset_used: 'published' | 'review' | 'analysis' | 'zero'
   export_allowed: boolean
   blocker_reasons: string[]
   counts_by_status: {
