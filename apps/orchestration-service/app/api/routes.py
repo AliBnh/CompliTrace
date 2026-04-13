@@ -23,7 +23,7 @@ from app.schemas.audit import (
     ReviewItemOut,
 )
 from app.services.audit_runner import run_audit
-from app.services.reports import build_export_contract, generate_report_text
+from app.services.reports import build_export_contract, final_findings_dataset, generate_report_text
 
 
 router = APIRouter()
@@ -1847,15 +1847,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         if not release_ok:
             raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
         return [_to_audit_ready_view(r) for r in combined]
-    rows = db.scalars(
-        select(Finding)
-        .options(selectinload(Finding.citations))
-        .where(Finding.audit_id == audit_id)
-        .where(Finding.publication_state == "publishable")
-        .where(Finding.finding_type.in_(["local", "systemic"]))
-        .where(Finding.classification.in_(["clear_non_compliance", "probable_gap", "not_assessable", "systemic_violation", "referenced_but_unseen"]))
-        .order_by(Finding.section_id.asc(), Finding.id.asc())
-    ).all()
+    rows = final_findings_dataset(db, audit_id)
     if not rows:
         parity_blockers = _parity_blocker_rows(audit_id, decision_map, [], [])
         if parity_blockers and audit.status != "audit_incomplete":
