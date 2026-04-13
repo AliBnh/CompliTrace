@@ -159,7 +159,7 @@ def test_report_pdf_omits_internal_debug_terms(tmp_path: Path):
                     severity=None,
                     gap_note="withheld by final publication validator",
                     remediation_note="Add legal basis disclosure.",
-                    publication_state="blocked",
+                        publication_state="publishable",
                 )
             )
             db.commit()
@@ -168,7 +168,7 @@ def test_report_pdf_omits_internal_debug_terms(tmp_path: Path):
             assert "validator" not in decoded
             assert "embedding model" not in decoded
             assert "corpus version" not in decoded
-            assert "dataset used: review findings" in decoded
+            assert "dataset used: final published findings" in decoded
     finally:
         settings.reports_dir = old_reports_dir
 
@@ -205,7 +205,7 @@ def test_report_pdf_contains_auditor_grade_titles_and_evidence(tmp_path: Path):
                     severity=None,
                     gap_note="Observation: legal basis disclosure is missing",
                     remediation_note="Add legal basis disclosure language.",
-                    publication_state="blocked",
+                        publication_state="publishable",
                 )
             )
             db.commit()
@@ -214,7 +214,7 @@ def test_report_pdf_contains_auditor_grade_titles_and_evidence(tmp_path: Path):
             assert "Finding: Missing legal basis disclosure" in decoded
             assert "Why this matters:" in decoded
             assert "Recommended action:" in decoded
-            assert "No explicit statement covering this obligation" in decoded
+            assert "No explicit disclosure found in this" in decoded
             assert "[]" not in decoded
     finally:
         settings.reports_dir = old_reports_dir
@@ -251,14 +251,14 @@ def test_report_pdf_contains_contract_dataset_and_ids(tmp_path: Path):
                 severity="high",
                 gap_note="Complaint-right notice missing.",
                 remediation_note="Add complaint-right notice.",
-                publication_state="blocked",
+                publication_state="publishable",
             )
             db.add(finding)
             db.commit()
             _, out_path = generate_report_text(db, audit.id)
             decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
             assert "Dataset used:" in decoded
-            assert "Review findings" in decoded
+            assert "Final published findings" in decoded
             assert finding.id in decoded
     finally:
         settings.reports_dir = old_reports_dir
@@ -274,7 +274,7 @@ def test_benchmark_fixture_files_are_locked_and_complete():
     assert "Legal basis disclosure" in noncompliant["required_findings"]
 
 
-def test_export_fallback_uses_review_dataset_when_published_unavailable(tmp_path: Path):
+def test_export_contract_uses_published_dataset_only(tmp_path: Path):
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
@@ -319,9 +319,9 @@ def test_export_fallback_uses_review_dataset_when_published_unavailable(tmp_path
             )
             db.commit()
             contract, rows, _ = build_export_contract(db, audit.id)
-            assert contract["dataset_used"] == "review"
-            assert contract["report_type"] == "Review report (final publication pending)"
-            assert contract["counts_by_status"]["total"] == len(rows) == 1
+            assert contract["dataset_used"] == "zero"
+            assert contract["report_type"] == "Zero-findings report"
+            assert contract["counts_by_status"]["total"] == len(rows) == 0
             report, pdf_path = generate_report_text(db, audit.id)
             assert report.status == "ready"
             assert pdf_path.exists()
@@ -364,7 +364,7 @@ def test_zero_findings_still_generates_pdf(tmp_path: Path):
         settings.reports_dir = old_reports_dir
 
 
-def test_analysis_fallback_used_when_published_and_review_empty(tmp_path: Path):
+def test_pdf_generation_succeeds_when_published_findings_exist(tmp_path: Path):
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
@@ -387,37 +387,24 @@ def test_analysis_fallback_used_when_published_and_review_empty(tmp_path: Path):
             )
             db.add(audit)
             db.flush()
-            item = AuditAnalysisItem(
+            finding = Finding(
                 audit_id=audit.id,
-                section_id="sec-1",
-                analysis_outcome="candidate_gap",
-                analysis_type="provisional_local",
-                status_candidate="gap",
-                finding_severity="medium",
-                gap_note="Missing purpose mapping detail.",
-                remediation_note="Add specific purpose mappings.",
+                section_id="systemic:missing_legal_basis",
+                status="gap",
+                severity="high",
+                publication_state="publishable",
+                gap_note="Missing legal basis detail.",
+                remediation_note="Add specific legal basis mappings.",
             )
-            db.add(item)
-            db.flush()
-            db.add(
-                AnalysisCitation(
-                    analysis_item_id=item.id,
-                    chunk_id="a-cit-1",
-                    article_number="13",
-                    paragraph_ref="1(c)",
-                    article_title="Information to be provided",
-                    excerpt="Purposes are broad and not specific.",
-                )
-            )
+            db.add(finding)
             db.commit()
             contract, rows, _ = build_export_contract(db, audit.id)
-            assert contract["dataset_used"] == "analysis"
-            assert contract["report_type"] == "Preliminary analysis report"
+            assert contract["dataset_used"] == "published"
             assert len(rows) == 1
             report, out_path = generate_report_text(db, audit.id)
             assert report.status == "ready"
             decoded = out_path.read_bytes().decode("latin-1", errors="ignore")
-            assert "Dataset used: Preliminary analysis findings" in decoded
-            assert "Report type: Preliminary analysis report" in decoded
+            assert "Dataset used: Final published findings" in decoded
+            assert "Report type: Published report" in decoded
     finally:
         settings.reports_dir = old_reports_dir

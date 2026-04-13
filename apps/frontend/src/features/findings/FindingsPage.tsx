@@ -43,7 +43,7 @@ export function FindingsPage() {
         setPublishedError(null)
       } else {
         setFindings([])
-        setPublishedError('Final findings are not available yet because review is still in progress.')
+        setPublishedError('Final findings are not available yet.')
       }
       setReviewItems(r.status === 'fulfilled' ? r.value : [])
       setAnalysisItems(a.status === 'fulfilled' ? a.value : [])
@@ -106,14 +106,14 @@ export function FindingsPage() {
           </div>
           <p className="mt-3 text-xs text-slate-600">
             {viewMode === 'published' && (presentation.publishedBlocked
-              ? 'Final findings are not available yet because review is still in progress.'
+              ? 'Final findings are not available yet.'
               : `Using dataset: ${presentation.datasetLabels.publishedVisibleFindings}.`)}
             {viewMode === 'review' && `Using dataset: ${presentation.datasetLabels.reviewVisibleFindings}.`}
             {viewMode === 'analysis' && `Using dataset: ${presentation.datasetLabels.analysisVisibleFindings}.`}
           </p>
           {presentation.publishedBlocked && viewMode === 'published' && (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Final findings are not available yet because review is still in progress.
+              Final findings are not available yet.
             </div>
           )}
           {viewMode === 'review' && reviewSummary && (
