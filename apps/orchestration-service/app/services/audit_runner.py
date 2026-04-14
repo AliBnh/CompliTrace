@@ -3944,6 +3944,11 @@ def _enforce_review_publish_invariant(
             row.classification = "probable_gap"
             row.status = "gap" if row.status == "gap" else "partial"
             row.gap_note = row.gap_note or "Disclosure is incomplete or unclear based on available text."
+        default_anchors = SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])
+        if not row.primary_legal_anchor and default_anchors:
+            row.primary_legal_anchor = _serialize_json_list(default_anchors)
+        if not row.legal_requirement:
+            row.legal_requirement = (default_anchors or [f"GDPR duty for {issue.replace('_', ' ')}"])[0]
         if not (row.policy_evidence_excerpt or "").strip():
             row.policy_evidence_excerpt = _readable_evidence(issue)
     existing_issues = {_finding_issue_id(r) for r in rows if r.publication_state == "publishable"}
@@ -3962,6 +3967,7 @@ def _enforce_review_publish_invariant(
                 publication_state="publishable",
                 gap_note="Disclosure is incomplete or unclear based on available text.",
                 policy_evidence_excerpt=_readable_evidence(issue),
+                primary_legal_anchor=_serialize_json_list(SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])),
                 legal_requirement=(SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary") or [f"GDPR duty for {issue.replace('_', ' ')}"])[0],
                 remediation_note=_issue_specific_remediation(issue, "privacy_notice", systemic=True),
             )

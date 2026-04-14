@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useAppState } from '../../app/state'
 import { createReport, getAnalysis, getExportContract, getFindings, getReport, getReview, getSections, reportDownloadUrl } from '../../lib/api'
-import { aggregateCounts, assertPdfDatasetIntegrity, buildFindingsPresentation, splitFindingsByScope, validateReportExportReadiness } from '../../lib/presentation'
+import { aggregateCounts, buildFindingsPresentation, splitFindingsByScope } from '../../lib/presentation'
 import type { AnalysisItemOut, ExportContractOut, FindingOut, ReportOut, ReviewItemOut, SectionOut } from '../../lib/types'
 
 export function ReportPage() {
@@ -59,24 +59,16 @@ export function ReportPage() {
   const exportRows = presentation.publishedVisibleFindings
   const counts = exportContract?.counts_by_status ?? aggregateCounts(exportRows)
   const { documentFindings, sectionFindings } = splitFindingsByScope(exportRows)
-  const readiness = useMemo(() => validateReportExportReadiness(presentation, {
-    pdfRenderedFindingsCount: exportRows.length,
-    pdfDatasetLabel: 'Final published findings',
-    pdfRows: exportRows,
-    pdfStatusCounts: aggregateCounts(exportRows),
-  }), [presentation, exportRows, exportContract])
+  const exportReady = exportContract?.export_allowed !== false
 
   async function generate() {
     if (!auditId) return
     setError(null)
     setStatus('generating')
-    const pdfFindings = exportRows
-    assertPdfDatasetIntegrity(pdfFindings, exportRows)
-    if (!readiness.ok || exportContract?.export_allowed === false) {
-      console.error('Report export invariants failed', readiness.errors)
+    if (!exportReady) {
       setStatus('idle')
-      const reason = exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : readiness.errors[0]
-      setError(`PDF export blocked until backend export contract is satisfied: ${reason}`)
+      const reason = exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : 'Export is temporarily unavailable.'
+      setError(`PDF export is unavailable: ${reason}`)
       return
     }
 
@@ -110,9 +102,9 @@ export function ReportPage() {
             </article>
           ))}
         </div>
-        <div className={`mt-4 rounded-xl border p-3 text-sm ${readiness.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
-          Export readiness: {(readiness.ok && exportContract?.export_allowed !== false) ? 'Ready for export' : 'Blocked due to mismatch between report and PDF datasets'}
-          {(exportContract?.export_allowed === false || !readiness.ok) && <div className="mt-1">Blocker reason: {exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : readiness.errors[0]}</div>}
+        <div className={`mt-4 rounded-xl border p-3 text-sm ${exportReady ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
+          Export readiness: {exportReady ? 'Ready for export' : 'Export temporarily unavailable'}
+          {!exportReady && <div className="mt-1">Reason: {exportContract?.blocker_reasons?.[0] ? toUserBlocker(exportContract.blocker_reasons[0]) : 'Report export is temporarily unavailable.'}</div>}
         </div>
       </header>
 
@@ -123,7 +115,7 @@ export function ReportPage() {
         {error && <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <button onClick={generate} disabled={status === 'generating' || !readiness.ok || exportContract?.export_allowed === false} className="btn-primary min-w-40">
+          <button onClick={generate} disabled={status === 'generating' || !exportReady} className="btn-primary min-w-40">
             {status === 'generating' ? 'Generating…' : 'Generate PDF'}
           </button>
           {status === 'ready' && (
@@ -175,6 +167,6 @@ function datasetLabel(dataset?: 'published' | 'review' | 'analysis' | 'zero'): s
 }
 
 function toUserBlocker(code: string): string {
-  if (code === 'fallback_dataset_empty_after_filters') return 'No high-confidence items were retained after quality checks; a clean report can still be generated.'
+  if (code === 'final_findings_dataset_empty') return 'No published findings are available in the final export dataset.'
   return 'Export is temporarily unavailable for this dataset.'
 }

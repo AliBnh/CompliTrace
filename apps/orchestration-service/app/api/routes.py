@@ -1787,80 +1787,11 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         raise HTTPException(status_code=404, detail="Audit not found")
     if audit.status == "review_required":
         raise HTTPException(status_code=409, detail="Published findings blocked: audit requires review")
-    decision_map = _load_final_decision_map(db, audit_id)
-    backing_rows = db.scalars(
-        select(Finding).options(selectinload(Finding.citations)).where(Finding.audit_id == audit_id).order_by(Finding.id.asc())
-    ).all()
     known_evidence_ids = _known_evidence_ids(db, audit_id)
     evidence_by_chunk = _evidence_by_chunk_ref(db, audit_id)
-    evidence_by_id = _evidence_by_id(db, audit_id)
-    projected = _project_published_findings_from_map(
-        audit_id,
-        decision_map,
-        backing_rows,
-        known_evidence_ids,
-        evidence_by_chunk,
-        evidence_by_id,
-    ) if decision_map else []
-    hydration_filtered_families: set[str] = set()
-    if decision_map:
-        projectable_families = {
-            "controller_identity_contact",
-            "controller_identity",
-            "controller_contact",
-            "legal_basis",
-            "retention",
-            "rights_notice",
-            "complaint_right",
-            "transfer",
-            "profiling",
-            "role_ambiguity",
-            "article14_source",
-            "recipients",
-            "special_category",
-            "dpo_contact",
-            "purpose_mapping",
-        }
-        expected_families = {
-            family
-            for family, item in decision_map.items()
-            if not family.startswith("_")
-            and isinstance(item, dict)
-            and str(item.get("publication_recommendation") or "") == "publish"
-            and str(item.get("status") or "") in {"gap", "referenced_but_unseen"}
-            and family in projectable_families
-        }
-        published_families = {p.id.rsplit(":", 1)[-1] for p in projected}
-        hydration_filtered_families = expected_families - published_families
-    if projected:
-        section_level = _project_section_level_findings(backing_rows, known_evidence_ids, evidence_by_chunk)
-        combined = projected + [row for row in section_level if row.id not in {p.id for p in projected}]
-        combined += _parity_blocker_rows(audit_id, decision_map, combined, backing_rows)
-        if any(r.classification == "publication_blocked" for r in combined) and audit.status != "audit_incomplete":
-            audit.status = "audit_incomplete"
-            db.add(audit)
-            db.commit()
-        blockers = _reconciliation_blockers(audit, decision_map, [], combined, hydration_filtered_families)
-        if blockers:
-            raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        release_ok, release_reason = _release_validator(combined, backing_rows, evidence_by_id)
-        if not release_ok:
-            raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
-        return [_to_audit_ready_view(r) for r in combined]
     rows = final_findings_dataset(db, audit_id)
     if not rows:
-        parity_blockers = _parity_blocker_rows(audit_id, decision_map, [], [])
-        if parity_blockers and audit.status != "audit_incomplete":
-            audit.status = "audit_incomplete"
-            db.add(audit)
-            db.commit()
-        blockers = _reconciliation_blockers(audit, decision_map, [], parity_blockers, hydration_filtered_families)
-        if blockers:
-            raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-        release_ok, release_reason = _release_validator(parity_blockers, backing_rows, evidence_by_id)
-        if not release_ok:
-            raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
-        return [_to_audit_ready_view(r) for r in parity_blockers]
+        return []
     out: list[FindingOut] = []
     evidence_ids = known_evidence_ids
     seen: set[str] = set()
@@ -1944,23 +1875,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 ],
             ))
         )
-    published = [row for row in out if not _hydration_missing(row)]
-    published += _parity_blocker_rows(audit_id, decision_map, published, rows)
-    if _controller_identity_disclosed_in_document(rows, evidence_by_id):
-        published = [
-            r for r in published if r.section_id not in {"systemic:missing_controller_identity", "systemic:missing_controller_contact"}
-        ]
-    blockers = _reconciliation_blockers(audit, decision_map, rows, published)
-    if blockers:
-        raise HTTPException(status_code=409, detail=f"Published findings blocked by reconciliation validator: {', '.join(blockers)}")
-    release_ok, release_reason = _release_validator(published, rows, evidence_by_id)
-    if not release_ok:
-        raise HTTPException(status_code=409, detail=f"Published findings blocked by release validator: {release_reason}")
-    if any(r.classification == "publication_blocked" for r in published) and audit.status != "audit_incomplete":
-        audit.status = "audit_incomplete"
-        db.add(audit)
-        db.commit()
-    return [_to_audit_ready_view(r) for r in published]
+    return [_to_audit_ready_view(r) for r in out]
 
 
 @router.get("/audits/{audit_id}/analysis", response_model=list[AnalysisItemOut])

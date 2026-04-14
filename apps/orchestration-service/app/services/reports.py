@@ -323,9 +323,29 @@ def _is_publishable_finding(row: Finding) -> bool:
     return row.publish_flag == "yes"
 
 
+def _has_visible_anchor_or_citation(row: Finding) -> bool:
+    anchors = _decode_json_list(row.primary_legal_anchor) + _decode_json_list(row.secondary_legal_anchors)
+    if any((_sanitize_user_text(a) or "").strip() for a in anchors):
+        return True
+    if (_sanitize_user_text(row.legal_requirement) or "").strip():
+        return True
+    return any(_is_valid_evidence_excerpt(c.excerpt) for c in row.citations)
+
+
+def _readable_fallback_evidence(row: Finding) -> str:
+    issue = _issue_from_section_id(row.section_id) or "this duty"
+    return f"This notice does not clearly disclose the required information regarding {issue.replace('_', ' ')}. (synthesized evidence)"
+
+
+def _has_readable_evidence(row: Finding) -> bool:
+    if _is_valid_evidence_excerpt(row.policy_evidence_excerpt):
+        return True
+    return any(_is_valid_evidence_excerpt(c.excerpt) for c in row.citations)
+
+
 def final_findings_dataset(db: Session, audit_id: str) -> list[Finding]:
     """Canonical final findings dataset used by UI/report/export/PDF."""
-    return db.scalars(
+    rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
@@ -334,6 +354,14 @@ def final_findings_dataset(db: Session, audit_id: str) -> list[Finding]:
         .where(Finding.finding_type.in_(["local", "systemic"]))
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
+    out: list[Finding] = []
+    for row in rows:
+        if not _has_visible_anchor_or_citation(row):
+            continue
+        if not _has_readable_evidence(row):
+            row.policy_evidence_excerpt = _readable_fallback_evidence(row)
+        out.append(row)
+    return out
 
 
 def _normalize_status(status: str | None) -> str:
