@@ -220,7 +220,7 @@ function canonicalIssueKey(value?: string | null): string {
 }
 
 function issueLabel(issue: string): IssueLabel {
-  return ISSUE_LABELS[issue] ?? 'Legal basis disclosure'
+  return ISSUE_LABELS[issue] ?? 'Governance and compliance disclosure'
 }
 
 function whyText(issue: string, fallback?: string | null): string {
@@ -253,7 +253,7 @@ function sectionTitleFor(sectionId: string, sectionsById: Record<string, Section
 function evidenceText(sectionTitle: string, excerpt?: string | null, issue?: string): string {
   const sanitized = sanitizeUserFacingText(excerpt)
   if (sanitized) return `${sectionTitle}: "${sanitized}"`
-  return `${ABSENCE_PREFIX} ${issueLabel(issue ?? 'legal_basis').toLowerCase()} was identified.`
+  return `${ABSENCE_PREFIX} ${issueLabel(issue ?? 'governance_disclosure_gap').toLowerCase()} was identified.`
 }
 
 function hasInternalText(value: string): boolean {

@@ -43,7 +43,7 @@ export function FindingsPage() {
         setPublishedError(null)
       } else {
         setFindings([])
-        setPublishedError('Final findings are not available yet.')
+        setPublishedError('Published findings could not be loaded.')
       }
       setReviewItems(r.status === 'fulfilled' ? r.value : [])
       setAnalysisItems(a.status === 'fulfilled' ? a.value : [])
@@ -106,14 +106,14 @@ export function FindingsPage() {
           </div>
           <p className="mt-3 text-xs text-slate-600">
             {viewMode === 'published' && (presentation.publishedBlocked
-              ? 'Final findings are not available yet.'
+              ? 'Published findings are unavailable for this audit.'
               : `Using dataset: ${presentation.datasetLabels.publishedVisibleFindings}.`)}
             {viewMode === 'review' && `Using dataset: ${presentation.datasetLabels.reviewVisibleFindings}.`}
             {viewMode === 'analysis' && `Using dataset: ${presentation.datasetLabels.analysisVisibleFindings}.`}
           </p>
           {presentation.publishedBlocked && viewMode === 'published' && (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Final findings are not available yet.
+              Published findings are unavailable for this audit.
             </div>
           )}
           {viewMode === 'review' && reviewSummary && (
@@ -193,7 +193,7 @@ function FindingDetail({ finding }: { finding: NormalizedFinding }) {
       )}
     </div>
     <Detail label="Dataset" value={finding.sourceMode === 'published' ? 'Final published findings' : finding.sourceMode === 'review' ? 'Review findings' : 'Analysis findings'} />
-    <Detail label="Scope" value={finding.scope === 'Document-wide' ? 'Entire document' : `Section: ${finding.sectionTitle}`} />
+    <Detail label="Scope" value={finding.scope === 'Document-wide' ? 'Entire document' : finding.sectionTitle} />
     {finding.issues.map((issue) => (
       <div key={`${finding.stable_ui_id}:${issue.issueKey}`} className="rounded-lg border border-slate-200 p-3">
         <Detail label="Issue" value={issue.issueLabel} />
