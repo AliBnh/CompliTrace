@@ -123,27 +123,27 @@ const labels = presentation.reportExportFindings.flatMap((row) => row.issues.map
 for (const label of labels) {
   assert.ok([
     'Legal basis disclosure',
-    'Data subject rights disclosure',
-    'Complaint-right disclosure',
-    'Retention disclosure',
-    'Transfer safeguards disclosure',
-    'Profiling transparency',
+    'Data subject rights',
+    'Right to lodge a complaint',
+    'Retention period',
+    'International transfers',
+    'Automated decision-making / profiling',
     'Cookie transparency disclosure',
-    'Contact information disclosure',
+    'Contact information',
     'Governance and compliance disclosure',
-    'Purpose specificity disclosure',
-    'Recipients disclosure',
+    'Purpose specificity',
+    'Recipients of personal data',
     'Role allocation disclosure',
     'Unknown issue classification',
   ].includes(label), `unexpected issue label ${label}`)
 }
 assert.ok(!labels.includes('Transparency disclosure'))
 assert.ok(!labels.includes('Compliance disclosure issue'))
-assert.ok(labels.includes('Unknown issue classification'))
-assert.ok(labels.includes('Profiling transparency'))
-assert.ok(labels.includes('Transfer safeguards disclosure'))
-assert.ok(labels.includes('Contact information disclosure'))
-assert.ok(labels.includes('Purpose specificity disclosure'))
+assert.ok(!labels.includes('Unknown issue classification'))
+assert.ok(labels.includes('Automated decision-making / profiling'))
+assert.ok(labels.includes('International transfers'))
+assert.ok(labels.includes('Contact information'))
+assert.ok(labels.includes('Purpose specificity'))
 
 // section summary model checks
 const sectionRows = presentation.reportExportFindings.filter((row) => row.scope === 'Section')

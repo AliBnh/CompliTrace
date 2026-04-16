@@ -428,16 +428,26 @@ def _is_final_exportable_finding(row: Finding) -> bool:
 
 
 def final_exported_findings(db: Session, audit_id: str) -> list[Finding]:
-    """Canonical final findings dataset used by UI/report/export/PDF/published tab."""
+    """Canonical final findings dataset sourced directly from review-stage publishable findings."""
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
         .where(Finding.section_id.not_like("ledger:%"))
-        .where(Finding.finding_type.in_(["local", "systemic"]))
+        .where(Finding.artifact_role == "publishable_finding")
+        .where(Finding.publication_state == "publishable")
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
-    return [row for row in rows if _is_final_exportable_finding(row)]
+    for row in rows:
+        if not _is_valid_evidence_excerpt(row.policy_evidence_excerpt):
+            citation_excerpt = next((c.excerpt for c in row.citations if _is_valid_evidence_excerpt(c.excerpt)), None)
+            fallback = _sanitize_user_text(citation_excerpt) or _sanitize_user_text(row.citation_summary_text) or _sanitize_user_text(row.gap_reasoning)
+            row.policy_evidence_excerpt = (
+                f"Based on the reviewed notice: {fallback}"
+                if fallback
+                else "Based on the reviewed notice: no explicit compliant disclosure excerpt was found."
+            )
+    return rows
 
 
 def final_findings_dataset(db: Session, audit_id: str) -> list[Finding]:
@@ -576,6 +586,8 @@ def build_export_contract(
     audit_id: str,
 ) -> tuple[dict[str, Any], list[Finding | _SyntheticFinding], bool]:
     publishable_findings = final_exported_findings(db, audit_id)
+    if publishable_findings and any((row.artifact_role != "publishable_finding" or row.publication_state != "publishable") for row in publishable_findings):
+        raise ValueError("published dataset integrity failure: non-publishable rows included")
     dataset_used = "published" if publishable_findings else "zero"
     report_type = "Published report" if publishable_findings else "Zero-findings report"
     report_rows: list[Finding | _SyntheticFinding] = publishable_findings
@@ -605,6 +617,8 @@ def build_export_contract(
     }
     if len(report_rows) > 0 and len(export_rows) == 0:
         contract["blocker_reasons"] = ["final_findings_dataset_empty"]
+    if publishable_findings and contract["report_type"] == "Zero-findings report":
+        raise ValueError("report integrity failure: zero-findings report with published findings")
     return contract, export_rows, published_blocked
 
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:

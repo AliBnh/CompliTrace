@@ -7,16 +7,16 @@ export type DatasetKey = 'publishedVisibleFindings' | 'reviewVisibleFindings' | 
 
 const CANONICAL_ISSUE_LABELS = [
   'Legal basis disclosure',
-  'Data subject rights disclosure',
-  'Complaint-right disclosure',
-  'Retention disclosure',
-  'Transfer safeguards disclosure',
-  'Profiling transparency',
+  'Data subject rights',
+  'Right to lodge a complaint',
+  'Retention period',
+  'International transfers',
+  'Automated decision-making / profiling',
   'Cookie transparency disclosure',
-  'Contact information disclosure',
+  'Contact information',
   'Governance and compliance disclosure',
-  'Purpose specificity disclosure',
-  'Recipients disclosure',
+  'Purpose specificity',
+  'Recipients of personal data',
   'Role allocation disclosure',
   'Unknown issue classification',
 ] as const
@@ -129,16 +129,16 @@ const ISSUE_ALIASES: Record<string, string> = {
 
 const ISSUE_LABELS: Record<string, IssueLabel> = {
   legal_basis: 'Legal basis disclosure',
-  rights_notice: 'Data subject rights disclosure',
-  complaint_right: 'Complaint-right disclosure',
-  transfers: 'Transfer safeguards disclosure',
+  rights_notice: 'Data subject rights',
+  complaint_right: 'Right to lodge a complaint',
+  transfers: 'International transfers',
   cookies: 'Cookie transparency disclosure',
-  profiling: 'Profiling transparency',
+  profiling: 'Automated decision-making / profiling',
   governance: 'Governance and compliance disclosure',
-  contact: 'Contact information disclosure',
-  retention: 'Retention disclosure',
-  recipients: 'Recipients disclosure',
-  purpose: 'Purpose specificity disclosure',
+  contact: 'Contact information',
+  retention: 'Retention period',
+  recipients: 'Recipients of personal data',
+  purpose: 'Purpose specificity',
   role_ambiguity: 'Role allocation disclosure',
   wording_only: 'Governance and compliance disclosure',
 }
@@ -212,7 +212,10 @@ function sanitizeOrFallback(value?: string | null): string {
 
 function mapStatus(value?: string | null): UserStatus {
   const s = (value ?? '').toLowerCase().replace(/_/g, ' ')
-  if (s.includes('candidate')) return 'Not applicable'
+  if (s === 'clear non compliance' || s === 'clear_non_compliance') return 'Non-compliant'
+  if (s === 'partial') return 'Partially compliant'
+  if (s === 'no issue' || s === 'no_issue' || s === 'compliant' || s === 'satisfied') return 'Compliant'
+  if (s === 'not assessable' || s === 'not_assessable' || s === 'not applicable' || s === 'not_applicable' || s === 'out_of_scope') return 'Not applicable'
   if (s.includes('gap') || s.includes('non compliant') || s.includes('blocked')) return 'Non-compliant'
   if (s.includes('partial')) return 'Partially compliant'
   if (s.includes('compliant') || s.includes('satisfied')) return 'Compliant'
@@ -221,11 +224,15 @@ function mapStatus(value?: string | null): UserStatus {
 
 function canonicalIssueKey(value?: string | null): string {
   const normalized = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
-  return ISSUE_ALIASES[normalized] ?? 'unknown'
+  return ISSUE_ALIASES[normalized] ?? normalized
 }
 
 function issueLabel(issue: string): IssueLabel {
-  return ISSUE_LABELS[issue] ?? 'Unknown issue classification'
+  if (ISSUE_LABELS[issue]) return ISSUE_LABELS[issue]
+  if (!issue.trim()) return 'Governance and compliance disclosure'
+  // eslint-disable-next-line no-console
+  console.error(`Unmapped issue type received in UI mapping: ${issue}`)
+  return 'Governance and compliance disclosure'
 }
 
 function whyText(issue: string, fallback?: string | null): string {
@@ -284,6 +291,7 @@ function statusRank(status: UserStatus): number {
 function buildIssue(params: {
   issueKeyRaw?: string | null
   statusRaw?: string | null
+  classificationRaw?: string | null
   severityRaw?: string | null
   gapNote?: string | null
   remediationNote?: string | null
@@ -295,7 +303,7 @@ function buildIssue(params: {
   return {
     issueKey,
     issueLabel: issueLabel(issueKey),
-    status: mapStatus(params.statusRaw),
+    status: mapStatus(params.classificationRaw ?? params.statusRaw),
     severity: mapSeverity(issueKey, params.severityRaw),
     whyThisMatters: whyText(issueKey, params.gapNote),
     recommendedAction: actionText(issueKey, params.remediationNote),
@@ -320,10 +328,11 @@ function normalizePublished(rows: FindingOut[], sectionsById: Record<string, Sec
       issue: buildIssue({
         issueKeyRaw: row.issue_key ?? row.section_id.split('systemic:')[1],
         statusRaw: row.status,
+        classificationRaw: row.classification,
         severityRaw: row.severity,
         gapNote: row.gap_note,
         remediationNote: row.remediation_note,
-        excerpt: row.citations?.[0]?.excerpt ?? row.citation_summary_text,
+        excerpt: row.policy_evidence_excerpt ?? row.citations?.[0]?.excerpt ?? row.citation_summary_text,
         sectionTitle,
         legalAnchors: row.primary_legal_anchor ?? [],
       }),
@@ -366,6 +375,7 @@ function normalizeReview(rows: ReviewItemOut[], sectionsById: Record<string, Sec
       issue: buildIssue({
         issueKeyRaw: row.issue_type,
         statusRaw: row.status ?? row.final_disposition,
+        classificationRaw: row.classification,
         gapNote: row.gap_note ?? row.reason,
         remediationNote: row.remediation_note,
         excerpt: row.citations?.[0]?.excerpt ?? row.reason ?? row.gap_note,
@@ -393,6 +403,7 @@ function normalizeAnalysis(rows: AnalysisItemOut[], sectionsById: Record<string,
   return rows.flatMap((row) => {
     if (/(support_evidence|meta_section|internal)/i.test(`${row.analysis_type} ${row.artifact_role ?? ''} ${row.section_id}`)) return []
     if (row.section_id.startsWith('ledger:')) return []
+    if ((row.status_candidate ?? '').toLowerCase().startsWith('candidate_')) return []
     const isDocument = row.section_id.startsWith('systemic:')
     const sectionTitle = isDocument ? 'Entire document' : sectionTitleFor(row.section_id, sectionsById)
     if (!sectionTitle) return []
@@ -404,6 +415,7 @@ function normalizeAnalysis(rows: AnalysisItemOut[], sectionsById: Record<string,
       issue: buildIssue({
         issueKeyRaw: row.issue_type,
         statusRaw: row.status_candidate,
+        classificationRaw: row.classification_candidate,
         gapNote: row.gap_note,
         remediationNote: row.remediation_note,
         excerpt: row.citations?.[0]?.excerpt ?? row.gap_note,

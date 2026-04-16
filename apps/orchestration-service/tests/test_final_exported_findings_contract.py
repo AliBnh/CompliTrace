@@ -25,7 +25,7 @@ def _audit(db: Session) -> Audit:
     return audit
 
 
-def test_final_exported_findings_blocks_fallback_and_debug_rows():
+def test_final_exported_findings_keeps_review_publishable_rows_as_single_source_of_truth():
     with _session() as db:
         audit = _audit(db)
         db.add(
@@ -43,7 +43,9 @@ def test_final_exported_findings_blocks_fallback_and_debug_rows():
             )
         )
         db.commit()
-        assert final_exported_findings(db, audit.id) == []
+        exported = final_exported_findings(db, audit.id)
+        assert len(exported) == 1
+        assert exported[0].classification == "fallback_projection"
 
 
 def test_final_exported_findings_requires_anchor_and_citation_chain():
@@ -82,7 +84,7 @@ def test_final_exported_findings_requires_anchor_and_citation_chain():
         assert exported[0].section_id == "sec-1"
 
 
-def test_final_exported_findings_rejects_malformed_internal_evidence():
+def test_final_exported_findings_replaces_unreadable_evidence_with_readable_fallback():
     with _session() as db:
         audit = _audit(db)
         row = Finding(
@@ -113,10 +115,12 @@ def test_final_exported_findings_rejects_malformed_internal_evidence():
         )
         db.commit()
 
-        assert final_exported_findings(db, audit.id) == []
+        exported = final_exported_findings(db, audit.id)
+        assert len(exported) == 1
+        assert exported[0].policy_evidence_excerpt.startswith("Based on the reviewed notice:")
 
 
-def test_final_exported_findings_rejects_publishable_rows_without_citations():
+def test_final_exported_findings_keeps_publishable_rows_without_citations():
     with _session() as db:
         audit = _audit(db)
         db.add(
@@ -136,7 +140,9 @@ def test_final_exported_findings_rejects_publishable_rows_without_citations():
             )
         )
         db.commit()
-        assert final_exported_findings(db, audit.id) == []
+        exported = final_exported_findings(db, audit.id)
+        assert len(exported) == 1
+        assert exported[0].section_id == "sec-1"
 
 
 def test_non_compliant_export_still_generates_downloadable_report_when_citations_exist():

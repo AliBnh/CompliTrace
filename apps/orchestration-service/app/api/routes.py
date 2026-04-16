@@ -1797,13 +1797,26 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         if row.id in seen:
             continue
         seen.add(row.id)
+        issue_key = _issue_from_finding_section(row.section_id)
+        policy_excerpt = _sanitize_published_text(row.policy_evidence_excerpt)
+        if not policy_excerpt:
+            citation_excerpt = next(
+                (_sanitize_published_text(c.excerpt) for c in row.citations if _sanitize_published_text(c.excerpt)),
+                None,
+            )
+            fallback_excerpt = citation_excerpt or _sanitize_published_text(row.citation_summary_text) or _sanitize_published_text(row.gap_reasoning)
+            policy_excerpt = (
+                f"Based on the reviewed notice: {fallback_excerpt}"
+                if fallback_excerpt
+                else "Based on the reviewed notice: no explicit compliant disclosure excerpt was found."
+            )
         out.append(
-            _fill_required_published_fields(FindingOut(
+            FindingOut(
                 id=row.id,
                 section_id=row.section_id,
                 status=row.status,
                 severity=row.severity,
-                classification=_published_legal_conclusion(row.status, _issue_from_finding_section(row.section_id), row.classification),
+                classification=row.classification,
                 finding_type=row.finding_type,
                 publish_flag=row.publish_flag,
                 artifact_role=row.artifact_role,
@@ -1824,21 +1837,9 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 visibility_status=row.visibility_status,
                 section_vs_document_scope=row.section_vs_document_scope,
                 missing_fact_if_unresolved=row.missing_fact_if_unresolved,
-                policy_evidence_excerpt=row.policy_evidence_excerpt,
-                legal_requirement=_sanitize_published_text(row.legal_requirement)
-                or f"Published legal application for {_issue_from_finding_section(row.section_id) or 'section finding'}.",
-                gap_reasoning=(
-                    _section_level_reasoning(row)
-                    if not row.section_id.startswith("systemic:")
-                    else _build_richer_gap_reasoning(
-                        section_id=row.section_id,
-                        issue=_issue_from_finding_section(row.section_id),
-                        fact=row.policy_evidence_excerpt or row.gap_note,
-                        rule=row.legal_requirement or row.primary_legal_anchor,
-                        remediation=row.remediation_note,
-                        conclusion=row.gap_note,
-                    )
-                ),
+                policy_evidence_excerpt=policy_excerpt,
+                legal_requirement=_sanitize_published_text(row.legal_requirement),
+                gap_reasoning=_sanitize_published_text(row.gap_reasoning),
                 confidence_level=row.confidence_level,
                 assessment_type=row.assessment_type,
                 severity_rationale=_sanitize_published_text(row.severity_rationale),
@@ -1858,11 +1859,12 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 source_scope_confidence=row.source_scope_confidence,
                 referenced_unseen_sections=_deserialize_json_list(row.referenced_unseen_sections),
                 assertion_level=row.assertion_level,
+                issue_key=issue_key,
                 gap_note=_sanitize_published_text(
-                    _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[0]
+                    _apply_family_fallback(issue_key, row.gap_note, row.remediation_note)[0]
                 ),
                 remediation_note=_sanitize_published_text(
-                    _apply_family_fallback(_issue_from_finding_section(row.section_id), row.gap_note, row.remediation_note)[1]
+                    _apply_family_fallback(issue_key, row.gap_note, row.remediation_note)[1]
                 ),
                 citations=[
                     _citation_out(c, evidence_by_chunk.get(c.chunk_id))
@@ -1871,7 +1873,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                     and (f"evi:chunk:{c.chunk_id}" in evidence_ids or c.chunk_id in evidence_by_chunk)
                     and c.chunk_id in evidence_by_chunk
                 ],
-            ))
+            )
         )
     return [_to_audit_ready_view(r) for r in out]
 
