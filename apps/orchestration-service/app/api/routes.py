@@ -23,7 +23,7 @@ from app.schemas.audit import (
     ReviewItemOut,
 )
 from app.services.audit_runner import run_audit
-from app.services.reports import build_export_contract, final_findings_dataset, generate_report_text
+from app.services.reports import build_export_contract, final_exported_findings, generate_report_text
 
 
 router = APIRouter()
@@ -1511,9 +1511,7 @@ def _fill_required_published_fields(row: FindingOut) -> FindingOut:
         "automated profiling",
     }
     if row.final_legal_outcome == "not_assessable_from_provided_text" and any(m in explicit_violation_text for m in explicit_violation_markers):
-        row.final_legal_outcome = "non_compliant"
-    if row.final_legal_outcome == "not_assessable_from_provided_text" and row.status in {"gap", "partial"}:
-        row.final_legal_outcome = "partially_compliant" if row.status == "partial" else "non_compliant"
+        row.final_legal_outcome = "not_assessable_from_provided_text"
     if row.classification != "publication_blocked" and not _can_publish_row(row):
         row.classification = "publication_blocked"
         row.publication_blocked = True
@@ -1789,7 +1787,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         raise HTTPException(status_code=409, detail="Published findings blocked: audit requires review")
     known_evidence_ids = _known_evidence_ids(db, audit_id)
     evidence_by_chunk = _evidence_by_chunk_ref(db, audit_id)
-    rows = final_findings_dataset(db, audit_id)
+    rows = final_exported_findings(db, audit_id)
     if not rows:
         return []
     out: list[FindingOut] = []

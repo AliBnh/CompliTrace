@@ -49,20 +49,20 @@ const analysisRows = [
   { id: 'a1', section_id: 'sec-2', analysis_type: 'completeness_outcome', issue_type: 'missing_transfer_notice', status_candidate: 'candidate_gap', gap_note: 'possible gap filtered by (.)', remediation_note: 'check', citations: [] },
 ]
 
-const blockedPresentation = mod.buildFindingsPresentation({
+const presentation = mod.buildFindingsPresentation({
   publishedRows,
   reviewRows,
   analysisRows,
   sectionsById,
-  publishedBlocked: true,
+  publishedBlocked: false,
 })
 
-// dataset contract + blocked fallback
-assert.deepEqual(blockedPresentation.reportExportFindings, blockedPresentation.reviewVisibleFindings)
-assert.equal(blockedPresentation.reportDatasetLabel, 'Review findings (used because publication is blocked)')
+// dataset contract: report/export must use final published findings dataset
+assert.deepEqual(presentation.reportExportFindings, presentation.publishedVisibleFindings)
+assert.equal(presentation.reportDatasetLabel, 'Final published findings')
 
 // canonical labels only
-const labels = blockedPresentation.reportExportFindings.flatMap((row) => row.issues.map((x) => x.issueLabel))
+const labels = presentation.reportExportFindings.flatMap((row) => row.issues.map((x) => x.issueLabel))
 for (const label of labels) {
   assert.ok([
     'Legal basis disclosure',
@@ -83,7 +83,7 @@ assert.ok(!labels.includes('Transparency disclosure'))
 assert.ok(!labels.includes('Compliance disclosure issue'))
 
 // section summary model checks
-const sectionRows = blockedPresentation.reportExportFindings.filter((row) => row.scope === 'Section')
+const sectionRows = presentation.reportExportFindings.filter((row) => row.scope === 'Section')
 assert.equal(sectionRows.length, new Set(sectionRows.map((row) => row.sectionId)).size)
 for (const row of sectionRows) {
   assert.equal(row.issueCount, row.issues.length)
@@ -91,8 +91,8 @@ for (const row of sectionRows) {
 }
 
 // document finding model checks
-const split = mod.splitFindingsByScope(blockedPresentation.reportExportFindings)
-assert.ok(split.documentFindings.length > 0)
+const split = mod.splitFindingsByScope(presentation.reportExportFindings)
+assert.ok(split.sectionFindings.length > 0)
 assert.equal(split.documentFindings.length, new Set(split.documentFindings.map((x) => x.issueKey)).size)
 assert.ok(split.sectionFindings.every((row) => !row.sectionId.startsWith('systemic:')))
 
@@ -102,7 +102,7 @@ for (const row of split.sectionFindings) {
 }
 
 // copy sanity + human evidence
-for (const row of blockedPresentation.reportExportFindings) {
+for (const row of presentation.reportExportFindings) {
   for (const issue of row.issues) {
     assert.ok(issue.whyThisMatters.trim().length > 0)
     assert.ok(issue.recommendedAction.trim().length > 0)
@@ -110,7 +110,7 @@ for (const row of blockedPresentation.reportExportFindings) {
     assert.ok(issue.evidenceText.includes(': "') || issue.evidenceText.startsWith('Confirmed after review of the full document:'), issue.evidenceText)
   }
 }
-const serializedBlocked = JSON.stringify(blockedPresentation).toLowerCase()
+const serializedBlocked = JSON.stringify(presentation).toLowerCase()
 for (const banned of ['candidate_issue', 'withheld by final publication validator', 'profiling_without_required_explanation', 'signal detected', 'legal gate', 'duty-level', 'reconciliation', 'suppressed', 'no_exportable_findings_after_safety_filters', 'invariant']) {
   assert.ok(!serializedBlocked.includes(banned), `banned token leaked: ${banned}`)
 }
@@ -122,28 +122,27 @@ assert.equal(mod.severityDisplayForStatus('Compliant', 'High'), null)
 assert.equal(mod.severityDisplayForStatus('Not applicable', 'High'), null)
 
 // export contract tests
-const reportCounts = mod.aggregateCounts(blockedPresentation.reportExportFindings)
-const readiness = mod.validateReportExportReadiness(blockedPresentation, {
-  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length,
-  pdfDatasetLabel: blockedPresentation.reportDatasetLabel,
-  pdfRows: blockedPresentation.reportExportFindings,
+const reportCounts = mod.aggregateCounts(presentation.reportExportFindings)
+const readiness = mod.validateReportExportReadiness(presentation, {
+  pdfRenderedFindingsCount: presentation.reportExportFindings.length,
+  pdfDatasetLabel: presentation.reportDatasetLabel,
+  pdfRows: presentation.reportExportFindings,
   pdfStatusCounts: reportCounts,
 })
 assert.equal(readiness.ok, true)
 
-const mismatch = mod.validateReportExportReadiness(blockedPresentation, {
-  pdfRenderedFindingsCount: blockedPresentation.reportExportFindings.length + 1,
+const mismatch = mod.validateReportExportReadiness(presentation, {
+  pdfRenderedFindingsCount: presentation.reportExportFindings.length + 1,
   pdfDatasetLabel: 'Final published findings',
-  pdfRows: blockedPresentation.reportExportFindings.slice(0, 1),
+  pdfRows: presentation.reportExportFindings.slice(0, 1),
   pdfStatusCounts: reportCounts,
 })
 assert.equal(mismatch.ok, false)
 assert.ok(mismatch.errors.some((x) => x.toLowerCase().includes('count')))
-assert.ok(mismatch.errors.some((x) => x.toLowerCase().includes('label')))
 
-const zeroPayload = mod.validateReportExportReadiness(blockedPresentation, {
+const zeroPayload = mod.validateReportExportReadiness(presentation, {
   pdfRenderedFindingsCount: 0,
-  pdfDatasetLabel: blockedPresentation.reportDatasetLabel,
+  pdfDatasetLabel: presentation.reportDatasetLabel,
   pdfRows: [],
   pdfStatusCounts: { compliant: 0, partially_compliant: 0, non_compliant: 0, not_applicable: 0, total: 0 },
 })
