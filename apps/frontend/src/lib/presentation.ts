@@ -216,7 +216,7 @@ function mapStatus(value?: string | null): UserStatus {
 
 function canonicalIssueKey(value?: string | null): string {
   const normalized = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
-  return ISSUE_ALIASES[normalized] ?? 'legal_basis'
+  return ISSUE_ALIASES[normalized] ?? 'governance'
 }
 
 function issueLabel(issue: string): IssueLabel {
@@ -461,9 +461,9 @@ export function buildFindingsPresentation(params: {
   const reviewVisibleFindings = collapseToSectionRows(normalizeReview(params.reviewRows, params.sectionsById))
   const analysisVisibleFindings = collapseToSectionRows(normalizeAnalysis(params.analysisRows, params.sectionsById))
 
-  const reportMode: 'published' | 'review' = params.publishedBlocked ? 'review' : 'published'
-  const reportExportFindings = reportMode === 'published' ? publishedVisibleFindings : reviewVisibleFindings
-  const reportDatasetLabel = reportMode === 'published' ? 'Final published findings' : 'Review findings (used because publication is blocked)'
+  const reportMode: 'published' | 'review' = 'published'
+  const reportExportFindings = publishedVisibleFindings
+  const reportDatasetLabel = 'Final published findings'
 
   return {
     publishedVisibleFindings,
