@@ -179,19 +179,47 @@ FAMILY_ANCHOR_TEMPLATES: dict[str, list[str]] = {
 
 CANONICAL_ISSUE_TAXONOMY: dict[str, str] = {
     "missing_legal_basis": "Legal basis disclosure",
-    "missing_rights_notice": "Data subject rights disclosure",
-    "missing_complaint_right": "Complaint-right disclosure",
-    "missing_retention_period": "Retention disclosure",
-    "missing_transfer_notice": "Transfer safeguards disclosure",
-    "profiling_disclosure_gap": "Profiling transparency",
+    "missing_rights_notice": "Data subject rights",
+    "missing_complaint_right": "Right to lodge a complaint",
+    "missing_retention_period": "Retention period",
+    "missing_transfer_notice": "International transfers",
+    "profiling_disclosure_gap": "Automated decision-making / profiling",
     "cookie_disclosure_gap": "Cookie transparency disclosure",
-    "missing_controller_contact": "Contact information disclosure",
-    "missing_controller_identity": "Contact information disclosure",
-    "governance_disclosure_gap": "Governance and compliance disclosure",
-    "purpose_specificity_gap": "Purpose specificity disclosure",
-    "recipients_disclosure_gap": "Recipients disclosure",
+    "missing_controller_contact": "Contact information",
+    "missing_controller_identity": "Contact information",
+    "purpose_specificity_gap": "Purpose specificity",
+    "recipients_disclosure_gap": "Recipients of personal data",
     "controller_processor_role_ambiguity": "Role allocation disclosure",
 }
+
+
+def _require_issue_label(issue_key: str | None) -> str:
+    if not issue_key:
+        raise ValueError("published finding missing issue_key")
+    if issue_key not in CANONICAL_ISSUE_TAXONOMY:
+        raise ValueError(f"unmapped issue_key in published finding: {issue_key}")
+    return CANONICAL_ISSUE_TAXONOMY[issue_key]
+
+
+def _derive_issue_key_for_published_row(row: Finding) -> str | None:
+    from_section = _issue_from_finding_section(row.section_id)
+    if from_section:
+        return from_section
+    from_text = _infer_issue_from_text(None, row.gap_note, row.remediation_note)
+    if from_text:
+        return from_text
+    anchors = " ".join((_deserialize_json_list(row.primary_legal_anchor) or []) + (_deserialize_json_list(row.secondary_legal_anchors) or [])).lower()
+    if "13(1)(c)" in anchors or "14(1)(c)" in anchors:
+        return "missing_legal_basis"
+    if "13(1)(f)" in anchors or "14(1)(f)" in anchors or "article 44" in anchors:
+        return "missing_transfer_notice"
+    if "13(1)(a)" in anchors or "14(1)(a)" in anchors:
+        return "missing_controller_contact"
+    if "13(1)(e)" in anchors or "14(1)(e)" in anchors:
+        return "recipients_disclosure_gap"
+    if "13(2)(f)" in anchors or "14(2)(g)" in anchors:
+        return "profiling_disclosure_gap"
+    return None
 
 
 def _sanitize_published_text(text: str | None) -> str | None:
@@ -1797,7 +1825,8 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
         if row.id in seen:
             continue
         seen.add(row.id)
-        issue_key = _issue_from_finding_section(row.section_id)
+        issue_key = _derive_issue_key_for_published_row(row)
+        issue_label = _require_issue_label(issue_key)
         policy_excerpt = _sanitize_published_text(row.policy_evidence_excerpt)
         if not policy_excerpt:
             citation_excerpt = next(
@@ -1860,12 +1889,13 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 referenced_unseen_sections=_deserialize_json_list(row.referenced_unseen_sections),
                 assertion_level=row.assertion_level,
                 issue_key=issue_key,
+                issue_label=issue_label,
                 gap_note=_sanitize_published_text(
                     _apply_family_fallback(issue_key, row.gap_note, row.remediation_note)[0]
-                ),
+                ) or "Based on the reviewed notice, required GDPR disclosure is missing or insufficient for this obligation.",
                 remediation_note=_sanitize_published_text(
                     _apply_family_fallback(issue_key, row.gap_note, row.remediation_note)[1]
-                ),
+                ) or "Update the notice to include GDPR-required disclosure language for this obligation.",
                 citations=[
                     _citation_out(c, evidence_by_chunk.get(c.chunk_id))
                     for c in row.citations

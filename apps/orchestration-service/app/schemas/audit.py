@@ -58,6 +58,7 @@ class FindingOut(BaseModel):
     assertion_level: str | None = None
     publication_blocked: bool | None = None
     issue_key: str | None = None
+    issue_label: str | None = None
     blocker_reason: str | None = None
     missing_requirements: list[str] | None = None
     affected_sections: list[str] | None = None

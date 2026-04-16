@@ -14,7 +14,7 @@ const CANONICAL_ISSUE_LABELS = [
   'Automated decision-making / profiling',
   'Cookie transparency disclosure',
   'Contact information',
-  'Governance and compliance disclosure',
+  'Data governance responsibilities',
   'Purpose specificity',
   'Recipients of personal data',
   'Role allocation disclosure',
@@ -134,7 +134,7 @@ const ISSUE_LABELS: Record<string, IssueLabel> = {
   transfers: 'International transfers',
   cookies: 'Cookie transparency disclosure',
   profiling: 'Automated decision-making / profiling',
-  governance: 'Governance and compliance disclosure',
+  governance: 'Data governance responsibilities',
   contact: 'Contact information',
   retention: 'Retention period',
   recipients: 'Recipients of personal data',
@@ -150,7 +150,7 @@ const WHY_TEXT: Record<string, string> = {
   transfers: 'The notice refers to international transfers but does not explain the safeguard relied upon.',
   cookies: 'The notice references cookies or similar technologies without clearly explaining purposes, controls, and legal basis.',
   profiling: 'The notice does not clearly explain profiling logic, significance, or likely consequences where profiling is referenced.',
-  governance: 'The notice does not clearly explain governance ownership or compliance accountability for privacy obligations.',
+  governance: 'The notice does not clearly identify governance ownership for privacy obligations.',
   contact: 'The notice does not provide clear contact details for privacy or data-protection requests.',
   retention: 'The notice does not clearly state retention periods or objective retention criteria.',
   recipients: 'The notice does not clearly identify categories of recipients or third parties receiving personal data.',
@@ -166,7 +166,7 @@ const ACTION_TEXT: Record<string, string> = {
   transfers: 'Explain whether international transfers occur and identify the safeguard relied upon.',
   cookies: 'Add clear cookie categories, purposes, legal basis, and user control options.',
   profiling: 'Add clear profiling disclosures describing logic, significance, and likely consequences for individuals.',
-  governance: 'Add governance and compliance ownership details, including responsibility and review cadence.',
+  governance: 'Add governance ownership details, including responsibility and review cadence.',
   contact: 'Add controller contact details and DPO contact details where applicable.',
   retention: 'Add retention periods or objective retention criteria for each relevant data category.',
   recipients: 'Add recipient categories and describe third-party sharing contexts.',
@@ -212,6 +212,7 @@ function sanitizeOrFallback(value?: string | null): string {
 
 function mapStatus(value?: string | null): UserStatus {
   const s = (value ?? '').toLowerCase().replace(/_/g, ' ')
+  if (s.startsWith('candidate ')) return 'Not applicable'
   if (s === 'clear non compliance' || s === 'clear_non_compliance') return 'Non-compliant'
   if (s === 'partial') return 'Partially compliant'
   if (s === 'no issue' || s === 'no_issue' || s === 'compliant' || s === 'satisfied') return 'Compliant'
@@ -219,7 +220,7 @@ function mapStatus(value?: string | null): UserStatus {
   if (s.includes('gap') || s.includes('non compliant') || s.includes('blocked')) return 'Non-compliant'
   if (s.includes('partial')) return 'Partially compliant'
   if (s.includes('compliant') || s.includes('satisfied')) return 'Compliant'
-  return 'Not applicable'
+  return 'Non-compliant'
 }
 
 function canonicalIssueKey(value?: string | null): string {
@@ -227,12 +228,12 @@ function canonicalIssueKey(value?: string | null): string {
   return ISSUE_ALIASES[normalized] ?? normalized
 }
 
-function issueLabel(issue: string): IssueLabel {
-  if (ISSUE_LABELS[issue]) return ISSUE_LABELS[issue]
-  if (!issue.trim()) return 'Governance and compliance disclosure'
-  // eslint-disable-next-line no-console
-  console.error(`Unmapped issue type received in UI mapping: ${issue}`)
-  return 'Governance and compliance disclosure'
+function issueLabel(issue: string, provided?: string | null): IssueLabel {
+  const mapped = ISSUE_LABELS[issue]
+  if (mapped) return mapped
+  const cleanedProvided = sanitizeUserFacingText(provided)
+  if (cleanedProvided && CANONICAL_ISSUE_LABELS.includes(cleanedProvided as IssueLabel)) return cleanedProvided as IssueLabel
+  throw new Error(`Unmapped issue type in rendering pipeline: ${issue || 'null'}`)
 }
 
 function whyText(issue: string, fallback?: string | null): string {
@@ -245,10 +246,6 @@ function actionText(issue: string, fallback?: string | null): string {
 }
 
 export function mapSeverity(issue: string, raw?: string | null): UserSeverity {
-  if (['legal_basis', 'rights_notice', 'complaint_right', 'transfers', 'profiling'].includes(issue)) return 'High'
-  if (['retention', 'recipients', 'purpose', 'role_ambiguity', 'governance', 'contact', 'cookies'].includes(issue)) return 'Medium'
-  if (issue === 'wording_only') return 'Low'
-
   const base = (raw ?? '').toLowerCase()
   if (base === 'high') return 'High'
   if (base === 'medium') return 'Medium'
@@ -290,6 +287,7 @@ function statusRank(status: UserStatus): number {
 
 function buildIssue(params: {
   issueKeyRaw?: string | null
+  issueLabelRaw?: string | null
   statusRaw?: string | null
   classificationRaw?: string | null
   severityRaw?: string | null
@@ -302,7 +300,7 @@ function buildIssue(params: {
   const issueKey = canonicalIssueKey(params.issueKeyRaw)
   return {
     issueKey,
-    issueLabel: issueLabel(issueKey),
+    issueLabel: issueLabel(issueKey, params.issueLabelRaw),
     status: mapStatus(params.classificationRaw ?? params.statusRaw),
     severity: mapSeverity(issueKey, params.severityRaw),
     whyThisMatters: whyText(issueKey, params.gapNote),
@@ -314,10 +312,18 @@ function buildIssue(params: {
 }
 
 function normalizePublished(rows: FindingOut[], sectionsById: Record<string, SectionOut>): IssueSeed[] {
+  const localIssueKeys = new Set(
+    rows
+      .filter((row) => !row.section_id.startsWith('systemic:'))
+      .map((row) => canonicalIssueKey(row.issue_key))
+      .filter(Boolean),
+  )
   return rows.flatMap((row) => {
     const visibilityToken = `${row.classification ?? ''} ${row.publish_flag ?? ''} ${row.finding_type ?? ''}`.toLowerCase()
     if (/(support_only|internal_only|diagnostic_internal_only)/.test(visibilityToken)) return []
     const isDocument = row.section_id.startsWith('systemic:')
+    const issueKey = canonicalIssueKey(row.issue_key ?? row.section_id.split('systemic:')[1])
+    if (isDocument && localIssueKeys.has(issueKey)) return []
     const sectionTitle = isDocument ? 'Entire document' : sectionTitleFor(row.section_id, sectionsById)
     if (!sectionTitle) return []
     return [{
@@ -326,7 +332,8 @@ function normalizePublished(rows: FindingOut[], sectionsById: Record<string, Sec
       sectionId: row.section_id,
       sectionTitle,
       issue: buildIssue({
-        issueKeyRaw: row.issue_key ?? row.section_id.split('systemic:')[1],
+        issueKeyRaw: issueKey,
+        issueLabelRaw: row.issue_label,
         statusRaw: row.status,
         classificationRaw: row.classification,
         severityRaw: row.severity,
@@ -374,6 +381,7 @@ function normalizeReview(rows: ReviewItemOut[], sectionsById: Record<string, Sec
       sectionTitle,
       issue: buildIssue({
         issueKeyRaw: row.issue_type,
+        issueLabelRaw: row.issue_type ? issueLabel(canonicalIssueKey(row.issue_type)) : null,
         statusRaw: row.status ?? row.final_disposition,
         classificationRaw: row.classification,
         gapNote: row.gap_note ?? row.reason,
@@ -414,6 +422,7 @@ function normalizeAnalysis(rows: AnalysisItemOut[], sectionsById: Record<string,
       sectionTitle,
       issue: buildIssue({
         issueKeyRaw: row.issue_type,
+        issueLabelRaw: row.issue_type ? issueLabel(canonicalIssueKey(row.issue_type)) : null,
         statusRaw: row.status_candidate,
         classificationRaw: row.classification_candidate,
         gapNote: row.gap_note,

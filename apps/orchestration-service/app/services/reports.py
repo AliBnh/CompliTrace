@@ -447,6 +447,10 @@ def final_exported_findings(db: Session, audit_id: str) -> list[Finding]:
                 if fallback
                 else "Based on the reviewed notice: no explicit compliant disclosure excerpt was found."
             )
+        if not (_sanitize_user_text(row.gap_note) or "").strip():
+            row.gap_note = "Based on the reviewed notice, required GDPR disclosure is missing or insufficient for this obligation."
+        if not (_sanitize_user_text(row.remediation_note) or "").strip():
+            row.remediation_note = "Update the notice to include GDPR-required disclosure language for this obligation."
     return rows
 
 

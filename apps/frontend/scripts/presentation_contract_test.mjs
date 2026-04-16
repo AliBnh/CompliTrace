@@ -40,17 +40,6 @@ const publishedRows = [
   {
     id: 'f2',
     section_id: 'sec-2',
-    issue_key: 'unknown_taxonomy_key',
-    status: 'compliant',
-    severity: null,
-    gap_note: 'N/A',
-    remediation_note: 'N/A',
-    citations: [{ excerpt: 'Plain disclosure text.' }],
-    primary_legal_anchor: ['GDPR Article 13(1)(f)'],
-  },
-  {
-    id: 'f3',
-    section_id: 'sec-2',
     issue_key: 'profiling_disclosure_gap',
     status: 'gap',
     severity: null,
@@ -60,7 +49,7 @@ const publishedRows = [
     primary_legal_anchor: ['GDPR Article 13(2)(f)'],
   },
   {
-    id: 'f4',
+    id: 'f3',
     section_id: 'sec-2',
     issue_key: 'missing_transfer_notice',
     status: 'gap',
@@ -71,7 +60,7 @@ const publishedRows = [
     primary_legal_anchor: ['GDPR Article 13(1)(f)'],
   },
   {
-    id: 'f5',
+    id: 'f4',
     section_id: 'sec-3',
     issue_key: 'missing_controller_contact',
     status: 'gap',
@@ -82,7 +71,7 @@ const publishedRows = [
     primary_legal_anchor: ['GDPR Article 13(1)(a)'],
   },
   {
-    id: 'f6',
+    id: 'f5',
     section_id: 'sec-3',
     issue_key: 'purpose_specificity_gap',
     status: 'partial',
@@ -130,7 +119,7 @@ for (const label of labels) {
     'Automated decision-making / profiling',
     'Cookie transparency disclosure',
     'Contact information',
-    'Governance and compliance disclosure',
+    'Data governance responsibilities',
     'Purpose specificity',
     'Recipients of personal data',
     'Role allocation disclosure',
@@ -139,7 +128,6 @@ for (const label of labels) {
 }
 assert.ok(!labels.includes('Transparency disclosure'))
 assert.ok(!labels.includes('Compliance disclosure issue'))
-assert.ok(!labels.includes('Unknown issue classification'))
 assert.ok(labels.includes('Automated decision-making / profiling'))
 assert.ok(labels.includes('International transfers'))
 assert.ok(labels.includes('Contact information'))
@@ -179,8 +167,8 @@ for (const banned of ['candidate_issue', 'withheld by final publication validato
 }
 
 // severity mapping and compliant display behavior
-assert.equal(mod.mapSeverity('legal_basis', null), 'High')
-assert.equal(mod.mapSeverity('retention', null), 'Medium')
+assert.equal(mod.mapSeverity('legal_basis', 'high'), 'High')
+assert.equal(mod.mapSeverity('retention', 'medium'), 'Medium')
 assert.equal(mod.severityDisplayForStatus('Compliant', 'High'), null)
 assert.equal(mod.severityDisplayForStatus('Not applicable', 'High'), null)
 
