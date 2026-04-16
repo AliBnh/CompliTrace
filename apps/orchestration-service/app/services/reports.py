@@ -361,9 +361,14 @@ def _has_visible_anchor_or_citation(row: Finding) -> bool:
 
 
 def _has_citation_or_evidence_ref(row: Finding) -> bool:
-    if any(_is_valid_evidence_excerpt(c.excerpt) for c in row.citations):
-        return True
-    return bool(_decode_json_list(row.document_evidence_refs))
+    real_citations = [
+        c
+        for c in row.citations
+        if _is_valid_evidence_excerpt(c.excerpt)
+        and bool((c.chunk_id or "").strip())
+        and not (c.chunk_id or "").startswith("systemic-anchor:")
+    ]
+    return len(real_citations) > 0
 
 
 def _readable_fallback_evidence(row: Finding) -> str:
@@ -505,6 +510,10 @@ def _is_valid_evidence_excerpt(excerpt: str | None) -> bool:
     if len(cleaned) < 3:
         return False
     if cleaned.lower() in {"section", ".", ":", "-", "n/a"}:
+        return False
+    if re.fullmatch(r"[\W_]+", cleaned):
+        return False
+    if any(token in cleaned.lower() for token in ("disallowed by strict", "additional context required", "validator", "debug")):
         return False
     return bool(re.search(r"[a-zA-Z]{4,}", cleaned))
 

@@ -18,6 +18,7 @@ const CANONICAL_ISSUE_LABELS = [
   'Purpose specificity disclosure',
   'Recipients disclosure',
   'Role allocation disclosure',
+  'Unknown issue classification',
 ] as const
 
 export type IssueLabel = typeof CANONICAL_ISSUE_LABELS[number]
@@ -197,6 +198,9 @@ function sanitizeUserFacingText(value?: string | null): string {
     .replace(/section\s*\./gi, 'Section')
     .replace(/\s+/g, ' ')
     .trim()
+  if (/^[\W_]+$/.test(text)) return ''
+  if (/^["'`]+[\W_]*["'`]+$/.test(text)) return ''
+  if (/disallowed by strict|additional context required|validator/i.test(text)) return ''
   if (/^(n\/?a|null|none|undefined|-|\[\])$/i.test(text)) return ''
   return text
 }
@@ -208,7 +212,8 @@ function sanitizeOrFallback(value?: string | null): string {
 
 function mapStatus(value?: string | null): UserStatus {
   const s = (value ?? '').toLowerCase().replace(/_/g, ' ')
-  if (s.includes('gap') || s.includes('non compliant') || s.includes('blocked') || s.includes('candidate')) return 'Non-compliant'
+  if (s.includes('candidate')) return 'Not applicable'
+  if (s.includes('gap') || s.includes('non compliant') || s.includes('blocked')) return 'Non-compliant'
   if (s.includes('partial')) return 'Partially compliant'
   if (s.includes('compliant') || s.includes('satisfied')) return 'Compliant'
   return 'Not applicable'
@@ -216,11 +221,11 @@ function mapStatus(value?: string | null): UserStatus {
 
 function canonicalIssueKey(value?: string | null): string {
   const normalized = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
-  return ISSUE_ALIASES[normalized] ?? 'governance'
+  return ISSUE_ALIASES[normalized] ?? 'unknown'
 }
 
 function issueLabel(issue: string): IssueLabel {
-  return ISSUE_LABELS[issue] ?? 'Governance and compliance disclosure'
+  return ISSUE_LABELS[issue] ?? 'Unknown issue classification'
 }
 
 function whyText(issue: string, fallback?: string | null): string {

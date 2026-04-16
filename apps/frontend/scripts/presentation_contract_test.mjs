@@ -7,6 +7,8 @@ import ts from 'typescript'
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const srcPath = path.join(root, 'src', 'lib', 'presentation.ts')
 const source = fs.readFileSync(srcPath, 'utf8')
+const findingsPageSource = fs.readFileSync(path.join(root, 'src', 'features', 'findings', 'FindingsPage.tsx'), 'utf8')
+assert.ok(findingsPageSource.includes('No published findings for this audit.'))
 
 const transpiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ES2020 },
@@ -34,6 +36,61 @@ const publishedRows = [
     remediation_note: 'Add lawful basis mapping.',
     citations: [{ excerpt: 'We process data for support and billing.' }],
     primary_legal_anchor: ['GDPR Article 13(1)(c)'],
+  },
+  {
+    id: 'f2',
+    section_id: 'sec-2',
+    issue_key: 'unknown_taxonomy_key',
+    status: 'compliant',
+    severity: null,
+    gap_note: 'N/A',
+    remediation_note: 'N/A',
+    citations: [{ excerpt: 'Plain disclosure text.' }],
+    primary_legal_anchor: ['GDPR Article 13(1)(f)'],
+  },
+  {
+    id: 'f3',
+    section_id: 'sec-2',
+    issue_key: 'profiling_disclosure_gap',
+    status: 'gap',
+    severity: null,
+    gap_note: 'Profiling is not fully described.',
+    remediation_note: 'Add profiling details.',
+    citations: [{ excerpt: 'Profiling effects are not described.' }],
+    primary_legal_anchor: ['GDPR Article 13(2)(f)'],
+  },
+  {
+    id: 'f4',
+    section_id: 'sec-2',
+    issue_key: 'missing_transfer_notice',
+    status: 'gap',
+    severity: null,
+    gap_note: 'Transfer safeguards are not described.',
+    remediation_note: 'Add transfer safeguards.',
+    citations: [{ excerpt: 'Transfer wording lacks safeguards.' }],
+    primary_legal_anchor: ['GDPR Article 13(1)(f)'],
+  },
+  {
+    id: 'f5',
+    section_id: 'sec-3',
+    issue_key: 'missing_controller_contact',
+    status: 'gap',
+    severity: null,
+    gap_note: 'Contact method not visible.',
+    remediation_note: 'Add contact details.',
+    citations: [{ excerpt: 'No direct contact route is listed.' }],
+    primary_legal_anchor: ['GDPR Article 13(1)(a)'],
+  },
+  {
+    id: 'f6',
+    section_id: 'sec-3',
+    issue_key: 'purpose_specificity_gap',
+    status: 'partial',
+    severity: null,
+    gap_note: 'Purpose mapping is too broad.',
+    remediation_note: 'Clarify purpose mapping.',
+    citations: [{ excerpt: 'Purpose text exists.' }],
+    primary_legal_anchor: ['GDPR Article 5(1)(b)'],
   },
 ]
 
@@ -77,10 +134,16 @@ for (const label of labels) {
     'Purpose specificity disclosure',
     'Recipients disclosure',
     'Role allocation disclosure',
+    'Unknown issue classification',
   ].includes(label), `unexpected issue label ${label}`)
 }
 assert.ok(!labels.includes('Transparency disclosure'))
 assert.ok(!labels.includes('Compliance disclosure issue'))
+assert.ok(labels.includes('Unknown issue classification'))
+assert.ok(labels.includes('Profiling transparency'))
+assert.ok(labels.includes('Transfer safeguards disclosure'))
+assert.ok(labels.includes('Contact information disclosure'))
+assert.ok(labels.includes('Purpose specificity disclosure'))
 
 // section summary model checks
 const sectionRows = presentation.reportExportFindings.filter((row) => row.scope === 'Section')
@@ -147,6 +210,21 @@ const zeroPayload = mod.validateReportExportReadiness(presentation, {
   pdfStatusCounts: { compliant: 0, partially_compliant: 0, non_compliant: 0, not_applicable: 0, total: 0 },
 })
 assert.equal(zeroPayload.ok, false)
+
+const compliantPresentation = mod.buildFindingsPresentation({
+  publishedRows: [],
+  reviewRows: [
+    { item_kind: 'review_block', id: 'cb1', section_id: 'review:core_duties', final_disposition: 'satisfied', reason: 'all satisfied' },
+  ],
+  analysisRows: [
+    { id: 'ca1', section_id: 'sec-1', analysis_type: 'completeness_outcome', issue_type: 'missing_transfer_notice', status_candidate: 'candidate_gap', gap_note: 'candidate only', remediation_note: 'n/a', citations: [] },
+  ],
+  sectionsById,
+  publishedBlocked: false,
+})
+assert.equal(compliantPresentation.publishedVisibleFindings.length, 0)
+assert.equal(mod.aggregateCounts(compliantPresentation.reviewVisibleFindings).non_compliant, 0)
+assert.equal(mod.aggregateCounts(compliantPresentation.analysisVisibleFindings).non_compliant, 0)
 
 fs.unlinkSync(tempFile)
 console.log('presentation contract checks passed')

@@ -62,9 +62,9 @@ export function FindingsPage() {
       reviewRows: reviewItems,
       analysisRows: analysisItems,
       sectionsById,
-      publishedBlocked: Boolean(publishedError) || reviewItems.some((x) => x.item_kind === 'review_block' && (x.final_disposition ?? '').toLowerCase() !== 'satisfied'),
+      publishedBlocked: Boolean(publishedError) || status === 'review_required',
     }),
-    [findings, reviewItems, analysisItems, sectionsById, publishedError],
+    [findings, reviewItems, analysisItems, sectionsById, publishedError, status],
   )
 
   const activeRows = viewMode === 'published'
@@ -113,7 +113,7 @@ export function FindingsPage() {
           </p>
           {presentation.publishedBlocked && viewMode === 'published' && (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Published findings are unavailable for this audit.
+              Published findings are blocked while review is in progress.
             </div>
           )}
           {viewMode === 'review' && reviewSummary && (
@@ -162,7 +162,7 @@ export function FindingsPage() {
                 <tr><th className="px-4 py-3">Section</th><th className="px-4 py-3">Issues</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Severity</th></tr>
               </thead>
               <tbody>
-                {sectionFindings.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>No section findings in this dataset.</td></tr> : sectionFindings.map((finding) => (
+                {sectionFindings.length === 0 ? <tr className="border-t"><td className="px-4 py-6 text-slate-500" colSpan={4}>{viewMode === 'published' ? 'No published findings for this audit.' : 'No section findings in this dataset.'}</td></tr> : sectionFindings.map((finding) => (
                   <tr key={finding.stable_ui_id} onClick={() => setSelectedByView((c) => ({ ...c, [viewMode]: finding.stable_ui_id }))} className={`cursor-pointer border-t ${selected?.stable_ui_id === finding.stable_ui_id ? 'bg-sky-50/80' : 'bg-white'}`}>
                     <td className="px-4 py-3">{finding.sectionTitle}</td>
                     <td className="px-4 py-3">{finding.primaryIssueLabel} {finding.issueCount > 1 ? `(+${finding.issueCount - 1})` : ''}</td>
