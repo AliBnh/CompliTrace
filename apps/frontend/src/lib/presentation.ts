@@ -18,6 +18,7 @@ const CANONICAL_ISSUE_LABELS = [
   'Purpose specificity',
   'Recipients of personal data',
   'Role allocation disclosure',
+  'Unknown issue classification',
 ] as const
 
 export type IssueLabel = typeof CANONICAL_ISSUE_LABELS[number]
@@ -410,6 +411,7 @@ function normalizeAnalysis(rows: AnalysisItemOut[], sectionsById: Record<string,
   return rows.flatMap((row) => {
     if (/(support_evidence|meta_section|internal)/i.test(`${row.analysis_type} ${row.artifact_role ?? ''} ${row.section_id}`)) return []
     if (row.section_id.startsWith('ledger:')) return []
+    if ((row.status_candidate ?? '').toLowerCase().startsWith('candidate_')) return []
     const isDocument = row.section_id.startsWith('systemic:')
     const sectionTitle = isDocument ? 'Entire document' : sectionTitleFor(row.section_id, sectionsById)
     if (!sectionTitle) return []
