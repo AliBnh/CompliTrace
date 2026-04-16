@@ -134,6 +134,7 @@ for (const label of labels) {
     'Purpose specificity',
     'Recipients of personal data',
     'Role allocation disclosure',
+    'Unknown issue classification',
   ].includes(label), `unexpected issue label ${label}`)
 }
 assert.ok(!labels.includes('Transparency disclosure'))

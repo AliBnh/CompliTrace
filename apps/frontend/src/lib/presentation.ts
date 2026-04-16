@@ -18,6 +18,7 @@ const CANONICAL_ISSUE_LABELS = [
   'Purpose specificity',
   'Recipients of personal data',
   'Role allocation disclosure',
+  'Unknown issue classification',
 ] as const
 
 export type IssueLabel = typeof CANONICAL_ISSUE_LABELS[number]
