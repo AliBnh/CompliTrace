@@ -323,13 +323,52 @@ def _is_publishable_finding(row: Finding) -> bool:
     return row.publish_flag == "yes"
 
 
+def _is_unresolved_or_fallback_row(row: Finding) -> bool:
+    token_blob = " ".join(
+        [
+            row.classification or "",
+            row.finding_type or "",
+            row.artifact_role or "",
+            row.assessment_type or "",
+            row.applicability_status or "",
+            row.assertion_level or "",
+            row.citation_summary_text or "",
+            row.gap_note or "",
+            row.remediation_note or "",
+        ]
+    ).lower()
+    blocked_tokens = (
+        "fallback",
+        "systemic-only",
+        "strict legal gate",
+        "not assessable promotion",
+        "diagnostic_internal_only",
+        "unresolved applicability",
+        "internal_only",
+        "support_only",
+        "meta_section",
+    )
+    return any(token in token_blob for token in blocked_tokens)
+
+
 def _has_visible_anchor_or_citation(row: Finding) -> bool:
     anchors = _decode_json_list(row.primary_legal_anchor) + _decode_json_list(row.secondary_legal_anchors)
-    if any((_sanitize_user_text(a) or "").strip() for a in anchors):
+    normalized_anchors = [(_sanitize_user_text(a) or "").strip().lower() for a in anchors]
+    if any(a.startswith("gdpr article") or a.startswith("gdpr art") for a in normalized_anchors):
         return True
-    if (_sanitize_user_text(row.legal_requirement) or "").strip():
-        return True
-    return any(_is_valid_evidence_excerpt(c.excerpt) for c in row.citations)
+    legal_requirement = (_sanitize_user_text(row.legal_requirement) or "").strip().lower()
+    return "gdpr art" in legal_requirement or "gdpr article" in legal_requirement
+
+
+def _has_citation_or_evidence_ref(row: Finding) -> bool:
+    real_citations = [
+        c
+        for c in row.citations
+        if _is_valid_evidence_excerpt(c.excerpt)
+        and bool((c.chunk_id or "").strip())
+        and not (c.chunk_id or "").startswith("systemic-anchor:")
+    ]
+    return len(real_citations) > 0
 
 
 def _readable_fallback_evidence(row: Finding) -> str:
@@ -343,25 +382,77 @@ def _has_readable_evidence(row: Finding) -> bool:
     return any(_is_valid_evidence_excerpt(c.excerpt) for c in row.citations)
 
 
-def final_findings_dataset(db: Session, audit_id: str) -> list[Finding]:
-    """Canonical final findings dataset used by UI/report/export/PDF."""
+def _is_clean_human_text(value: str | None) -> bool:
+    text = (_sanitize_user_text(value) or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"[\W_]+", text):
+        return False
+    lowered = text.lower()
+    debug_tokens = (
+        "disallowed by strict",
+        "additional context required",
+        "debug",
+        "placeholder",
+        "internal",
+        "validator",
+    )
+    if any(token in lowered for token in debug_tokens):
+        return False
+    if text.count('"') % 2 == 1:
+        return False
+    return True
+
+
+def _is_final_exportable_finding(row: Finding) -> bool:
+    if not _is_publishable_finding(row):
+        return False
+    if row.status in {"not_assessable", "referenced_but_unseen"}:
+        return False
+    if _is_unresolved_or_fallback_row(row):
+        return False
+    if not _has_readable_evidence(row):
+        return False
+    if not _has_visible_anchor_or_citation(row):
+        return False
+    if not _has_citation_or_evidence_ref(row):
+        return False
+    text_fields = [
+        row.policy_evidence_excerpt,
+        row.gap_note,
+        row.remediation_note,
+        row.citation_summary_text,
+        row.legal_requirement,
+    ]
+    return all(_is_clean_human_text(value) for value in text_fields if value)
+
+
+def final_exported_findings(db: Session, audit_id: str) -> list[Finding]:
+    """Canonical final findings dataset sourced directly from review-stage publishable findings."""
     rows = db.scalars(
         select(Finding)
         .options(selectinload(Finding.citations))
         .where(Finding.audit_id == audit_id)
         .where(Finding.section_id.not_like("ledger:%"))
+        .where(Finding.artifact_role == "publishable_finding")
         .where(Finding.publication_state == "publishable")
-        .where(Finding.finding_type.in_(["local", "systemic"]))
         .order_by(Finding.section_id.asc(), Finding.id.asc())
     ).all()
-    out: list[Finding] = []
     for row in rows:
-        if not _has_visible_anchor_or_citation(row):
-            continue
-        if not _has_readable_evidence(row):
-            row.policy_evidence_excerpt = _readable_fallback_evidence(row)
-        out.append(row)
-    return out
+        if not _is_valid_evidence_excerpt(row.policy_evidence_excerpt):
+            citation_excerpt = next((c.excerpt for c in row.citations if _is_valid_evidence_excerpt(c.excerpt)), None)
+            fallback = _sanitize_user_text(citation_excerpt) or _sanitize_user_text(row.citation_summary_text) or _sanitize_user_text(row.gap_reasoning)
+            row.policy_evidence_excerpt = (
+                f"Based on the reviewed notice: {fallback}"
+                if fallback
+                else "Based on the reviewed notice: no explicit compliant disclosure excerpt was found."
+            )
+    return rows
+
+
+def final_findings_dataset(db: Session, audit_id: str) -> list[Finding]:
+    """Backward-compatible wrapper for canonical final findings dataset."""
+    return final_exported_findings(db, audit_id)
 
 
 def _normalize_status(status: str | None) -> str:
@@ -426,9 +517,13 @@ def _evidence_for_row(row: Finding | _SyntheticFinding, section_label: str) -> s
 
 def _is_valid_evidence_excerpt(excerpt: str | None) -> bool:
     cleaned = (_sanitize_user_text(excerpt) or "").strip()
-    if len(cleaned) < 12:
+    if len(cleaned) < 3:
         return False
     if cleaned.lower() in {"section", ".", ":", "-", "n/a"}:
+        return False
+    if re.fullmatch(r"[\W_]+", cleaned):
+        return False
+    if any(token in cleaned.lower() for token in ("disallowed by strict", "additional context required", "validator", "debug")):
         return False
     return bool(re.search(r"[a-zA-Z]{4,}", cleaned))
 
@@ -490,7 +585,9 @@ def build_export_contract(
     db: Session,
     audit_id: str,
 ) -> tuple[dict[str, Any], list[Finding | _SyntheticFinding], bool]:
-    publishable_findings = final_findings_dataset(db, audit_id)
+    publishable_findings = final_exported_findings(db, audit_id)
+    if publishable_findings and any((row.artifact_role != "publishable_finding" or row.publication_state != "publishable") for row in publishable_findings):
+        raise ValueError("published dataset integrity failure: non-publishable rows included")
     dataset_used = "published" if publishable_findings else "zero"
     report_type = "Published report" if publishable_findings else "Zero-findings report"
     report_rows: list[Finding | _SyntheticFinding] = publishable_findings
@@ -520,6 +617,8 @@ def build_export_contract(
     }
     if len(report_rows) > 0 and len(export_rows) == 0:
         contract["blocker_reasons"] = ["final_findings_dataset_empty"]
+    if publishable_findings and contract["report_type"] == "Zero-findings report":
+        raise ValueError("report integrity failure: zero-findings report with published findings")
     return contract, export_rows, published_blocked
 
 def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
