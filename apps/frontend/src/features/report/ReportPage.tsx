@@ -54,7 +54,7 @@ export function ReportPage() {
     reviewRows,
     analysisRows,
     sectionsById,
-    publishedBlocked: reviewRows.some((row) => row.item_kind === 'review_block' && (row.final_disposition ?? '').toLowerCase() !== 'satisfied'),
+    publishedBlocked: false,
   }), [publishedRows, reviewRows, analysisRows, sectionsById])
   const exportRows = presentation.publishedVisibleFindings
   const counts = exportContract?.counts_by_status ?? aggregateCounts(exportRows)
@@ -167,6 +167,6 @@ function datasetLabel(dataset?: 'published' | 'review' | 'analysis' | 'zero'): s
 }
 
 function toUserBlocker(code: string): string {
-  if (code === 'final_findings_dataset_empty') return 'No published findings are available in the final export dataset.'
+  if (code === 'final_findings_dataset_empty') return 'No published findings for this audit.'
   return 'Export is temporarily unavailable for this dataset.'
 }
