@@ -1,0 +1,837 @@
+# CompliTrace Repository Analysis (Dense Technical Deep Dive)
+
+## 0. Purpose of this document
+
+This document is a deep technical analysis of the entire CompliTrace repository as currently implemented, intended to explain **exactly how the software audit flow works end-to-end** across ingestion, parsing, sectioning, retrieval, LLM processing, deterministic legal gating, publication controls, review surfaces, export contracts, PDF generation, frontend presentation normalization, and observability.
+
+It is intentionally exhaustive and implementation-centric.
+
+---
+
+## 1. Repository topology and runtime architecture
+
+### 1.1 High-level modules
+
+The repo is organized into service applications:
+
+- `apps/ingestion-service`: Upload + PDF parsing + section extraction + document persistence.
+- `apps/knowledge-service`: GDPR chunk indexing + vector retrieval APIs.
+- `apps/orchestration-service`: Audit lifecycle + agentic section loop + legal qualification + finding persistence + publication/review/report APIs.
+- `apps/frontend`: React UI consuming ingestion/orchestration APIs.
+- `infra/*`: Prometheus/Grafana config.
+- `scripts/*`: GDPR ingestion/validation utilities.
+- `data/*`: Raw and processed GDPR corpus data.
+
+### 1.2 Container orchestration
+
+`docker-compose.yml` defines:
+
+- PostgreSQL (system of record for documents/audits/findings/reports)
+- Qdrant (vector store)
+- Knowledge service (8002)
+- Ingestion service (8001)
+- Orchestration service (8003)
+- Prometheus + Grafana
+- Frontend (5173)
+
+Environment variables control model provider names, API keys, LLM budgets, corpus metadata, report directory, and CORS.
+
+### 1.3 Data and control plane boundaries
+
+- **Data plane**: Document text and extracted sections originate in ingestion; retrieval evidence originates in knowledge; persisted findings are authored by orchestration.
+- **Control plane**: Orchestration’s final disposition map and publication validator decide whether any finding is publishable or blocked/internal.
+
+---
+
+## 2. Service-level deep dive
+
+## 2.1 Ingestion service (Port 8001)
+
+### 2.1.1 API endpoints
+
+- `GET /health`
+- `POST /documents`
+- `GET /documents/{document_id}`
+- `GET /documents/{document_id}/sections`
+- `GET /metrics`
+
+### 2.1.2 Upload handling modes
+
+`POST /documents` supports:
+
+1. **Multipart** (`file` key)
+2. **Raw PDF body** with `Content-Type: application/pdf` or `application/octet-stream`, optional `X-Filename`
+
+Validation rules:
+
+- Reject if no file-like payload
+- Reject non-`.pdf` extension
+- Store file to configured uploads directory
+
+Metrics incremented:
+
+- `documents_upload_total`
+- `documents_parsed_total`
+- `documents_parse_failed_total`
+- `document_parse_duration_seconds`
+
+Failure path:
+
+- Persist `Document(status="failed", error_message=...)`
+- Return HTTP 422
+
+### 2.1.3 Parsing strategy (parser.py)
+
+Core parser behavior:
+
+- Uses PyMuPDF (`fitz`) text extraction page-by-page.
+- Cleans lines and drops noise:
+  - page markers,
+  - file paths,
+  - punctuation-only lines,
+  - tiny fragments.
+- Splits inline numeric headings and heading-body composites (`1.2 Something ...`).
+- Identifies headings via regex heuristics:
+  - section headings,
+  - subsection headings,
+  - numeric-only subsections,
+  - title-case all-caps heading pattern.
+- Detects repeated boilerplate (headers/footers) across pages and strips them.
+- Preserves opening preamble block semantics when detected.
+- Splits embedded numbered subheadings in body text.
+- Prevents over-fragmentation by keeping numeric-only child nodes inside a top-level parent where appropriate.
+- Tracks `page_start`/`page_end` per section.
+- Fallback: if no sections are found, emits one `Document Body` section with full text.
+
+### 2.1.4 Ingestion persistence model
+
+`Document`:
+
+- `id`, `title`, `filename`, `status`, `error_message`, `created_at`
+
+`Section`:
+
+- `id`, `document_id`, `section_order`, `section_title`, `content`, `page_start`, `page_end`
+
+---
+
+## 2.2 Knowledge service (Port 8002)
+
+### 2.2.1 Startup lifecycle
+
+On startup:
+
+1. Connect Qdrant.
+2. Initialize embedder (`TextEmbedding`, default `BAAI/bge-small-en-v1.5`).
+3. Ensure collection exists with cosine distance.
+4. Load GDPR chunks JSONL.
+5. Reindex if collection empty (or forced).
+
+Point IDs are deterministic UUID5 hashes of `chunk_id`.
+
+### 2.2.2 Retrieval API
+
+`POST /search`:
+
+- Input: `query`, `k` (1..20)
+- Embeds query vector
+- Executes Qdrant `query_points`
+- Returns top-k results with:
+  - `chunk_id`, `article_number`, `article_title`, `paragraph_ref`, `subpoint_range`, `content`, `source_pdf`, `score`
+
+`GET /chunks/{chunk_id}`:
+
+- Scroll-filter by payload field `chunk_id`
+- Return full chunk payload
+
+Metrics:
+
+- `retrieval_query_total`
+- `retrieval_latency_seconds`
+- `retrieval_results_returned_total`
+- `chunk_lookup_total`
+
+---
+
+## 2.3 Orchestration service (Port 8003)
+
+### 2.3.1 Startup and schema evolution
+
+On startup:
+
+- Creates metadata tables.
+- Runs in-place additive schema migration helpers:
+  - findings columns (`classification`, confidence components, publication fields, anchors, evidence refs, etc.)
+  - analysis item columns
+  - evidence record columns
+- Attempts widening of `findings.section_id` to `VARCHAR(128)` for systemic/ledger IDs.
+
+### 2.3.2 Public API surface
+
+- `GET /health`
+- `POST /audits`
+- `GET /audits/{id}`
+- `GET /audits/{id}/findings`
+- `GET /audits/{id}/analysis`
+- `GET /audits/{id}/review`
+- `GET /audits/{id}/review/grouped`
+- `GET /audits/{id}/final-decision-ledger`
+- `GET /audits/{id}/export-contract`
+- `POST /audits/{id}/report`
+- `GET /audits/{id}/report`
+- `GET /audits/{id}/report/download`
+- `GET /metrics`
+
+---
+
+## 3. Canonical data model in orchestration
+
+### 3.1 Audit
+
+Stores run-level provenance:
+
+- `document_id`
+- audit lifecycle timestamps and status
+- `model_provider`, `model_name`, `model_temperature`
+- `prompt_template_version`
+- `embedding_model`
+- `corpus_version`
+
+### 3.2 Finding (core outcome unit)
+
+Contains:
+
+- status/severity/classification
+- confidence decomposition (`confidence_evidence`, `confidence_applicability`, `confidence_article_fit`, `confidence_synthesis`, `confidence_overall`)
+- publication controls (`publish_flag`, `artifact_role`, `finding_level`, `publication_state`)
+- scope and omission fields (`missing_from_section`, `missing_from_document`, `assertion_level`, `source_scope`, `source_scope_confidence`)
+- legal narrative fields (`policy_evidence_excerpt`, `legal_requirement`, `gap_reasoning`, `severity_rationale`, `confidence_level`, `assessment_type`)
+- legal anchors and evidence refs (`primary_legal_anchor`, `secondary_legal_anchors`, `document_evidence_refs`, `citation_summary_text`)
+
+### 3.3 FindingCitation
+
+- Grounding link to retrieved GDPR chunk:
+  - `chunk_id`, `article_number`, `paragraph_ref`, `article_title`, `excerpt`
+
+### 3.4 AuditAnalysisItem
+
+- Internal candidate analysis artifacts that can include provisional states, suppression reasons, retrieval summaries, citation fit state, and confidence candidates.
+
+### 3.5 EvidenceRecord
+
+- Canonical evidence registry keyed by `evidence_id` (`evi:policy:*`, `evi:chunk:*`, etc.)
+- Used for evidence hydration and traceability checks.
+
+### 3.6 Report
+
+- report status and generated `pdf_path`.
+
+---
+
+## 4. End-to-end audit lifecycle: exact control flow
+
+## 4.1 `POST /audits` entry
+
+1. Persist `Audit(status="pending")`.
+2. Invoke `run_audit(db, audit)` synchronously.
+3. On exception: rollback and mark audit `failed`.
+
+## 4.2 `run_audit` initialization
+
+At start:
+
+- Mark audit as `running`.
+- Persist model and corpus metadata from config.
+- Pull all sections from ingestion service.
+- Initialize metrics and budget state.
+
+Computed global artifacts before looping sections:
+
+- `cross_references = _extract_notice_cross_references(sections)`
+- `(source_scope, source_scope_confidence, unseen_sections) = _source_scope_qualification(...)`
+- scope proof gate downshift if proof insufficient
+- `document_mode = _infer_document_mode(sections)` (privacy_notice vs internal_policy)
+- `posture = _document_posture_agent(...)`
+- `duty_validation = _document_wide_duty_validation(...)`
+- `obligation_map = _build_document_obligation_map(...)`
+- `llm_budget_cap = _effective_llm_budget(...)`
+
+## 4.3 Per-section loop (dense breakdown)
+
+For each section (ordered):
+
+### A. Runtime guardrails
+
+- hard runtime budget check (`MAX_AUDIT_RUNTIME_SECONDS`) → immediate `needs review` fallback finding if exceeded.
+
+### B. Applicability filter layer
+
+- `_is_not_applicable(section)` gate for obvious non-auditable content.
+- `_section_auditability_type(section)` to classify definition/admin/meta sections.
+- filtered sections persist as not-applicable support artifacts.
+
+### C. Issue spotting layer
+
+- `_collection_mode(section)` (direct/indirect/mixed/etc)
+- `_spot_candidate_issues(section, collection_mode)` emits ranked candidate issue objects with evidence signal strengths.
+- if document-level duty validation indicates unmet obligations, inject candidate issue at head (obligation-first enforcement).
+- suppress controller-missing candidates if global obligation map confirms controller identity/contact already present.
+
+### D. Legal qualification layer
+
+- Extract legal facts (`_extract_legal_facts`) from section text.
+- Compute legal qualification (`_legal_qualification_for_issue`) containing:
+  - issue_name
+  - obligation_family
+  - defect_type
+  - priority_bucket (material/fatal)
+  - primary article
+  - secondary articles
+  - rejected articles
+  - fit/rejection rationale
+
+### E. Retrieval/RAG layer
+
+- Build retrieval query via:
+  `"GDPR obligations for {topic}. Context: {article_hint}. Section text: {snippet}"`
+- Query knowledge service with `k=8`.
+- Rerank based on document mode + section topic + article preferences.
+- Keep top 5.
+- Retry if low score or weak keyword overlap.
+
+### F. Evidence sufficiency gate
+
+- Must have at least 2 strong chunks (`score >= 0.50`) and at least one chunk containing obligation words.
+- If insufficient:
+  - for core privacy-notice duties, may produce a substantive probable partial gap from deterministic silence inference;
+  - otherwise force `needs review`.
+
+### G. LLM invocation gate
+
+- If previous rate-limited or llm budget exhausted: deterministic `needs review` finding.
+- Else call `run_llm_classification(...)` with section, chunks, and section guidance.
+
+### H. LLM post-processing
+
+- Coerce JSON to `LlmFinding` schema.
+- sanitize legal references in notes.
+- demote if model emits `candidate_publishability=internal_only`.
+- demote if finding appears to be internal control only (privacy notice context mismatch).
+
+### I. Applicability + specialized legal passes
+
+- Infer claim types from finding text and fallback to section signals.
+- Build applicability memo and applicability decision.
+- Trigger specialized family passes (profiling, transfer, role ambiguity, special category).
+
+### J. Citation validation / salvage
+
+- Validate LLM citations against retrieved top-k set and allowed article matrix.
+- Check paragraph compatibility.
+- salvage citations from retrieved pool if needed.
+
+### K. Deterministic violation and consistency overrides
+
+- explicit violation library can force status to high-severity gap.
+- normalize severity by claim type and risk tier.
+- enforce reasoning-chain quality.
+- append applicability and legal qualification traces in gap note for internal pathing.
+- global consistency validator can demote to needs-review internal-only artifacts.
+- not-assessable disallowed under explicit factual signal conditions.
+
+### L. Duplicate suppression
+
+- Signature-based dedupe across sections (`_finding_signature`).
+- duplicates converted into diagnostic internal-only artifacts.
+
+### M. Persist section finding
+
+Persist `Finding` with:
+
+- final status/classification
+- confidence decomposition
+- scope and omission flags
+- legal fields and reasoning text
+- publish flag pre-projection
+
+Persist `FindingCitation` rows for validated citations.
+
+### N. Optional split finding
+
+- If combined controller/contact + legal basis context appears in one finding, creates second split legal-basis finding with dedicated legal anchors.
+
+## 4.4 Post-loop synthesis and publication pipeline
+
+After all sections:
+
+1. `_add_notice_level_synthesis` (when privacy_notice)
+2. `_add_systemic_issue_synthesis`
+3. `_build_systemic_support` (anchors, support completeness, omission basis, source scope)
+4. `_enforce_core_and_specialist_completeness`
+5. `_build_final_disposition_map`
+6. `_final_publication_validator`
+7. `_enforce_review_publish_invariant`
+8. `_record_suppression_ledger(... final_disposition_map snapshot ... )`
+9. `_partner_review_pass`
+10. `_upsert_evidence_records`
+11. `_state_invariant_validator`
+12. `_snapshot_analysis_items`
+13. Set audit `complete`, set `completed_at`
+
+---
+
+## 5. LLM subsystem details (exact prompting and provider strategy)
+
+## 5.1 System prompt contract
+
+The system prompt requires strict JSON keys:
+
+- `status`, `severity`, `gap_note`, `remediation_note`, `policy_evidence_excerpt`, `legal_requirement`, `gap_reasoning`, `confidence_level`, `assessment_type`, `severity_rationale`, `citations`, `candidate_publishability`
+
+Rules include:
+
+- allowed statuses: compliant/partial/gap/needs review
+- cite only provided chunks (`chunk_id + article_number`)
+- partial/gap requires concrete citation
+- if weak evidence → needs review
+- privacy notices: prioritize Articles 12-14
+- avoid certain governance articles as primary disclosure anchors
+- transfer-specific citation guidance constraints
+
+## 5.2 User prompt construction
+
+Prompt includes:
+
+- section title
+- section content (up to 5000 chars)
+- all retrieval chunk lines with metadata and snippet
+- section-specific legal guidance string from deterministic guidance rules
+- frozen rubric directives and citation constraints
+
+## 5.3 Provider routing and fallback
+
+`run_llm_classification` tries provider chain:
+
+- primary provider from env (`MODEL_PROVIDER`)
+- fallback provider from env (`FALLBACK_MODEL_PROVIDER`)
+
+Provider adapters:
+
+- Groq via OpenAI-compatible `/chat/completions` with JSON response format.
+- Gemini via `generateContent` with `responseMimeType: application/json`.
+
+429 handling:
+
+- retries with bounded sleep,
+- surfaces sentinel `__rate_limited__` if all attempts rate-limited.
+
+---
+
+## 6. RAG layer details
+
+## 6.1 Retrieval query generation
+
+`_build_retrieval_query(section, topic, mode)` builds context-guided text with mode article hints.
+
+## 6.2 Mode-aware reranking
+
+- privacy_notice mode boosts notice-centric article sets.
+- penalizes Article 88 unless employment signals present.
+- penalizes Article 30 unless ROPA signals present.
+
+## 6.3 Evidence sufficiency and retry
+
+- retry on weak top score or low keyword overlap.
+- sufficiency requires both score strength and obligation-language presence.
+
+## 6.4 Citation gates
+
+- citation must map to retrieved chunk universe.
+- article number and paragraph compatibility checks.
+- claim/article matrix enforces issue-family legal fit.
+
+---
+
+## 7. Legal and rule engine layers
+
+## 7.1 Candidate issue taxonomy (examples)
+
+- `missing_controller_identity`
+- `missing_legal_basis`
+- `missing_retention`
+- `missing_rights_information`
+- `missing_complaint_right`
+- `missing_transfer_notice`
+- `profiling_disclosure_gap`
+- `special_category_basis_unclear`
+- `controller_processor_role_ambiguity`
+- `article_14_indirect_collection_gap`
+- `recipients_disclosure_gap`
+- `purpose_specificity_gap`
+
+## 7.2 Obligation family mapping
+
+Issue names map to obligation families and then to primary/secondary/rejected article sets.
+
+## 7.3 Defect typing
+
+Defect classes include:
+
+- missing disclosure
+- incomplete disclosure
+- present but legally invalid
+- potential unlawful practice
+
+This is derived from both signal text and legal facts.
+
+## 7.4 Specialized family passes
+
+Final disposition map applies family-specific logic:
+
+- transfer safeguards completeness
+- profiling/Article 22 transparency thresholds
+- controller/processor allocation clarity
+- Article 14 source and timing duties
+- recipient category structure
+- purpose mapping quality
+- special-category processing + Article 9 condition/safeguards
+
+## 7.5 Severity policy
+
+Severity normalized by:
+
+- risk tier,
+- claim type criticality,
+- explicit violation patterns,
+- priority bucket/fatal signal presence.
+
+---
+
+## 8. Publication projection and review gating
+
+## 8.1 Final disposition map semantics
+
+Produces family-level records with:
+
+- `status`
+- `reasoning`
+- `triggered`
+- `publication_recommendation` (`publish` vs `internal_only`)
+- `source_scope_dependency`
+- positive/negative evidence IDs
+- severity
+- issue key
+
+plus `_controls`:
+
+- `audit_status`
+- `publication_allowed`
+- `publication_blockers`
+- `scope_confidence_cap`
+- `review_required_reasons`
+
+## 8.2 Final publication validator
+
+For each finding:
+
+- verifies required hydration fields (anchors, citation summary, source scope, assertion level, confidence, remediation)
+- checks citation presence unless explicit omission/violation modes allow no-chain
+- checks issue/article matrix fit
+- checks contradictory positive disclosures
+- enforces FLBC reasoning presence
+- enforces strong hydration flags for high-risk families
+
+If invalid:
+
+- sets `publish_flag=no`
+- sets `publication_state=blocked`
+- demotes to support artifact role
+- appends withheld marker
+- writes suppression ledger reason with missing fields
+
+## 8.3 Audit status gates
+
+- unresolved core duty hard-block can force `review_required`.
+- missing materialized publishable families can force `audit_incomplete`.
+
+---
+
+## 9. API projection layers (`/findings`, `/analysis`, `/review`)
+
+## 9.1 `/findings` (published boundary)
+
+- blocks entirely when audit is `review_required`.
+- sources rows from canonical exported dataset function.
+- derives issue key/label and sanitizes all user-facing fields.
+- enforces evidence linkage against `EvidenceRecord` map.
+- filters synthetic/systemic-anchor citations out of public projection.
+- maps classification/status into external view fields.
+
+## 9.2 `/analysis`
+
+- exposes internal analysis candidates with optional filters.
+- can suppress ledger rows unless debug mode.
+
+## 9.3 `/review`
+
+- merges publishable findings + blocked/internal findings + selected analysis rows.
+- synthesizes review blocks from final disposition snapshot ledger row.
+- grouped endpoint partitions into publication blockers, core duty resolution, specialist resolution, publishable, internal unresolved, diagnostics.
+
+## 9.4 `/final-decision-ledger`
+
+- outputs canonical issue keys and scope-level ledger rows with evidence refs and visibility flags.
+
+---
+
+## 10. Export contract and PDF generation
+
+## 10.1 Canonical dataset selection
+
+`final_exported_findings` is the source of truth for exports and published findings API:
+
+- only non-ledger rows
+- `artifact_role == publishable_finding`
+- `publication_state == publishable`
+
+Includes sanitation/fallback improvements for missing evidence text.
+
+## 10.2 Export contract schema
+
+`build_export_contract` returns:
+
+- `report_type`
+- `dataset_used`
+- `export_allowed`
+- `blocker_reasons`
+- `counts_by_status`
+- `finding_ids`
+- split ids (`document_wide_finding_ids`, `section_finding_ids`)
+- generation metadata
+
+## 10.3 PDF builder internals
+
+- custom low-level PDF object stream writer (no heavyweight PDF library for output stage)
+- text wrapping with bullet support
+- typography-safe character replacement
+- page splitting by estimated line heights
+- user-facing content only (internal tokens stripped)
+- includes summary counts, dataset labels, findings, citations, recommendations, finding IDs
+
+---
+
+## 11. Frontend flow and normalization pipeline
+
+## 11.1 Route flow
+
+- `/` Upload
+- `/sections` review parsed sections and start audit
+- `/findings` tri-view workspace (published/review/analysis)
+- `/report` report center and PDF generation/download
+
+## 11.2 API client layer
+
+- uses ingestion base URL + orchestration base URL
+- upload via XHR for progress reporting
+
+## 11.3 Presentation normalization
+
+The frontend aggressively normalizes/sanitizes backend text:
+
+- canonical issue key aliasing
+- canonical issue label constraints
+- status/severity mapping into user labels
+- evidence rendering and fallback phrasing
+- banned debug/internal token stripping
+- invariant validator for dataset parity with PDF metadata
+
+This prevents internal-engine artifacts leaking into UI copy.
+
+---
+
+## 12. Observability and metrics
+
+### 12.1 Ingestion metrics
+
+- upload attempts, parse success/failure, parse latency
+
+### 12.2 Knowledge metrics
+
+- retrieval query count, retrieval latency, results returned, chunk lookups
+
+### 12.3 Orchestration metrics
+
+- retries, evidence gate failures, citation validation failures
+- llm latency, total audit duration
+- section counters (total/auditable/filtered)
+- pass-specific counters (issue spotting, applicability, legal qualification, profiling, transfer, reviewer)
+- publication counters by status/type
+
+Prometheus scrapes all services; Grafana dashboard is provisioned in `infra/grafana`.
+
+---
+
+## 13. Determinism profile (what is and isn’t model-driven)
+
+### 13.1 Deterministic
+
+- parsing heuristics
+- issue spotting base taxonomy and priorities
+- legal family/article maps
+- retrieval retry and sufficiency thresholds
+- citation/article gates
+- publication hydration requirements
+- audit status gates (`review_required`, `audit_incomplete`)
+- export contract generation
+
+### 13.2 Non-deterministic
+
+- LLM generation content (bounded by strict JSON contract and post-gates)
+
+### 13.3 Practical implication
+
+The architecture behaves as a **bounded legal-analysis pipeline** with LLM as a constrained proposer rather than final arbiter.
+
+---
+
+## 14. Tests and invariants coverage summary
+
+Test suites enforce:
+
+- canonical dataset parity across API/export/report
+- blocking behavior under review-required state
+- publication projection consistency
+- evidence traceability constraints
+- sanitization of internal markers in APIs/PDF
+- final publication completeness gates
+- invariant-based demotion and status transitions
+
+This repository uses tests not only for functionality but as **policy contracts** for publication safety.
+
+---
+
+## 15. Full endpoint catalog (cross-service)
+
+### Ingestion service
+
+- `POST /documents`
+- `GET /documents/{id}`
+- `GET /documents/{id}/sections`
+- `GET /health`
+- `GET /metrics`
+
+### Knowledge service
+
+- `POST /search`
+- `GET /chunks/{chunk_id}`
+- `GET /health`
+- `GET /metrics`
+
+### Orchestration service
+
+- `POST /audits`
+- `GET /audits/{id}`
+- `GET /audits/{id}/findings`
+- `GET /audits/{id}/analysis`
+- `GET /audits/{id}/review`
+- `GET /audits/{id}/review/grouped`
+- `GET /audits/{id}/final-decision-ledger`
+- `GET /audits/{id}/export-contract`
+- `POST /audits/{id}/report`
+- `GET /audits/{id}/report`
+- `GET /audits/{id}/report/download`
+- `GET /health`
+- `GET /metrics`
+
+---
+
+## 16. Key runtime statuses and semantic meaning
+
+### Audit statuses
+
+- `pending`
+- `running`
+- `complete`
+- `failed`
+- `review_required`
+- `audit_incomplete`
+
+### Finding statuses
+
+- `compliant`
+- `partial`
+- `gap`
+- `needs review`
+- `not applicable` (internal layer)
+
+### Publication states
+
+- `publishable`
+- `blocked`
+- `internal_only`
+
+### Artifact roles
+
+- `publishable_finding`
+- `support_only`
+- analysis-specific candidate roles
+
+---
+
+## 17. Important implementation constraints and caveats
+
+1. The pipeline is specialized for GDPR transparency-style audits, not general legal reasoning.
+2. OCR/scanned PDF workflows are not implemented in the ingestion path.
+3. LLM output is constrained but still requires deterministic legal gates downstream.
+4. The export path is currently strict: published dataset or zero-findings output.
+5. Review and publication controls are intentionally conservative and can suppress borderline findings.
+
+---
+
+## 18. Practical “single-run” chronology (condensed execution timeline)
+
+1. User uploads PDF.
+2. Ingestion parses into sections.
+3. User confirms sections, starts audit.
+4. Orchestration stamps run metadata and computes global scope/posture.
+5. For each section:
+   - filter applicability
+   - spot issues
+   - qualify legal family/articles
+   - retrieve + rerank GDPR evidence
+   - evidence sufficiency gate
+   - optional LLM propose
+   - deterministic overrides/consistency/violation gates
+   - persist finding + citations
+6. Build systemic synthesis and family completeness state.
+7. Build final disposition map.
+8. Final publication validator blocks or allows each finding.
+9. Enforce review/publish invariant; generate evidence records and analysis snapshots.
+10. Audit completes (or review-required/incomplete state if blocked by gates).
+11. `/findings` returns canonical publishable view; `/review` returns full triage visibility.
+12. Report contract computed; PDF generated from canonical dataset.
+
+---
+
+## 19. Exact prompt strings and guidance pointers
+
+Prompting implementation is in `apps/orchestration-service/app/services/llm.py` and guidance logic in `_section_guidance(...)` within `audit_runner.py`.
+
+- System prompt is embedded as `SYSTEM_PROMPT` constant.
+- User prompt builder is `_build_user_prompt(...)`.
+- Section guidance includes explicit legal-routing text for transfer, rights, lawful basis, profiling, retention, and generic notice duties.
+
+---
+
+## 20. Final conclusion
+
+CompliTrace is not a generic RAG chatbot. It is a **multi-layered compliance decision pipeline** with:
+
+- bounded retrieval-backed LLM classification,
+- strong deterministic legal qualification and consistency checks,
+- family-level disposition synthesis,
+- publication hydration gates,
+- canonical export contract enforcement,
+- frontend sanitization and parity checks.
+
+The core engineering thesis is: **model-assisted candidate generation + deterministic legal and publication control planes**.
