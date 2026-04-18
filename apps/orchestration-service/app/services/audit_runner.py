@@ -3904,6 +3904,32 @@ def _readable_evidence(issue: str) -> str:
     return f"This notice does not clearly disclose the required information regarding {duty}."
 
 
+def _derive_issue_key_for_publication(row: Finding) -> str | None:
+    obligation = _norm(row.obligation_under_review or "")
+    if obligation in CLAIM_ARTICLE_RULES:
+        return obligation
+    if row.section_id.startswith("systemic:"):
+        return row.section_id.split("systemic:", 1)[1]
+    legal_requirement = _norm(row.legal_requirement or "")
+    issue_match = re.search(r"\bissue\s+([a-z0-9_]+)\b", legal_requirement)
+    if issue_match:
+        candidate = issue_match.group(1).strip()
+        if candidate in CLAIM_ARTICLE_RULES:
+            return candidate
+    return _finding_issue_id(row)
+
+
+def _ensure_publishable_issue_key(row: Finding) -> str | None:
+    issue_key = _derive_issue_key_for_publication(row)
+    if issue_key:
+        return issue_key
+    row.publish_flag = "no"
+    row.publication_state = "internal_only"
+    row.artifact_role = "support_only"
+    row.finding_level = "none"
+    return None
+
+
 def _enforce_review_publish_invariant(
     db: Session,
     audit_id: str,
@@ -3932,7 +3958,7 @@ def _enforce_review_publish_invariant(
     required_issues = {issue for issue in required_issues if issue}
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     for row in rows:
-        issue = _finding_issue_id(row)
+        issue = _ensure_publishable_issue_key(row)
         if issue not in required_issues:
             continue
         row.publish_flag = "yes"
@@ -3979,6 +4005,8 @@ def _state_invariant_validator(rows: list[Finding]) -> list[str]:
     errors: list[str] = []
     for row in rows:
         violation = None
+        if row.artifact_role == "publishable_finding" and row.publication_state == "publishable" and _derive_issue_key_for_publication(row) is None:
+            violation = "publishable_without_issue_key"
         if row.classification == "diagnostic_internal_only" and row.publication_state == "publishable":
             violation = "diagnostic_internal_only_publishable"
         elif row.classification == "diagnostic_internal_only" and row.artifact_role in {"publishable_candidate", "publishable_finding"}:

@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base
 from app.models.audit import Audit, Finding
-from app.services.audit_runner import _enforce_review_publish_invariant
+from app.api.routes import get_findings
+from app.services.audit_runner import _enforce_review_publish_invariant, _finding_issue_id
 from app.services.reports import build_export_contract, final_findings_dataset, generate_report_text
 
 
@@ -115,3 +116,37 @@ def test_fallback_evidence_is_readable_sentence():
         assert row.policy_evidence_excerpt is not None
         assert row.policy_evidence_excerpt.endswith(".")
         assert "required information" in row.policy_evidence_excerpt.lower()
+
+
+def test_publishable_without_issue_key_is_downgraded_before_api_boundary():
+    with _session() as db:
+        audit = _audit(db)
+        db.add(
+            Finding(
+                audit_id=audit.id,
+                section_id="sec-1",
+                status="gap",
+                severity="high",
+                classification="probable_gap",
+                artifact_role="publishable_finding",
+                publication_state="publishable",
+                publish_flag="yes",
+                finding_type="local",
+                gap_note=None,
+                remediation_note=None,
+                obligation_under_review=None,
+                legal_requirement=None,
+            )
+        )
+        db.commit()
+
+        disposition = {"legal_basis": {"status": "gap", "publication_recommendation": "publish"}}
+        _enforce_review_publish_invariant(db, audit.id, disposition)
+        rows = db.query(Finding).filter(Finding.audit_id == audit.id).all()
+
+        assert all(
+            not (r.artifact_role == "publishable_finding" and r.publication_state == "publishable" and _finding_issue_id(r) is None)
+            for r in rows
+        )
+        # API should not fail due to null issue key at publication boundary.
+        get_findings(audit.id, db)
