@@ -1821,11 +1821,18 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
     out: list[FindingOut] = []
     evidence_ids = known_evidence_ids
     seen: set[str] = set()
+    downgraded_issue_key_rows = False
     for row in rows:
         if row.id in seen:
             continue
         seen.add(row.id)
         issue_key = _derive_issue_key_for_published_row(row)
+        if not issue_key:
+            row.publish_flag = "no"
+            row.publication_state = "internal_only"
+            row.artifact_role = "support_only"
+            downgraded_issue_key_rows = True
+            continue
         issue_label = _require_issue_label(issue_key)
         policy_excerpt = _sanitize_published_text(row.policy_evidence_excerpt)
         if not policy_excerpt:
@@ -1905,6 +1912,8 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 ],
             )
         )
+    if downgraded_issue_key_rows:
+        db.commit()
     return [_to_audit_ready_view(r) for r in out]
 
 
