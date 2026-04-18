@@ -357,6 +357,33 @@ def test_get_findings_filters_synthetic_systemic_anchor_citations(db_session: Se
     assert [c.chunk_id for c in rows[0].citations] == ["sec:real-evidence-1"]
 
 
+def test_get_findings_downgrades_publishable_rows_without_issue_key_instead_of_500(db_session: Session):
+    audit = _create_audit(db_session, status="complete")
+    finding = Finding(
+        audit_id=audit.id,
+        section_id="sec-unknown",
+        status="gap",
+        severity="high",
+        classification="probable_gap",
+        finding_type="local",
+        publish_flag="yes",
+        artifact_role="publishable_finding",
+        publication_state="publishable",
+        legal_requirement="",
+        gap_note="",
+        remediation_note="",
+    )
+    db_session.add(finding)
+    db_session.commit()
+
+    rows = get_findings(audit.id, db_session)
+    assert rows == []
+    refreshed = db_session.get(Finding, finding.id)
+    assert refreshed is not None
+    assert refreshed.publication_state == "internal_only"
+    assert refreshed.artifact_role == "support_only"
+
+
 def test_get_findings_projects_from_evidence_refs_when_supporting_citations_are_absent(db_session: Session):
     audit = _create_audit(db_session, status="complete")
     db_session.add(
