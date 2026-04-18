@@ -67,6 +67,7 @@ export type FindingOut = {
   assertion_level?: 'confirmed_document_gap' | 'excerpt_limited_gap' | 'referenced_but_unseen' | 'not_assessable' | null
   publication_blocked?: boolean | null
   issue_key?: string | null
+  issue_label?: string | null
   blocker_reason?: string | null
   missing_requirements?: string[] | null
   affected_sections?: string[] | null
