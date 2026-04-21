@@ -387,6 +387,116 @@ Deterministic-heavy layers:
 Model-driven layer (bounded):
 
 - textual synthesis/classification proposals inside strict prompt and schema constraints, then post-validated by deterministic controls.
+### 5.6 Plain-English walkthrough (very detailed)
+
+This is the most practical way to understand the agent pipeline without code jargon:
+
+#### Big picture in one sentence
+
+For every section of the uploaded policy, the system does: **(A) deterministic checks first, (B) asks the LLM for a proposal only when allowed, (C) deterministic legal gates after the LLM, (D) publishes only if strict rules pass**.
+
+#### Step-by-step in simple English
+
+1. **Someone clicks “Start audit”.**
+   - Backend creates an audit row immediately (`pending`) so the run is traceable even if it fails later.
+
+2. **Audit enters `running`.**
+   - The system records which model/provider/corpus versions it plans to use.
+   - It downloads all parsed sections from ingestion service.
+
+3. **Before reading sections one-by-one, it builds document-level context.**
+   - It checks if sections cross-reference other sections.
+   - It estimates source scope confidence (do we have enough complete text context?).
+   - It infers document mode (for example privacy notice vs other posture).
+   - It builds a document-level obligation map (which key duties already seem present/missing globally).
+
+4. **For each section, it starts with deterministic guards (no model yet).**
+   - Runtime guard: if audit exceeded hard time budget, do safe fallback behavior.
+   - Applicability guard: if this section is administrative/non-auditable, mark accordingly and move on.
+
+5. **Issue spotting is mostly deterministic heuristic/rule logic.**
+   - It infers section collection mode and scans for likely missing obligations.
+   - It can inject priority obligations from document-level checks (obligation-first behavior).
+   - It can suppress duplicates when already satisfied elsewhere.
+
+6. **Legal qualification translates “issue guess” into legal framing.**
+   - It extracts legal facts from text patterns.
+   - It maps issue → obligation family → likely primary/secondary GDPR anchors.
+
+7. **Retrieval gets legal evidence chunks from knowledge service.**
+   - Query is built using section/topic/mode hints.
+   - Retrieval returns top-k chunks, then orchestration reranks them.
+   - If retrieval looks weak, it retries with adjusted strategy.
+
+8. **Evidence sufficiency gate decides if model is even allowed to reason.**
+   - If evidence is weak, pipeline can force `needs review` (or scoped omission path) **without trusting model creativity**.
+
+9. **This is where the AI agent actually lives.**
+   - The “agent” is the call to `run_llm_classification(...)` in `services/llm.py`.
+   - It receives bounded inputs: section text + retrieved chunks + guidance + strict JSON contract.
+   - It is **not** free to browse arbitrary law or invent citations outside provided chunks.
+
+10. **Model response is normalized immediately.**
+    - JSON is extracted/repaired/coerced into `LlmFinding`.
+    - Status spelling variants are normalized to canonical values.
+    - Citation objects missing required fields are dropped.
+
+11. **Deterministic legal gates run after model output (critical).**
+    - Citations are checked against retrieved chunk universe.
+    - Issue/article fit rules can demote invalid legal mappings.
+    - Explicit violation/consistency rules can override model verdicts.
+    - Internal-only/publishability demotions can happen even if model sounded confident.
+
+12. **Deduplication prevents repeated findings noise.**
+    - Similar findings across sections are collapsed/suppressed via signatures.
+
+13. **Persistence stores both final outputs and traceability artifacts.**
+    - Final `Finding` + `FindingCitation` are persisted.
+    - Additional analysis/suppression/evidence traces are persisted for review/auditability.
+
+14. **After all sections, document-level control plane runs.**
+    - Systemic synthesis and completeness checks run.
+    - Final disposition map decides family-level publishability/review state.
+    - Final publication validator enforces hydration/completeness constraints.
+    - Review/publish invariants and suppression ledger are recorded.
+
+15. **Only then are outputs exposed by endpoints.**
+    - `/findings` returns only canonical publishable dataset (and blocks if `review_required`).
+    - `/review` and `/analysis` expose broader internal context for triage.
+    - report/export are generated from canonical contract-safe dataset.
+
+#### Exactly where non-determinism exists
+
+Non-determinism is concentrated in the LLM call path:
+
+- model text generation itself (token sampling / provider behavior),
+- subtle wording of reasoning fields,
+- confidence phrasing and remediation prose style.
+
+Even with same prompt, model outputs can vary due to provider internals/rate-limit retries/model updates.
+
+#### Exactly where determinism exists
+
+Deterministic layers include:
+
+- parser and section extraction heuristics,
+- issue spotting taxonomies and keyword/rule gates,
+- retrieval scoring/rerank thresholds and sufficiency gates,
+- citation-fit legality checks,
+- publication hydration requirements,
+- review/publish invariant enforcement,
+- canonical export dataset constraints.
+
+So: **the model proposes; deterministic code disposes**.
+
+#### Why this architecture matters
+
+This design reduces risk in compliance reporting:
+
+- The model cannot directly publish findings.
+- Weak evidence paths are forced to safe states (`needs review`, blocked, or internal).
+- Final publication is controlled by explicit rule checks and invariants, not model confidence alone.
+
 
 ---
 
