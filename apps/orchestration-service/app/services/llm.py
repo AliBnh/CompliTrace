@@ -13,7 +13,7 @@ from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk
 SYSTEM_PROMPT = (
     "You are a GDPR compliance analyst. Return strict JSON with keys: "
     "status, severity, gap_note, remediation_note, policy_evidence_excerpt, legal_requirement, "
-    "gap_reasoning, confidence_level, assessment_type, severity_rationale, citations, candidate_publishability. "
+    "gap_reasoning, confidence_level, assessment_type, severity_rationale, citations. "
     "Allowed status: compliant, partial, gap, needs review. "
     "Citations must only reference provided chunks and include chunk_id + article_number. "
     "If status is partial or gap, include at least one concrete citation. "

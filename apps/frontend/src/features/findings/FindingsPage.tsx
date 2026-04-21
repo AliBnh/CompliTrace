@@ -72,7 +72,10 @@ export function FindingsPage() {
     : viewMode === 'review'
       ? presentation.reviewVisibleFindings
       : presentation.analysisVisibleFindings
-  const { documentFindings, sectionFindings } = splitFindingsByScope(activeRows)
+  const { documentFindings, sectionFindings } = useMemo(
+    () => splitFindingsByScope(activeRows),
+    [activeRows],
+  )
 
   const isPublishedBlockedView = viewMode === 'published' && presentation.publishedBlocked
   const counts = aggregateCounts(sectionFindings)

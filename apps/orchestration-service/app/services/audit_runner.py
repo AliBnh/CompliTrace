@@ -172,6 +172,190 @@ SYSTEMIC_ANCHOR_MAP: dict[str, dict[str, list[str]]] = {
     },
 }
 
+# ── OBLIGATION_TAXONOMY ────────────────────────────────────────────────────────
+# Single canonical source of truth for every GDPR obligation the system tracks.
+# All functions that need severity, anchors, gap text, family, or duty key MUST
+# read from here instead of maintaining separate local dicts.
+# ──────────────────────────────────────────────────────────────────────────────
+OBLIGATION_TAXONOMY: dict[str, dict] = {
+    "missing_controller_identity": {
+        "family": "controller_identity_contact",
+        "duty_key": "controller_identity_contact",
+        "obligation_key": "controller_identity_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not clearly identify the controller legal entity and contact route.",
+    },
+    "missing_controller_contact": {
+        "family": "controller_identity_contact",
+        "duty_key": "controller_identity_contact",
+        "obligation_key": "controller_contact_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not provide an actionable privacy contact route (email, webform, or postal address).",
+    },
+    "missing_legal_basis": {
+        "family": "legal_basis",
+        "duty_key": "legal_basis_notice",
+        "obligation_key": "legal_basis_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 6}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not explain the lawful basis for each processing purpose.",
+    },
+    "missing_retention_period": {
+        "family": "retention",
+        "duty_key": "retention_notice",
+        "obligation_key": "retention_present",
+        "severity": "medium",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(2)(a)", "GDPR Art. 14(2)(a)"], "secondary": ["GDPR Art. 5(1)(e)"]},
+        "gap_note": "The notice does not provide retention periods or objective retention criteria by data category.",
+    },
+    "missing_rights_notice": {
+        "family": "rights_notice",
+        "duty_key": "rights_notice",
+        "obligation_key": "rights_present",
+        "severity": "medium",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 12, 15, 16, 17, 18, 19, 20, 21, 22}, "support": {5}, "disallowed": set()},
+        "anchors": {"primary": ["GDPR Art. 13(2)(b)-(d)", "GDPR Art. 14(2)(c)-(e)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not describe data subject rights, including access, erasure, restriction, objection, and portability.",
+    },
+    "missing_complaint_right": {
+        "family": "complaint_right",
+        "duty_key": "complaint_right_notice",
+        "obligation_key": "complaint_present",
+        "severity": "medium",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 77}, "support": {12}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(2)(d)", "GDPR Art. 14(2)(e)"], "secondary": ["GDPR Art. 77"]},
+        "gap_note": "The notice does not explain the right to lodge a complaint with a supervisory authority.",
+    },
+    "missing_transfer_notice": {
+        "family": "transfer",
+        "duty_key": "transfers_notice",
+        "obligation_key": "transfer_present",
+        "severity": "high",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14, 44, 45, 46}, "support": {47, 49}, "disallowed": {15, 21}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)"], "secondary": ["GDPR Art. 44", "GDPR Art. 45", "GDPR Art. 46"]},
+        "gap_note": "The notice does not identify international transfer mechanisms or safeguards for data sent outside the EEA.",
+    },
+    "profiling_disclosure_gap": {
+        "family": "profiling",
+        "duty_key": "profiling_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14}, "support": {22}, "disallowed": {15}},
+        "anchors": {"primary": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)"], "secondary": ["GDPR Art. 22"]},
+        "gap_note": "The notice does not explain the logic, significance, or envisaged consequences of profiling or automated decision-making.",
+    },
+    "recipients_disclosure_gap": {
+        "family": "recipients",
+        "duty_key": "recipients_notice",
+        "obligation_key": "recipients_present",
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(e)", "GDPR Art. 14(1)(e)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not disclose categories of recipients or the main contexts in which personal data is shared.",
+    },
+    "purpose_specificity_gap": {
+        "family": "purpose_mapping",
+        "duty_key": "purposes_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14, 5}, "support": {12, 6}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"], "secondary": ["GDPR Art. 5(1)(b)"]},
+        "gap_note": "The notice does not clearly map each data category to specific processing purposes.",
+    },
+    "special_category_basis_unclear": {
+        "family": "special_category",
+        "duty_key": None,
+        "obligation_key": None,
+        "severity": "high",
+        "category": "conditional",
+        "article_ints": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
+        "anchors": {"primary": ["GDPR Art. 9(2)", "GDPR Art. 13(1)(c)"], "secondary": ["GDPR Art. 6"]},
+        "gap_note": "The notice does not explain the Article 9(2) condition under which special-category data is processed.",
+    },
+    "controller_processor_role_ambiguity": {
+        "family": "role_ambiguity",
+        "duty_key": "role_allocation_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"], "secondary": ["GDPR Art. 5(1)(a)"]},
+        "gap_note": "The notice does not clearly allocate controller and processor roles for described processing activities.",
+    },
+    "article_14_indirect_collection_gap": {
+        "family": "article14_source",
+        "duty_key": "article14_source_notice",
+        "obligation_key": None,
+        "severity": "high",
+        "category": "conditional",
+        "article_ints": {"primary": {14}, "support": {13}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 14(2)(f)", "GDPR Art. 14(3)"], "secondary": ["GDPR Art. 14(1)(d)"]},
+        "gap_note": "The notice does not identify source categories for data obtained from third parties or comply with Article 14 timing requirements.",
+    },
+    "dpo_contact_gap": {
+        "family": "dpo_contact",
+        "duty_key": "dpo_contact_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "conditional",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": set()},
+        "anchors": {"primary": ["GDPR Art. 13(1)(b)", "GDPR Art. 14(1)(b)"], "secondary": ["GDPR Art. 37-39"]},
+        "gap_note": "The notice does not provide the DPO contact details required under Article 13(1)(b)/14(1)(b).",
+    },
+}
+# Aliases — canonical name is the longer form; keep shortcuts for candidate-spotting compatibility
+OBLIGATION_TAXONOMY["missing_retention"] = OBLIGATION_TAXONOMY["missing_retention_period"]
+OBLIGATION_TAXONOMY["missing_rights_information"] = OBLIGATION_TAXONOMY["missing_rights_notice"]
+OBLIGATION_TAXONOMY["missing_transfer_disclosure"] = OBLIGATION_TAXONOMY["missing_transfer_notice"]
+
+
+def _obligation_severity(issue: str) -> str:
+    """Canonical severity for an obligation issue. Returns 'medium' for unknowns."""
+    return str(OBLIGATION_TAXONOMY.get(issue, {}).get("severity") or "medium")
+
+
+def _obligation_anchors(issue: str) -> dict[str, list[str]]:
+    """Canonical GDPR anchors (primary + secondary) for an obligation issue."""
+    return dict(OBLIGATION_TAXONOMY.get(issue, {}).get("anchors") or {"primary": [], "secondary": []})
+
+
+def _obligation_gap_note(issue: str) -> str | None:
+    """Canonical publishable gap note text for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("gap_note")
+
+
+def _obligation_family(issue: str) -> str | None:
+    """Canonical family name for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("family")
+
+
+def _obligation_duty_key(issue: str) -> str | None:
+    """Duty-registry / duty_validation key for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("duty_key")
+
+
+def _obligation_key(issue: str) -> str | None:
+    """obligation_map presence key (e.g. 'legal_basis_present') for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("obligation_key")
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
     "missing_controller_identity": "controller_identity_present",
     "missing_controller_contact": "controller_contact_present",
@@ -179,6 +363,19 @@ SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
     "missing_retention_period": "retention_present",
     "missing_rights_notice": "rights_present",
     "missing_complaint_right": "complaint_present",
+}
+
+SYSTEMIC_GAP_NOTE_MAP: dict[str, str] = {
+    "missing_legal_basis": "The notice does not explain the lawful basis for each processing purpose.",
+    "missing_retention_period": "The notice does not provide retention periods or objective retention criteria by data category.",
+    "missing_rights_notice": "The notice does not describe data subject rights, including access, erasure, restriction, objection, and portability.",
+    "missing_complaint_right": "The notice does not explain the right to lodge a complaint with a supervisory authority.",
+    "missing_controller_identity": "The notice does not clearly identify the controller legal entity and contact route.",
+    "missing_controller_contact": "The notice does not provide an actionable privacy contact route (email, webform, or postal address).",
+    "missing_transfer_notice": "The notice does not identify international transfer mechanisms or safeguards for data sent outside the EEA.",
+    "profiling_disclosure_gap": "The notice does not explain the logic, significance, or envisaged consequences of profiling or automated decision-making.",
+    "recipients_disclosure_gap": "The notice does not disclose categories of recipients or the main contexts in which personal data is shared.",
+    "purpose_specificity_gap": "The notice does not clearly map each data category to specific processing purposes.",
 }
 
 SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
@@ -208,6 +405,20 @@ CORE_DUTY_OBLIGATION_KEYS: dict[str, str] = {
     "retention": "retention_present",
     "rights": "rights_present",
     "complaint_right": "complaint_present",
+}
+
+# Maps candidate_issue_type to obligation_map presence key for early compliance pruning.
+_ISSUE_TO_OBLIGATION_KEY: dict[str, str] = {
+    "missing_legal_basis": "legal_basis_present",
+    "missing_retention": "retention_present",
+    "missing_retention_period": "retention_present",
+    "missing_rights_information": "rights_present",
+    "missing_rights_notice": "rights_present",
+    "missing_complaint_right": "complaint_present",
+    "missing_controller_identity": "controller_identity_present",
+    "missing_controller_contact": "controller_contact_present",
+    "missing_transfer_notice": "transfer_present",
+    "recipients_disclosure_gap": "recipients_present",
 }
 
 SPECIALIST_TRIGGER_RULES: dict[str, tuple[set[str], str]] = {
@@ -635,24 +846,20 @@ def _explicit_violation_hits(text: str) -> list[tuple[str, dict[str, object]]]:
 
 
 def _duty_registry_key_for_issue(issue_name: str) -> str | None:
-    mapping = {
-        "missing_controller_identity": "controller_identity_contact",
-        "missing_controller_contact": "controller_identity_contact",
-        "missing_legal_basis": "legal_basis_notice",
+    """Return the GDPR_DUTY_REGISTRY key for a given obligation issue name.
+    Delegates to OBLIGATION_TAXONOMY as the single source of truth.
+    Falls back to a legacy hardcoded mapping for duty keys not yet in the taxonomy.
+    """
+    from_taxonomy = _obligation_duty_key(issue_name)
+    if from_taxonomy is not None:
+        return from_taxonomy
+    # Legacy entries not in OBLIGATION_TAXONOMY (e.g. duty-registry keys differ from taxonomy)
+    _legacy: dict[str, str] = {
         "missing_retention": "retention_notice",
-        "missing_retention_period": "retention_notice",
         "missing_rights_information": "rights_notice",
-        "missing_rights_notice": "rights_notice",
-        "missing_complaint_right": "complaint_right_notice",
-        "missing_transfer_notice": "transfers_notice",
-        "profiling_disclosure_gap": "profiling_notice",
-        "recipients_disclosure_gap": "recipients_notice",
-        "purpose_specificity_gap": "purposes_notice",
-        "controller_processor_role_ambiguity": "role_allocation_notice",
-        "article_14_indirect_collection_gap": "article14_source_notice",
-        "dpo_contact_gap": "dpo_contact_notice",
+        "missing_transfer_disclosure": "transfers_notice",
     }
-    return mapping.get(issue_name)
+    return _legacy.get(issue_name)
 
 
 def _issue_relevance_score(issue_name: str, section: SectionData) -> int:
@@ -729,19 +936,44 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "partially_compliant"
         return "non_compliant"
     if duty_id == "legal_basis_notice":
-        has_basis = _eval_presence(corpus, {"legal basis", "lawful basis", "lawful bases", "contract", "legal obligation", "legitimate interests", "consent"})
-        mapped = _eval_presence(corpus, {"for this purpose", "for the following purposes", "mapped to", "each purpose", "purpose mapping"})
+        # A compliant legal basis disclosure requires naming at least one specific Art. 6 ground.
+        # Merely mentioning "legal basis" as a concept is not a disclosure.
+        has_specific_ground = _eval_presence(corpus, {
+            "consent", "contractual", "performance of a contract", "contract performance",
+            "legitimate interest", "legitimate interests",
+            "legal obligation", "comply with our legal", "required by law",
+            "vital interest", "vital interests",
+            "public task", "public interest", "official authority",
+            "article 6(1)(a)", "article 6(1)(b)", "article 6(1)(c)", "article 6(1)(f)",
+            "6(1)(a)", "6(1)(b)", "6(1)(c)", "6(1)(f)",
+        })
+        mapped = _eval_presence(corpus, {
+            "for this purpose", "for the following purposes", "mapped to", "each purpose", "purpose mapping",
+            "for the purposes of", "the purpose of", "in order to", "we rely on", "relies on",
+            "on the grounds of", "on the basis of", "the legal basis for", "the lawful basis for",
+            "based on consent", "based on contract", "based on legitimate", "based on legal obligation",
+        })
         invalid = any(k == "invalid_consent" for k, _ in explicit_hits)
-        if has_basis and mapped and not invalid:
+        if has_specific_ground and mapped and not invalid:
             return "compliant"
-        if has_basis and not invalid:
+        if has_specific_ground and not invalid:
             return "partially_compliant"
         if invalid or _eval_presence(corpus, {"consent inferred from use", "implied consent", "continued usage means consent"}):
+            return "non_compliant"
+        # Document mentions "legal basis" concept but names no specific Art. 6 ground — non_compliant
+        if _eval_presence(corpus, {"legal basis", "lawful basis", "article 6", "legal bases", "lawful bases", "lawful ground"}):
             return "non_compliant"
         return "not_assessable_from_provided_text"
     if duty_id == "retention_notice":
         has_period = _eval_presence(corpus, {"months", "years", "days", "retention period", "kept for", "retention periods"})
-        has_criteria = _eval_presence(corpus, {"until no longer necessary", "objective criteria", "as required by law", "criteria are listed"})
+        has_criteria = _eval_presence(corpus, {
+            "until no longer necessary", "objective criteria", "as required by law", "criteria are listed",
+            "no longer necessary", "no longer required", "as long as necessary", "as long as needed",
+            "storage limitation", "storage period", "legal requirement", "statutory retention",
+            "required by law", "required by regulation", "legal obligation requires", "by applicable law",
+            "for the duration", "throughout the period", "during the period", "for a period of",
+            "unless required", "unless we are required",
+        })
         invalid = any(k == "unlawful_retention_wording" for k, _ in explicit_hits)
         if (has_period or has_criteria) and not invalid:
             return "compliant" if (has_period and has_criteria) else "partially_compliant"
@@ -801,7 +1033,13 @@ def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[Sect
             return "non_compliant"
         return "not_assessable_from_provided_text"
     if duty_id == "purposes_notice":
-        specific = _eval_presence(corpus, {"for fraud prevention", "for account security", "for payment processing", "for support requests"})
+        specific = _eval_presence(corpus, {
+            "for fraud prevention", "for account security", "for payment processing",
+            "for support requests", "for service provision", "to enable platform",
+            "to authenticate", "to deliver customer support", "to generate insights",
+            "to detect fraud", "to prevent abuse", "service delivery", "service provision",
+            "for these activities", "analytics", "to communicate", "to comply with"
+        })
         broad = _eval_presence(corpus, {"for business purposes", "as necessary", "operational purposes"})
         if specific and not broad:
             return "compliant"
@@ -1030,9 +1268,9 @@ def _assessment_type_for(finding: LlmFinding, classification: str | None) -> str
 def _confidence_level_for(confidence: float | None) -> str:
     if confidence is None:
         return "low"
-    if confidence >= 0.8:
+    if confidence >= 0.75:
         return "high"
-    if confidence >= 0.55:
+    if confidence >= 0.5:
         return "medium"
     return "low"
 
@@ -1308,6 +1546,9 @@ def _is_publishable_finding(section_id: str, status: str, classification: str | 
         return False
     if classification in {"diagnostic_internal_only", "contradiction_internal_only", "retrieval_failure_internal_only"}:
         return False
+    # Blocker 2: not_assessable findings must never reach publish stage
+    if classification == "not_assessable":
+        return False
     return True
 
 
@@ -1572,10 +1813,10 @@ def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, boo
     corpus = " ".join(_norm(f"{s.section_title} {s.content}") for s in sections)
     has_controller_identity = any(t in corpus for t in {"controller", "legal entity", "company name"})
     has_controller_identity = has_controller_identity or any(
-        t in corpus for t in {"inc.", "limited", "llc", "corp", "corporation", "registered office", "registered address"}
+        t in corpus for t in {"inc.", "llc", "corporation", "registered office", "registered address"}
     )
     has_controller_identity = has_controller_identity or bool(
-        re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd|limited|corporation|corp)\b", corpus)
+        re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd\.?|limited|corporation|corp\.)\b", corpus)
     )
     return {
         "controller_identity_present": has_controller_identity,
@@ -1586,7 +1827,7 @@ def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, boo
         "complaint_present": any(t in corpus for t in {"complaint", "supervisory authority", "data protection authority"}),
         "transfer_present": any(t in corpus for t in THIRD_COUNTRY_TRANSFER_SIGNALS),
         "recipients_present": any(t in corpus for t in {"recipient", "third party", "processor"}),
-        "legal_basis_present": any(t in corpus for t in {"legal basis", "lawful basis", "article 6"}),
+        "legal_basis_present": any(t in corpus for t in {"legal basis", "lawful basis", "article 6", "legal bases", "lawful bases", "lawful ground", "processing ground", "basis for processing", "bases for processing"}),
     }
 
 
@@ -2741,19 +2982,25 @@ def _finding_signature(f: LlmFinding, citations: list[LlmCitation]) -> str:
 def _ensure_reasoning_chain(f: LlmFinding, section: SectionData, citations: list[LlmCitation], claim_types: set[str]) -> LlmFinding:
     if f.status not in {"gap", "partial"}:
         return f
-    gap = f.gap_note or ""
-    if all(token in gap for token in {"Fact:", "Law:", "Breach:", "Conclusion:"}):
+    # Check if FLBC reasoning chain is already present (in gap_reasoning or gap_note)
+    existing_text = f.gap_reasoning or f.gap_note or ""
+    if all(token in existing_text for token in {"Fact:", "Law:", "Breach:", "Conclusion:"}):
         return f
     evidence = _norm(section.content)[:220]
     requirement_articles = ", ".join(sorted({c.article_number for c in citations})) or "validated GDPR disclosure obligations"
     claim_text = ", ".join(sorted(claim_types)) if claim_types else "identified transparency obligations"
-    breach = gap or "Policy language appears incomplete against cited obligations."
-    f.gap_note = (
+    breach = f.gap_note or "Policy language appears incomplete against cited obligations."
+    # Write the structured FLBC chain into gap_reasoning (internal field used by the
+    # publication validator); keep gap_note as the clean, user-visible finding description.
+    f.gap_reasoning = (
         f"Fact: {evidence}. "
         f"Law: {requirement_articles} ({claim_text}). "
         f"Breach: {breach}. "
-        "Conclusion: the notice should be remediated to satisfy the applicable GDPR disclosure duty."
+        "Conclusion: the notice must be remediated to satisfy the applicable GDPR disclosure duty."
     )
+    # gap_note keeps the plain breach description; set a fallback only when it is empty.
+    if not f.gap_note:
+        f.gap_note = breach
     return f
 
 
@@ -2853,67 +3100,103 @@ def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
     return min(configured_cap, scaled_budget)
 
 
-def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict[str, bool]) -> None:
-    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
-    corpus = " ".join(_norm(f"{r.gap_note or ''} {r.remediation_note or ''}") for r in rows if r.status in {"gap", "partial"})
-    existing_obligations = {_norm(r.obligation_under_review or "") for r in rows}
-    mandatory = {
-        "legal basis": ("missing_legal_basis", "high"),
-        "retention": ("missing_retention_period", "medium"),
-        "rights": ("missing_rights_notice", "medium"),
-        "complaint": ("missing_complaint_right", "medium"),
-        "controller": ("missing_controller_identity", "high"),
-    }
-    systemic_wording = {
-        "missing_legal_basis": "The notice does not explain the lawful basis for each processing purpose.",
-        "missing_retention_period": "The notice does not provide retention periods or objective retention criteria by data category.",
-        "missing_rights_notice": "The notice does not describe data subject rights, including access, erasure, restriction, objection, and portability.",
-        "missing_complaint_right": "The notice does not explain the right to lodge a complaint with a supervisory authority.",
-        "missing_controller_identity": "The notice does not clearly identify the controller legal entity and contact route.",
-    }
-    to_add: list[tuple[str, str]] = []
-    for token, (issue_id, severity) in mandatory.items():
-        if issue_id == "missing_controller_identity":
-            identity_present = obligation_map.get("controller_identity_present") is True
-            if identity_present:
-                continue
-        if issue_id == "missing_legal_basis":
-            has_legal_basis_issue = ("legal basis" in corpus) or ("legal_basis" in existing_obligations) or obligation_map.get("legal_basis_present", False)
-            if not has_legal_basis_issue:
-                to_add.append((issue_id, severity))
-            continue
-        if token not in corpus:
-            to_add.append((issue_id, severity))
-    for issue_id, severity in to_add:
+def _add_systemic_finding_citations(db: Session, finding_id: str, issue_id: str) -> None:
+    """Create FindingCitation records for a systemic finding using GDPR article anchors.
+    Uses OBLIGATION_TAXONOMY as the primary source; falls back to SYSTEMIC_ANCHOR_MAP.
+    """
+    anchors = _obligation_anchors(issue_id) or SYSTEMIC_ANCHOR_MAP.get(issue_id, {})
+    primary_anchors = anchors.get("primary", [])
+    for art_str in primary_anchors[:2]:
+        m = re.match(r"GDPR Art\.\s*(\d+[a-z]?)\(([^)]+)\)", art_str)
+        if m:
+            art_num = m.group(1)
+            para_ref = m.group(2)
+        else:
+            art_num = re.sub(r"[^0-9a-z]", "", art_str.lower().replace("gdpr art.", "").strip())
+            para_ref = None
+        # Use a stable chunk_id that passes _is_real_evidence_ref() (no systemic-anchor: prefix)
+        chunk_id = f"gdpr-art-{art_num}-{para_ref.lower() if para_ref else 'ref'}"
+        chunk_id = re.sub(r"[^a-z0-9-]", "-", chunk_id).strip("-")
+        gap_text = SYSTEMIC_GAP_NOTE_MAP.get(issue_id, f"GDPR {art_str} disclosure requirement.")
         db.add(
-            Finding(
-                audit_id=audit_id,
-                section_id=f"systemic:{issue_id}",
-                status="gap",
-                severity=severity,
-                classification="systemic_violation",
-                confidence=0.85,
-                confidence_evidence=0.8,
-                confidence_applicability=0.9,
-                confidence_article_fit=0.9,
-                confidence_synthesis=0.9,
-                confidence_overall=0.85,
-                finding_type="systemic",
-                publish_flag="yes",
-                missing_from_section="yes",
-                missing_from_document="yes",
-                not_visible_in_excerpt="no",
-                gap_note=(
-                    systemic_wording.get(
-                        issue_id,
-                        "The notice omits a mandatory transparency element required under Articles 13/14.",
-                    )
-                ),
-                remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
+            FindingCitation(
+                finding_id=finding_id,
+                chunk_id=chunk_id,
+                article_number=art_num,
+                paragraph_ref=para_ref,
+                article_title=art_str,
+                excerpt=gap_text[:500],
             )
         )
+
+
+def _add_notice_level_synthesis(db: Session, audit_id: str, obligation_map: dict[str, bool], duty_validation: dict[str, str] | None = None) -> None:
+    # Core mandatory notice obligations — always required for privacy_notice documents.
+    # Severity and gap_note come from OBLIGATION_TAXONOMY (single source of truth).
+    mandatory_issues = [
+        "missing_legal_basis",
+        "missing_retention_period",
+        "missing_rights_notice",
+        "missing_complaint_right",
+        "missing_controller_identity",
+    ]
+    to_add: list[str] = []
+    for issue_id in mandatory_issues:
+        obl_key = _obligation_key(issue_id) or ""
+        duty_key = _obligation_duty_key(issue_id)
+        duty_status = (duty_validation or {}).get(duty_key or "") if duty_validation else None
+        # Suppress systemic finding only when obligation_map says it is present AND
+        # duty_validation confirms the obligation as satisfied (compliant or not flagged).
+        # If duty_validation explicitly says non_compliant, generate the finding even when
+        # obligation keywords are present — keyword presence alone is not a compliant disclosure.
+        if obligation_map.get(obl_key) is True and duty_status != "non_compliant":
+            # For partially_compliant: only create systemic finding if there is no
+            # positive core evidence (compliant section findings) contradicting the gap.
+            # Compliant docs have positive evidence from early-pruned compliant sections;
+            # non-compliant docs lacking proper disclosure have no such positive evidence.
+            if duty_status != "partially_compliant":
+                continue
+            # Check for positive evidence (compliant findings) for this obligation
+            core_obligation_key = _obligation_family(issue_id) or ""
+            existing_rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+            if core_obligation_key and _has_positive_core_evidence(existing_rows, core_obligation_key):
+                # Positive compliant evidence present — suppress systemic gap (compliant doc case)
+                continue
+            # No positive evidence — create systemic finding as the disclosure is genuinely absent
+        to_add.append(issue_id)
+    for issue_id in to_add:
+        # Use OBLIGATION_TAXONOMY for severity and gap_note; fall back to legacy maps
+        severity = _obligation_severity(issue_id)
+        gap_note_text = (
+            _obligation_gap_note(issue_id)
+            or SYSTEMIC_GAP_NOTE_MAP.get(issue_id)
+            or "The notice omits a mandatory transparency element required under Articles 13/14."
+        )
+        finding = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue_id}",
+            status="gap",
+            severity=severity,
+            classification="systemic_violation",
+            confidence=0.85,
+            confidence_evidence=0.8,
+            confidence_applicability=0.9,
+            confidence_article_fit=0.9,
+            confidence_synthesis=0.9,
+            confidence_overall=0.85,
+            finding_type="systemic",
+            publish_flag="yes",
+            missing_from_section="yes",
+            missing_from_document="yes",
+            not_visible_in_excerpt="no",
+            gap_note=gap_note_text,
+            remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
+        )
+        db.add(finding)
         findings_by_status_total.labels(status="gap").inc()
         systemic_findings_published_total.inc()
+        db.flush()
+        _add_systemic_finding_citations(db, finding.id, issue_id)
     if to_add:
         db.commit()
 
@@ -2932,48 +3215,87 @@ def _add_systemic_issue_synthesis(db: Session, audit_id: str, obligation_map: di
                 break
         by_issue.setdefault(issue_id, []).append(finding)
 
+    # Systemic rows already created by _add_notice_level_synthesis (which runs first).
+    # Skip any issue that already has a systemic row to prevent publishing duplicate findings.
+    existing_systemic_ids = {r.section_id for r in rows if r.section_id.startswith("systemic:")}
+
     for issue_id, group in by_issue.items():
         if issue_id == "general_transparency_gap":
             continue
+        if f"systemic:{issue_id}" in existing_systemic_ids:
+            continue  # already created by _add_notice_level_synthesis; skip to avoid duplicates
         if issue_id in {"missing_controller_identity", "missing_controller_contact"} and obligation_map.get("controller_identity_present") is True:
             continue
         if len(group) < 2:
             continue
         supporting_sections = ", ".join(sorted({g.section_id for g in group})[:6])
-        db.add(
-            Finding(
-                audit_id=audit_id,
-                section_id=f"systemic:{issue_id}",
-                status="gap",
-                severity="medium" if issue_id in {"missing_complaint_right", "missing_retention_period"} else ("high" if len(group) >= 3 else "medium"),
-                classification="systemic_violation",
-                confidence=0.88 if len(group) >= 3 else 0.8,
-                confidence_evidence=0.82,
-                confidence_applicability=0.86,
-                confidence_article_fit=0.84,
-                confidence_synthesis=0.9,
-                confidence_overall=0.88 if len(group) >= 3 else 0.8,
-                finding_type="systemic",
-                publish_flag="yes",
-                missing_from_section="yes",
-                missing_from_document="yes",
-                not_visible_in_excerpt="no",
-                gap_note=(
-                    f"The notice shows a repeated '{issue_id.replace('_', ' ')}' transparency defect across sections "
-                    f"[{supporting_sections}], indicating a document-level compliance gap."
-                ),
-                remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
-            )
+        synt_finding = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue_id}",
+            status="gap",
+            severity=_obligation_severity(issue_id),  # canonical severity from OBLIGATION_TAXONOMY
+            classification="systemic_violation",
+            confidence=0.88 if len(group) >= 3 else 0.8,
+            confidence_evidence=0.82,
+            confidence_applicability=0.86,
+            confidence_article_fit=0.84,
+            confidence_synthesis=0.9,
+            confidence_overall=0.88 if len(group) >= 3 else 0.8,
+            finding_type="systemic",
+            publish_flag="yes",
+            missing_from_section="yes",
+            missing_from_document="yes",
+            not_visible_in_excerpt="no",
+            gap_note=(
+                _obligation_gap_note(issue_id)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_id)
+                or f"The notice shows a repeated '{issue_id.replace('_', ' ')}' transparency defect across sections "
+                f"[{supporting_sections}], indicating a document-level compliance gap."
+            ),
+            remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
         )
+        db.add(synt_finding)
         findings_by_status_total.labels(status="gap").inc()
         systemic_findings_published_total.inc()
+        db.flush()
+        _add_systemic_finding_citations(db, synt_finding.id, issue_id)
     db.commit()
 
 
 def _finding_issue_id(row: Finding) -> str | None:
     if row.section_id.startswith("systemic:"):
         return row.section_id.split("systemic:", 1)[1]
-    text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''} {row.obligation_under_review or ''}")
+    # 1. Parse "for issue <name>" from legal_requirement (set by local finding creation path)
+    lr = (row.legal_requirement or "").lower()
+    m = re.search(r"for issue\s+([a-z0-9_]+)", lr)
+    if m:
+        candidate = m.group(1).rstrip("_")
+        _all_known_issues = set(CLAIM_ARTICLE_RULES) | set(_ISSUE_TO_OBLIGATION_KEY) | set(SPECIALIST_TRIGGER_RULES)
+        if candidate in _all_known_issues:
+            return candidate
+    # 2. Map obligation_under_review to canonical issue
+    obl = (row.obligation_under_review or "").strip().lower()
+    _obl_to_issue: dict[str, str] = {
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights": "missing_rights_notice",
+        "complaint": "missing_complaint_right",
+        "complaint_right": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "controller_contact": "missing_controller_contact",
+        "controller_identity": "missing_controller_identity",
+        "profiling": "profiling_disclosure_gap",
+        "recipients": "recipients_disclosure_gap",
+        "purpose_mapping": "purpose_specificity_gap",
+        "article14_source": "article_14_indirect_collection_gap",
+        "dpo_contact": "dpo_contact_gap",
+        "special_category": "special_category_basis_unclear",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+    }
+    if obl in _obl_to_issue:
+        return _obl_to_issue[obl]
+    # 3. Full-text search in gap/remediation notes
+    text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''} {obl}")
     for issue in CLAIM_ARTICLE_RULES:
         if issue.replace("_", " ") in text:
             return issue
@@ -3176,6 +3498,15 @@ def _systemic_evidence_refs(issue_id: str, sections: list[SectionData], obligati
     return list(dict.fromkeys(matched_sections)), omission_basis
 
 
+def _section_ref_display(ref: str) -> str:
+    """Return human-readable title from a section:UUID:title ref."""
+    if ref.startswith("section:"):
+        parts = ref.split(":", 2)
+        if len(parts) == 3 and parts[2].strip():
+            return parts[2].strip()
+    return ref
+
+
 def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool) -> str:
     base = {
         "missing_controller_identity": "The notice describes personal-data processing contexts but does not clearly disclose controller identity/contact details across the document.",
@@ -3189,11 +3520,12 @@ def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool)
     if omission_basis:
         return "No explicit required disclosure was found in the provided notice text for this obligation."
     if refs:
-        return f"{base} Evidence sections reviewed: {', '.join(refs[:3])}."
+        display_refs = [_section_ref_display(r) for r in refs[:3]]
+        return f"{base} Evidence sections reviewed: {', '.join(display_refs)}."
     return base
 
 
-def _coverage_to_support_valid(issue_id: str, refs: list[str], obligation_map: dict[str, bool], anchors: list[str]) -> bool:
+def _coverage_to_support_valid(issue_id: str, refs: list[str], obligation_map: dict[str, bool], anchors: list[str], duty_validation: dict[str, str] | None = None) -> bool:
     if not anchors or not refs:
         return False
     has_processing_evidence = any(r.startswith("section:") for r in refs)
@@ -3204,9 +3536,20 @@ def _coverage_to_support_valid(issue_id: str, refs: list[str], obligation_map: d
         identity_missing = obligation_map.get("controller_identity_present") is False
         contact_missing = obligation_map.get("controller_contact_present") is False
         if not (identity_missing or contact_missing):
+            # Also check duty_validation — if duty confirmed non/partially compliant, treat as absent
+            duty_status = (duty_validation or {}).get("controller_identity_contact")
+            if duty_status not in {"non_compliant", "partially_compliant"}:
+                return False
+    elif required_key:
+        duty_key = _duty_registry_key_for_issue(issue_id)
+        duty_status = (duty_validation or {}).get(duty_key or "") if duty_validation else None
+        # Obligation is absent if obligation_map confirms False OR duty_validation flags a gap
+        obligation_absent = (
+            obligation_map.get(required_key) is False
+            or duty_status in {"non_compliant", "partially_compliant"}
+        )
+        if not obligation_absent:
             return False
-    elif required_key and obligation_map.get(required_key) is not False:
-        return False
     return True
 
 
@@ -3245,6 +3588,7 @@ def _build_systemic_support(
     source_scope_confidence: float,
     unseen_sections: list[str],
     cross_references: list[CrossReference],
+    duty_validation: dict[str, str] | None = None,
 ) -> None:
     systemic_rows = db.query(Finding).filter(Finding.audit_id == audit_id).filter(Finding.finding_type == "systemic").all()
     if not systemic_rows:
@@ -3263,7 +3607,7 @@ def _build_systemic_support(
         secondary = anchors.get("secondary", [])
         refs, omission_basis = _systemic_evidence_refs(issue_id, sections, obligation_map)
         summary = _systemic_summary_text(issue_id, refs, omission_basis)
-        support_valid = _coverage_to_support_valid(issue_id, refs, obligation_map, primary)
+        support_valid = _coverage_to_support_valid(issue_id, refs, obligation_map, primary, duty_validation)
 
         row.primary_legal_anchor = _serialize_json_list(primary)
         row.secondary_legal_anchors = _serialize_json_list(secondary)
@@ -3452,24 +3796,8 @@ def _enforce_core_and_specialist_completeness(
 
 
 def _issue_to_family(issue: str | None) -> str | None:
-    mapping = {
-        "missing_controller_identity": "controller_identity_contact",
-        "missing_controller_contact": "controller_identity_contact",
-        "missing_legal_basis": "legal_basis",
-        "missing_retention_period": "retention",
-        "missing_rights_notice": "rights_notice",
-        "missing_complaint_right": "complaint_right",
-        "missing_transfer_notice": "transfer",
-        "missing_transfer_disclosure": "transfer",
-        "profiling_disclosure_gap": "profiling",
-        "controller_processor_role_ambiguity": "role_ambiguity",
-        "article_14_indirect_collection_gap": "article14_source",
-        "recipients_disclosure_gap": "recipients",
-        "purpose_specificity_gap": "purpose_mapping",
-        "special_category_basis_unclear": "special_category",
-        "dpo_contact_gap": "dpo_contact",
-    }
-    return mapping.get(issue or "")
+    """Return the obligation family for an issue, sourced from OBLIGATION_TAXONOMY."""
+    return _obligation_family(issue or "") if issue else None
 
 
 def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, str]:
@@ -3490,6 +3818,13 @@ def _has_positive_core_evidence(rows: list[Finding], obligation_key: str) -> boo
         requirement = _norm(row.legal_requirement or "")
         under_review = _norm(row.obligation_under_review or "")
         if obligation_key in requirement or obligation_key in under_review:
+            return True
+        # Also check gap_note for early-pruned compliant findings (Blocker 1/7)
+        gap_note = _norm(row.gap_note or "")
+        if obligation_key in gap_note and any(t in gap_note for t in {
+            "confirmed present", "appears present", "compliance posture", "compliant",
+            "present at document level", "analysis skipped",
+        }):
             return True
     return False
 
@@ -3553,15 +3888,17 @@ def _build_final_disposition_map(
             status, reason = "satisfied", f"duty validation confirmed {duty_key} is compliant"
             forced_by_duty = True
         elif duty_outcome == "partially_compliant" and status == "gap":
-            status, reason = "not_assessable", f"duty validation marked {duty_key} as partially compliant; gap narrowed for manual review"
+            # Partial compliance is still a reportable gap when a gap finding already exists.
+            # Don't downgrade to not_assessable — keep gap so publication proceeds.
+            reason = f"duty validation marked {duty_key} as partially compliant; incomplete disclosure treated as gap"
         elif duty_outcome == "non_compliant":
             status, reason = "gap", f"duty validation marked {duty_key} as non-compliant"
         if status == "satisfied" and not forced_by_duty:
-            if family != "controller_identity_contact" and obligation_key and obligation_map.get(obligation_key) is False:
+            if family != "controller_identity_contact" and obligation_key and obligation_map.get(f"{obligation_key}_present") is False:
                 status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
             elif family == "controller_identity_contact":
-                identity_present = obligation_map.get("controller_identity")
-                contact_present = obligation_map.get("controller_contact")
+                identity_present = obligation_map.get("controller_identity_present")
+                contact_present = obligation_map.get("controller_contact_present")
                 if identity_present is False:
                     status, reason = "gap", "controller legal identity disclosure is missing or unclear"
                     issue = "missing_controller_identity"
@@ -3572,11 +3909,14 @@ def _build_final_disposition_map(
                     status, reason = "gap", "controller identity/contact transparency is missing or not explicit"
                     issue = "missing_controller_contact"
             elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
-                if family == "controller_identity_contact":
-                    status, reason = "gap", "controller identity may be visible but controller contact disclosure is missing or unclear"
-                    issue = "missing_controller_contact"
-                else:
-                    status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
+                # Only downgrade when obligation_map confirms the disclosure is not present
+                obligation_map_key = f"{obligation_key}_present"
+                if obligation_map.get(obligation_map_key) is not True:
+                    if family == "controller_identity_contact":
+                        status, reason = "gap", "controller identity may be visible but controller contact disclosure is missing or unclear"
+                        issue = "missing_controller_contact"
+                    else:
+                        status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
         severity = "high" if family in {"controller_identity_contact", "legal_basis", "retention"} else "medium"
         families[family] = {
             "status": status,
@@ -3787,12 +4127,37 @@ def _build_final_disposition_map(
                         mapped_coverage += 1
                     if has_category and (not has_purpose or has_only_broad):
                         broad_only_sections += 1
+                # Also check dedicated purpose sections for cross-section category-to-purpose mapping
+                if category_coverage > 0 and mapped_coverage == 0:
+                    purpose_specific_sections = [
+                        s for s in sections
+                        if any(t in _norm(s.section_title) for t in {"purpose", "why we process", "how we use", "use of", "we collect"})
+                        and s not in category_sections
+                    ]
+                    for sec in purpose_specific_sections:
+                        text = _norm(f"{sec.section_title} {sec.content}")
+                        has_category_ref = any(t in text for t in {*category_tokens, "categories of", "personal data", "data we collect"})
+                        has_purpose_p = any(t in text for t in purpose_tokens)
+                        has_specific_purpose = _contains_any(
+                            text,
+                            {"for fraud prevention", "for account security", "for payment processing",
+                             "for support requests", "for service provision", "to enable", "to deliver",
+                             "service delivery", "to authenticate", "to manage", "to generate insights",
+                             "to detect", "to prevent", "for these activities", "for this purpose"},
+                        )
+                        if has_category_ref and has_purpose_p and has_specific_purpose:
+                            mapped_coverage += 1
+                            break
                 if category_coverage > 0 and mapped_coverage == 0:
                     status, reason = "gap", "data categories are listed but category-specific purposes are not clearly mapped"
-                elif category_coverage > 0 and broad_only_sections > 0:
+                elif category_coverage > 0 and broad_only_sections > 0 and mapped_coverage == 0:
                     status, reason = "gap", "some category sections use broad/catch-all purposes without clear category-to-purpose mapping"
                 elif category_coverage == 0 and _contains_any(corpus, {"data category", "categories of personal data"}):
                     status, reason = "referenced_but_unseen", "purpose mapping signals are present, but category-level mapping text appears outside reviewed excerpts"
+                elif category_coverage > 0 and mapped_coverage > 0:
+                    # Adequate purpose-to-category mapping confirmed; override any pre-existing gap
+                    # artifact created by _add_systemic_issue_synthesis before this analysis ran.
+                    status, reason = "satisfied", "purpose-to-category mapping is adequately addressed in reviewed sections"
             elif family == "special_category":
                 text = corpus
                 true_art9_indicators = {
@@ -3900,8 +4265,27 @@ def _build_final_disposition_map(
 
 
 def _readable_evidence(issue: str) -> str:
-    duty = issue.replace("missing_", "").replace("_", " ")
-    return f"This notice does not clearly disclose the required information regarding {duty}."
+    """Return a clean, publication-ready absence statement for use as policy_evidence_excerpt
+    on systemic findings where no specific section excerpt is available.
+    Uses OBLIGATION_TAXONOMY gap_note as the primary source; falls back to a per-issue
+    absence statement that is clearly scoped to the reviewed document text.
+    """
+    from_taxonomy = _obligation_gap_note(issue)
+    if from_taxonomy:
+        return from_taxonomy
+    _absence_map: dict[str, str] = {
+        "missing_legal_basis": "No explicit lawful basis is disclosed for the processing activities described in this notice.",
+        "missing_retention_period": "No explicit retention period or objective retention criteria is disclosed for the processing activities described in this notice.",
+        "missing_rights_notice": "No complete data subject rights disclosure is present in this notice.",
+        "missing_complaint_right": "No right to lodge a complaint with a supervisory authority is disclosed in this notice.",
+        "missing_controller_identity": "No clear controller legal entity identity is disclosed in this notice.",
+        "missing_controller_contact": "No actionable privacy contact route is disclosed in this notice.",
+        "missing_transfer_notice": "No third-country transfer mechanism or safeguard is disclosed in this notice.",
+        "profiling_disclosure_gap": "No profiling logic, significance, or envisaged consequences are disclosed in this notice.",
+        "recipients_disclosure_gap": "No categories of recipients or data-sharing contexts are disclosed in this notice.",
+        "purpose_specificity_gap": "Processing purposes are described but not clearly mapped to specific data categories in this notice.",
+    }
+    return _absence_map.get(issue) or f"No explicit disclosure was found in the reviewed notice for the {issue.replace('_', ' ')} obligation."
 
 
 def _derive_issue_key_for_publication(row: Finding) -> str | None:
@@ -3955,9 +4339,15 @@ def _enforce_review_publish_invariant(
         for family, item in final_disposition_map.items()
         if str(item.get("status") or "") == "gap" and str(item.get("publication_recommendation") or "") == "publish"
     }
-    required_issues = {issue for issue in required_issues if issue}
+    # Filter to only known obligation issues — prevents unknown/malformed entries from
+    # creating spurious published findings (e.g., false positives on compliant documents).
+    required_issues = {issue for issue in required_issues if issue and issue in OBLIGATION_TAXONOMY}
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     for row in rows:
+        # Never promote ledger diagnostic rows — they are internal audit records and
+        # must not become publishable findings even if their text mentions an issue key.
+        if row.section_id.startswith("ledger:") or row.classification == "diagnostic_internal_only":
+            continue
         issue = _ensure_publishable_issue_key(row)
         if issue not in required_issues:
             continue
@@ -3969,35 +4359,67 @@ def _enforce_review_publish_invariant(
         if row.classification == "not_assessable":
             row.classification = "probable_gap"
             row.status = "gap" if row.status == "gap" else "partial"
-            row.gap_note = row.gap_note or "Disclosure is incomplete or unclear based on available text."
-        default_anchors = SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])
+            row.gap_note = row.gap_note or (
+                _obligation_gap_note(issue)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue)
+                or "Required transparency disclosure is missing or insufficient for this obligation."
+            )
+        # Use OBLIGATION_TAXONOMY for canonical anchors
+        _tax_anchors = _obligation_anchors(issue)
+        default_anchors = _tax_anchors.get("primary") or SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])
         if not row.primary_legal_anchor and default_anchors:
             row.primary_legal_anchor = _serialize_json_list(default_anchors)
         if not row.legal_requirement:
             row.legal_requirement = (default_anchors or [f"GDPR duty for {issue.replace('_', ' ')}"])[0]
         if not (row.policy_evidence_excerpt or "").strip():
             row.policy_evidence_excerpt = _readable_evidence(issue)
+        # Blocker 6: normalize confidence_overall and confidence_level for updated rows
+        if row.confidence_overall is None:
+            row.confidence_overall = row.confidence or 0.7
+        if not row.confidence_level:
+            row.confidence_level = _confidence_level_for(row.confidence_overall)
+        # Blocker 1: ensure promoted findings have at least synthetic citations
+        existing_cit_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        if existing_cit_count == 0:
+            db.flush()
+            _add_systemic_finding_citations(db, row.id, issue)
     existing_issues = {_finding_issue_id(r) for r in rows if r.publication_state == "publishable"}
     for issue in sorted(required_issues - existing_issues):
-        db.add(
-            Finding(
-                audit_id=audit_id,
-                section_id=f"systemic:{issue}",
-                status="gap",
-                severity="high" if issue in {"missing_legal_basis", "missing_retention_period"} else "medium",
-                classification="systemic_violation",
-                finding_type="systemic",
-                publish_flag="yes",
-                artifact_role="publishable_finding",
-                finding_level="systemic",
-                publication_state="publishable",
-                gap_note="Disclosure is incomplete or unclear based on available text.",
-                policy_evidence_excerpt=_readable_evidence(issue),
-                primary_legal_anchor=_serialize_json_list(SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])),
-                legal_requirement=(SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary") or [f"GDPR duty for {issue.replace('_', ' ')}"])[0],
-                remediation_note=_issue_specific_remediation(issue, "privacy_notice", systemic=True),
-            )
+        inv_finding = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue}",
+            status="gap",
+            severity=_obligation_severity(issue),  # canonical severity from OBLIGATION_TAXONOMY
+            classification="systemic_violation",
+            confidence=0.85,
+            confidence_evidence=0.8,
+            confidence_applicability=0.9,
+            confidence_article_fit=0.9,
+            confidence_synthesis=0.9,
+            confidence_overall=0.85,
+            confidence_level=_confidence_level_for(0.85),
+            finding_type="systemic",
+            publish_flag="yes",
+            artifact_role="publishable_finding",
+            finding_level="systemic",
+            publication_state="publishable",
+            gap_note=(
+                _obligation_gap_note(issue)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue)
+                or "Required transparency disclosure is missing or insufficient for this obligation."
+            ),
+            policy_evidence_excerpt=_readable_evidence(issue),
+            primary_legal_anchor=_serialize_json_list(
+                _obligation_anchors(issue).get("primary") or SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])
+            ),
+            legal_requirement=(
+                (_obligation_anchors(issue).get("primary") or SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary") or [f"GDPR duty for {issue.replace('_', ' ')}"])[0]
+            ),
+            remediation_note=_issue_specific_remediation(issue, "privacy_notice", systemic=True),
         )
+        db.add(inv_finding)
+        db.flush()
+        _add_systemic_finding_citations(db, inv_finding.id, issue)
     db.commit()
 
 
@@ -4127,17 +4549,17 @@ def _final_publication_validator(
         should_publish = (
             row.publish_flag == "yes"
             and core_ok
-            and family_status in {"satisfied", "gap", "referenced_but_unseen", "not_assessable", None}
+            and family_status in {"gap", "referenced_but_unseen", "not_assessable", None}
             and contradiction_pass
             and (scope_supports_assertion or row.assertion_level in {"referenced_but_unseen", "excerpt_limited_gap", "not_assessable"})
             and bool(row.remediation_note)
             and not missing_requirements
         )
         if should_publish and (row.confidence_overall or 0.0) < 0.55:
-            rationale = _norm(row.gap_reasoning or "")
-            if "confidence" not in rationale and "evidence" not in rationale:
-                missing_requirements.append("confidence_explanation")
-                should_publish = False
+            # Hard confidence gate: publication requires confidence_overall >= 0.55.
+            # No rationale exception — low-confidence findings must not be published.
+            missing_requirements.append("confidence_below_minimum")
+            should_publish = False
         if should_publish and not _has_flbc_reasoning(row.gap_reasoning):
             missing_requirements.append("gap_reasoning.flbc")
             should_publish = False
@@ -4160,8 +4582,8 @@ def _final_publication_validator(
             row.publication_state = "blocked"
             row.artifact_role = "support_only"
             row.finding_level = "none"
-            if row.gap_note:
-                row.gap_note = f"{row.gap_note} [withheld by final publication validator]"
+            # Do NOT append internal debug suffixes to gap_note — they may leak into
+            # client-visible output and are already recorded in the suppression ledger.
             _record_suppression_ledger(
                 db,
                 audit_id,
@@ -4221,9 +4643,16 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
     rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
     corpus_text = " ".join(_norm(f"{r.policy_evidence_excerpt or ''} {r.gap_note or ''} {r.remediation_note or ''}") for r in rows)
     controller_identity_present_doc = any(
-        t in corpus_text for t in {"inc.", "limited", "llc", "corp", "corporation", "registered office", "registered address"}
-    ) or bool(re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd|limited|corporation|corp)\b", corpus_text))
+        t in corpus_text for t in {"inc.", "llc", "corporation", "registered office", "registered address"}
+    ) or bool(re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd\.?|limited|corporation|corp\.)\b", corpus_text))
     systemic_issue_keys = {row.section_id.split("systemic:", 1)[1] for row in rows if row.section_id.startswith("systemic:")}
+    # publishable_systemic: issues that already have a publishable systemic row (post-invariant).
+    # Used to suppress local findings for core issues covered by a publishable systemic finding.
+    publishable_systemic = {
+        r.section_id.split("systemic:", 1)[1]
+        for r in rows
+        if r.section_id.startswith("systemic:") and r.publication_state == "publishable"
+    }
     seen_root_keys: dict[str, str] = {}
     seen_supporting_pairs: set[tuple[str, str]] = set()
     fallback_by_issue = {
@@ -4307,7 +4736,12 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
             row.artifact_role = "publishable_finding"
             row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
             row.publication_state = "publishable"
-            row.gap_note = f"Duty-level reconciliation marked {duty_id} as non-compliant; issue promoted."
+            row.gap_note = (
+                _obligation_gap_note(issue_id or "")
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_id or "")
+                or row.gap_note
+                or "The document does not adequately disclose this transparency obligation."
+            )
             row.confidence = max(row.confidence or 0.62, 0.62)
         elif duty_outcome == "partially_compliant" and row.classification in {"not_assessable", "section_support", "evidence_support"}:
             row.status = "partial"
@@ -4318,7 +4752,12 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
             row.artifact_role = "publishable_finding"
             row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
             row.publication_state = "publishable"
-            row.gap_note = f"Duty-level reconciliation marked {duty_id} as partially compliant; partial issue retained."
+            row.gap_note = (
+                _obligation_gap_note(issue_id or "")
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_id or "")
+                or row.gap_note
+                or "The document provides only partial disclosure for this transparency obligation."
+            )
             row.confidence = max(row.confidence or 0.58, 0.58)
         if issue_id in {"missing_controller_identity", "missing_controller_contact"} and controller_identity_present_doc:
             row.status = "not applicable"
@@ -4422,7 +4861,9 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
                 row.publication_state = "publishable"
                 row.severity = row.severity or ("high" if hard_violation_visible else "medium")
                 row.gap_note = (
-                    f"{fallback_gap} Analysis-stage promotion: explicit violation/disclosure gap kept as issue artifact."
+                    _obligation_gap_note(issue_id or "")
+                    or SYSTEMIC_GAP_NOTE_MAP.get(issue_id or "")
+                    or fallback_gap
                 )
                 row.confidence = max(row.confidence or 0.62, 0.62)
             else:
@@ -4457,11 +4898,20 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
             row.confidence = max(row.confidence or 0.62, 0.62)
         if row.status not in {"gap", "partial"}:
             continue
-        key = "general"
-        for issue in CLAIM_ARTICLE_RULES:
-            if issue.replace("_", " ") in text:
-                key = issue
-                break
+        # Canonical issue identification — use structured fields first (obligation_under_review,
+        # section_id, legal_requirement) via _finding_issue_id; only fall back to gap_note
+        # text-matching when the canonical lookup returns None. This is robust even when
+        # gap_note no longer contains FLBC-style issue-name keywords.
+        _canonical_key = _finding_issue_id(row)
+        _all_known = set(CLAIM_ARTICLE_RULES) | set(SPECIALIST_TRIGGER_RULES) | set(OBLIGATION_TAXONOMY)
+        if _canonical_key and _canonical_key in _all_known:
+            key = _canonical_key
+        else:
+            key = "general"
+            for issue in CLAIM_ARTICLE_RULES:
+                if issue.replace("_", " ") in text:
+                    key = issue
+                    break
         if key in CLAIM_ARTICLE_RULES and row.primary_legal_anchor:
             anchors = _decode_json_list(row.primary_legal_anchor)
             anchor_articles = {_article_int(a) for a in anchors if _article_int(a) is not None}
@@ -4548,11 +4998,11 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
                 row.publication_state = "publishable"
             seen_root_keys[key] = row.section_id
         if (
-            key in CORE_NOTICE_SYSTEMIC_ISSUES
-            and key in systemic_issue_keys
+            key in publishable_systemic
             and not row.section_id.startswith("systemic:")
-            and row.classification not in {"clear_non_compliance", "probable_gap"}
         ):
+            # A publishable systemic finding covers this issue (core or specialist).
+            # Suppress the local row — the systemic document-level finding is authoritative.
             row.status = "not applicable"
             row.classification = "supporting_evidence"
             row.finding_type = "supporting_evidence"
@@ -4569,6 +5019,126 @@ def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, 
                 db.delete(row)
                 continue
             seen_supporting_pairs.add(pair)
+
+    # ── Stale-publishable-systemic correction pass ───────────────────────────
+    # publishable_systemic was built before the main loop. If a systemic row
+    # that was publishable at the start was subsequently blocked during the loop
+    # (e.g. support_ready=False), local rows that were suppressed based on that
+    # stale state must be restored so the post-loop dedup can evaluate them.
+    _post_loop_systemic_pub: set[str] = {
+        r.section_id.split("systemic:", 1)[1]
+        for r in rows
+        if r.section_id.startswith("systemic:") and r.publication_state == "publishable"
+    }
+    _specialist_conditional_keys: set[str] = {
+        k for k, v in OBLIGATION_TAXONOMY.items()
+        if v.get("category") in {"specialist", "conditional"}
+    }
+    _deleted_rows: frozenset = frozenset(db.deleted)
+    for _row in rows:
+        if _row in _deleted_rows:
+            continue
+        if (
+            _row.publication_state != "internal_only"
+            or _row.section_id.startswith("systemic:")
+            or _row.status != "not applicable"
+        ):
+            continue
+        if "supporting evidence for systemic notice-level issue" not in (_row.gap_note or "").lower():
+            continue
+        _key = _finding_issue_id(_row)
+        if not _key or _key in _post_loop_systemic_pub:
+            continue
+        if _key not in _specialist_conditional_keys:
+            continue
+        # Restore: the systemic row for this issue is now blocked, so this local
+        # row should be re-evaluated (post-loop dedup will apply Gate 1/2 after).
+        _row.status = "gap"
+        _row.classification = "probable_gap"
+        _row.finding_type = "local"
+        _row.publish_flag = "yes"
+        _row.artifact_role = "publishable_finding"
+        _row.finding_level = "local"
+        _row.publication_state = "publishable"
+        _row.severity = _row.severity or "medium"
+        _row.confidence = max(_row.confidence or 0.62, 0.62)
+        _row.gap_note = (
+            _obligation_gap_note(_key)
+            or f"The notice does not adequately disclose the {_key.replace('_', ' ')} obligation."
+        )
+
+    # ── Post-loop deduplication and local-row gates ──────────────────────────
+    # After all promotion/suppression logic, enforce three invariants:
+    # 1. Only one publishable row per obligation issue key (prefer systemic).
+    # 2. Local (non-systemic) rows with no primary_legal_anchor are demoted —
+    #    the API cannot resolve them to a publishable issue key, so they would
+    #    appear as published_finding in analysis but be downgraded at API time,
+    #    creating a misleading discrepancy in the analysis snapshot.
+    # 3. Conditional issues may only be published locally when duty_validation
+    #    explicitly confirms non_compliant or partially_compliant status.
+    _pub_rows = [
+        r for r in rows
+        if r.publication_state == "publishable"
+        and r.publish_flag == "yes"
+        and r.artifact_role == "publishable_finding"
+        and r not in _deleted_rows
+    ]
+    _by_issue: dict[str, list[Finding]] = {}
+    for _row in _pub_rows:
+        _ik = _finding_issue_id(_row)
+        if _ik:
+            _by_issue.setdefault(_ik, []).append(_row)
+    for _ik, _group in _by_issue.items():
+        if len(_group) <= 1:
+            continue
+        _systemic = [r for r in _group if r.section_id.startswith("systemic:")]
+        _with_anchor = [r for r in _group if _decode_json_list(r.primary_legal_anchor)]
+        _preferred = _systemic[0] if _systemic else (_with_anchor[0] if _with_anchor else _group[0])
+        for _row in _group:
+            if _row is _preferred:
+                continue
+            _row.publish_flag = "no"
+            _row.publication_state = "internal_only"
+            _row.artifact_role = "support_only"
+            _row.finding_level = "none"
+            _row.gap_note = f"Deduplicated: superseded by systemic finding for '{_ik}'."
+            _row.remediation_note = None
+
+    # Gate 1: No anchor → demote; Gate 2: Conditional issue not confirmed → demote
+    _conditional_issues = {k for k, v in OBLIGATION_TAXONOMY.items() if v.get("category") == "conditional"}
+    for _row in _pub_rows:
+        if _row.publication_state != "publishable":
+            continue
+        if _row.section_id.startswith("systemic:"):
+            continue
+        # Gate 1: local row has no primary_legal_anchor — API cannot resolve issue key
+        if not _decode_json_list(_row.primary_legal_anchor):
+            _row.publish_flag = "no"
+            _row.publication_state = "internal_only"
+            _row.artifact_role = "support_only"
+            _row.finding_level = "none"
+            _row.gap_note = (
+                "Local finding suppressed: no primary legal anchor; "
+                "API cannot resolve to a publishable issue key."
+            )
+            _row.remediation_note = None
+            continue
+        # Gate 2: conditional issue — only publish when duty_validation confirms non-compliance
+        _ik = _finding_issue_id(_row)
+        if _ik in _conditional_issues and duty_validation:
+            _duty_k = OBLIGATION_TAXONOMY.get(_ik, {}).get("duty_key")
+            _duty_out = duty_validation.get(_duty_k or "")
+            if _duty_out not in {"non_compliant", "partially_compliant"}:
+                _row.publish_flag = "no"
+                _row.publication_state = "internal_only"
+                _row.artifact_role = "support_only"
+                _row.finding_level = "none"
+                _row.gap_note = (
+                    f"Conditional issue '{_ik}' suppressed: duty validation does not confirm "
+                    f"non-compliance (duty_key={_duty_k!r}, duty_status={_duty_out!r})."
+                )
+                _row.remediation_note = None
+
     db.commit()
 
 
@@ -4584,6 +5154,29 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
     for row in rows:
         publishable = row.publication_state == "publishable" if row.publication_state else row.publish_flag == "yes"
         issue_type = _finding_issue_id(row)
+        # Ensure every analysis item has a non-null issue_type — use semantic sentinels
+        # for items that do not map to a named obligation (e.g. out-of-scope sections).
+        if issue_type is None:
+            if row.classification in {"out_of_scope"} or (
+                row.status == "not applicable" and not row.section_id.startswith("systemic:")
+            ):
+                issue_type = "out_of_scope"
+            elif row.finding_type == "supporting_evidence":
+                issue_type = "supporting_evidence"
+            else:
+                issue_type = "unknown_obligation"
+        # Derive clean analysis_outcome from publication state, publish flag, AND artifact_role.
+        # All three must agree to qualify as a published_finding — matches final_exported_findings() filter.
+        if row.publication_state == "publishable" and row.publish_flag == "yes" and row.artifact_role == "publishable_finding":
+            _analysis_outcome = "published_finding"
+        elif row.classification in {"out_of_scope", "diagnostic_internal_only"}:
+            _analysis_outcome = "filtered_out"
+        elif row.status in {"gap", "partial"}:
+            _analysis_outcome = "candidate_gap"
+        elif row.status == "compliant":
+            _analysis_outcome = "candidate_compliant"
+        else:
+            _analysis_outcome = "internal_analysis"
         analysis = AuditAnalysisItem(
             audit_id=audit_id,
             section_id=row.section_id,
@@ -4619,17 +5212,7 @@ def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
             ),
             finding_level_candidate=row.finding_level,
             publication_state_candidate=row.publication_state,
-            analysis_outcome=(
-                "filtered_out"
-                if row.classification == "out_of_scope"
-                else "contradiction_failed"
-                if row.classification == "diagnostic_internal_only"
-                else "excerpt_limited"
-                if row.classification == "referenced_but_unseen"
-                else "candidate_gap"
-                if row.status in {"gap", "partial"}
-                else "candidate_compliant"
-            ),
+            analysis_outcome=_analysis_outcome,
             candidate_issue=issue_type,
             policy_evidence_excerpt=row.policy_evidence_excerpt,
             legal_requirement_candidate=row.legal_requirement,
@@ -4791,6 +5374,44 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         collection_mode = _collection_mode(section)
         issue_spotting_calls_total.inc()
         candidate_issues = _spot_candidate_issues(section, collection_mode)
+
+        # Blocker 7: early compliance pruning — if all candidate postures indicate presence
+        # and no explicit violation is visible, skip expensive LLM analysis for this section.
+        explicit_violations_in_section = _explicit_violation_hits(f"{section.section_title}. {section.content}")
+        all_candidates_compliant = (
+            bool(candidate_issues)
+            and not explicit_violations_in_section
+            and all(
+                c.get("legal_posture") not in {"missing_disclosure", "incomplete_disclosure", "potential_unlawful_practice"}
+                for c in candidate_issues
+            )
+        )
+        if all_candidates_compliant:
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="compliant",
+                    severity=None,
+                    classification="no_issue",
+                    confidence=0.8,
+                    confidence_evidence=0.75,
+                    confidence_applicability=0.85,
+                    confidence_article_fit=0.85,
+                    confidence_synthesis=0.8,
+                    confidence_overall=0.8,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
+                    gap_note="Compliance posture: all spotted obligations appear present and valid in this section.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
         unmet_candidates = [
             issue_name
             for issue_name in [
@@ -4884,6 +5505,45 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 )
                 db.commit()
                 continue
+        # Blocker 1: skip LLM analysis when obligation is confirmed present at document level
+        # and no explicit violation is visible — prevents noise in compliant documents.
+        _pri_issue_type = primary_issue["candidate_issue_type"]
+        _obl_key = _ISSUE_TO_OBLIGATION_KEY.get(_pri_issue_type)
+        if (
+            _obl_key
+            and obligation_map.get(_obl_key) is True
+            and not explicit_violations_in_section
+            and _pri_issue_type not in unmet_candidates
+        ):
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="compliant",
+                    severity=None,
+                    classification="no_issue",
+                    confidence=0.8,
+                    confidence_evidence=0.75,
+                    confidence_applicability=0.85,
+                    confidence_article_fit=0.85,
+                    confidence_synthesis=0.8,
+                    confidence_overall=0.8,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    artifact_role="support_only",
+                    finding_level="none",
+                    publication_state="internal_only",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
+                    obligation_under_review=_ISSUE_TO_OBLIGATION_KEY.get(_pri_issue_type, "").replace("_present", "") or None,
+                    gap_note=f"Obligation '{_pri_issue_type}' confirmed present at document level; analysis skipped.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
         legal_facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
         qualification = _legal_qualification_for_issue(primary_issue, legal_facts)
         legal_facts, legal_pipeline_note = _legal_reasoning_step(section, primary_issue, qualification, legal_facts)
@@ -4998,15 +5658,6 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         f = _coerce_finding(llm_finding)
         f.gap_note = _sanitize_legal_reference_text(f.gap_note)
         f.remediation_note = _sanitize_legal_reference_text(f.remediation_note)
-        if f.candidate_publishability == "internal_only":
-            f = LlmFinding(
-                status="needs review",
-                severity=None,
-                gap_note="Model marked this candidate as internal_only due to weak legal confidence.",
-                remediation_note=None,
-                citations=[],
-                candidate_publishability="internal_only",
-            )
         if document_mode == "privacy_notice" and _finding_mentions_internal_control_only(f"{f.gap_note or ''} {f.remediation_note or ''}"):
             f = LlmFinding(
                 status="needs review",
@@ -5174,26 +5825,10 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                 systemic=False,
             )
         f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
-        if f.status in {"gap", "partial"} and f.gap_note:
-            f.gap_note = (
-                f"{f.gap_note} Applicability memo: obligation={memo['obligation']}; "
-                f"collection_mode={memo['collection_mode']}; visibility={memo['visibility']}; "
-                f"confidence={memo['applicability_confidence']:.2f}; applicability_status={applicability['applicability_status']}."
-            )
-            f.gap_note = (
-                f"{f.gap_note} Legal qualification: issue={qualification['issue_name']}; "
-                f"obligation_family={qualification['obligation_family']}; "
-                f"defect_type={qualification['defect_type']}; priority_bucket={qualification['priority_bucket']}; "
-                f"primary={qualification['primary_article']}; secondary={', '.join(qualification['secondary_articles'])}; "
-                f"rejected={', '.join(qualification['rejected_articles'])}. "
-                f"Primary fit: {qualification['reason_primary_article_fits']} "
-                f"Rejected rationale: {qualification['reason_rejected_articles_do_not_fit']}"
-            )
-            if legal_facts:
-                f.gap_note = f"{f.gap_note} {legal_pipeline_note}"
-            specialized_bits = [v for v in specialized_review.values() if v]
-            if specialized_bits:
-                f.gap_note = f"{f.gap_note} Specialized legal review: {' '.join(specialized_bits)}"
+        # NOTE: internal debug metadata (applicability memo, legal qualification details,
+        # specialized review notes) is intentionally NOT appended to gap_note here.
+        # That information lives in obligation_under_review, legal_requirement, and
+        # assessment_type fields on the Finding row — keeping gap_note clean for publication.
         if not _consistency_validator(qualification["issue_name"], claim_types, valid_citations, f.remediation_note):
             f = LlmFinding(
                 status="needs review",
@@ -5306,6 +5941,24 @@ def run_audit(db: Session, audit: Audit) -> Audit:
                     "Probable GDPR gap: explicit processing/legal signals are present, so finding is not treated as not-assessable."
                 )
                 f.remediation_note = f.remediation_note or "Provide complete, mapped disclosure text to confirm final legal posture."
+
+        # Blocker 3: suppress weak not_assessable findings at the analysis stage.
+        # When evidence confidence is below threshold OR applicability is unresolved
+        # AND no explicit GDPR fact is visible, downgrade to non-publishable.
+        _confidence_evidence_pre = round(min(0.95, 0.25 + 0.15 * len(valid_citations)), 2)
+        if (
+            classification == "not_assessable"
+            and (_confidence_evidence_pre < 0.5 or applicability["applicability_status"] == "unresolved")
+            and not _has_explicit_gdpr_fact(f"{section.section_title}. {section.content}")
+        ):
+            classification = "diagnostic_internal_only"
+            f.status = "needs review"
+            f.gap_note = (
+                f"Suppressed: confidence_evidence={_confidence_evidence_pre:.2f} below threshold "
+                f"or applicability_status={applicability['applicability_status']}. "
+                "Not enough evidence to publish as not_assessable."
+            )
+            valid_citations = []
 
         finding_row = Finding(
             audit_id=audit.id,
@@ -5435,7 +6088,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
             db.commit()
 
     if document_mode == "privacy_notice":
-        _add_notice_level_synthesis(db, audit.id, obligation_map)
+        _add_notice_level_synthesis(db, audit.id, obligation_map, duty_validation)
     _add_systemic_issue_synthesis(db, audit.id, obligation_map)
     _build_systemic_support(
         db,
@@ -5446,6 +6099,7 @@ def run_audit(db: Session, audit: Audit) -> Audit:
         source_scope_confidence,
         unseen_sections,
         cross_references,
+        duty_validation,
     )
     _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
     rows_for_disposition = db.query(Finding).filter(Finding.audit_id == audit.id).all()

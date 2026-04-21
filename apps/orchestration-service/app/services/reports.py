@@ -52,6 +52,22 @@ ISSUE_TITLE_MAP = {
     'controller_processor_role_ambiguity': 'Role allocation needs clarification',
 }
 
+ISSUE_WHY_TEXT_MAP = {
+    'missing_legal_basis': 'The notice describes processing activities but does not state the lawful basis for those activities.',
+    'missing_retention_period': 'The notice does not clearly state retention periods or objective retention criteria.',
+    'missing_rights_notice': 'The notice does not explain the rights available to data subjects in a complete and usable way.',
+    'missing_complaint_right': 'The notice does not clearly explain that people can lodge a complaint with a supervisory authority.',
+    'missing_transfer_notice': 'The notice refers to international transfers but does not explain the safeguard relied upon.',
+    'profiling_disclosure_gap': 'The notice does not clearly explain profiling logic, significance, or likely consequences where profiling is referenced.',
+    'recipients_disclosure_gap': 'The notice does not clearly identify categories of recipients or third parties receiving personal data.',
+    'purpose_specificity_gap': 'The categories of personal data are described, but the related purpose mapping is not sufficiently explicit.',
+    'missing_controller_contact': 'The notice does not provide clear contact details for privacy or data-protection requests.',
+    'missing_controller_identity': 'The notice does not clearly identify the data controller.',
+    'controller_processor_role_ambiguity': 'The notice does not clearly explain when the organisation acts as controller or processor.',
+    'cookie_disclosure_gap': 'The notice references cookies or similar technologies without clearly explaining purposes, controls, and legal basis.',
+}
+
+
 class _TextBlock(NamedTuple):
     text: str
     font_size: int = 10
@@ -447,9 +463,11 @@ def final_exported_findings(db: Session, audit_id: str) -> list[Finding]:
                 if fallback
                 else "Based on the reviewed notice: no explicit compliant disclosure excerpt was found."
             )
-        if not (_sanitize_user_text(row.gap_note) or "").strip():
+        sanitized_gap = (_sanitize_user_text(row.gap_note) or "").strip()
+        if not sanitized_gap or not bool(re.search(r'[a-zA-Z]{4,}', sanitized_gap)):
             row.gap_note = "Based on the reviewed notice, required GDPR disclosure is missing or insufficient for this obligation."
-        if not (_sanitize_user_text(row.remediation_note) or "").strip():
+        sanitized_rem = (_sanitize_user_text(row.remediation_note) or "").strip()
+        if not sanitized_rem or not bool(re.search(r'[a-zA-Z]{4,}', sanitized_rem)):
             row.remediation_note = "Update the notice to include GDPR-required disclosure language for this obligation."
     return rows
 
@@ -502,18 +520,64 @@ def _issue_from_section_id(section_id: str) -> str | None:
     return None
 
 
-def _title_for_row(row: Finding | _SyntheticFinding) -> str:
+def _derive_issue_key_for_row(row: Finding | _SyntheticFinding) -> str | None:
+    """Extract the canonical issue key from available Finding fields."""
+    # 1. Systemic section_id encodes the issue
     issue = _issue_from_section_id(row.section_id)
-    if issue and issue in ISSUE_TITLE_MAP:
-        return ISSUE_TITLE_MAP[issue]
-    candidate = _sanitize_user_text(row.legal_requirement) or _sanitize_user_text(row.gap_note)
-    return candidate[:90] if candidate else 'GDPR transparency disclosure gap'
+    if issue:
+        return issue
+    # 2. Dynamically-set attribute (some callers set this)
+    issue_key = getattr(row, 'issue_key', None)
+    if issue_key:
+        return issue_key
+    # 3. legal_requirement often contains "for issue <key>"
+    lr = (row.legal_requirement or "").strip()
+    m = re.search(r'\bfor issue\s+([a-z_]+)\b', lr, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+    # 4. Match on GDPR article numbers from primary_legal_anchor
+    anchors = " ".join(_decode_json_list(row.primary_legal_anchor)).lower()
+    if "13(2)(f)" in anchors or "14(2)(g)" in anchors:
+        return "profiling_disclosure_gap"
+    if "13(1)(f)" in anchors or "14(1)(f)" in anchors or "article 44" in anchors or "art. 44" in anchors:
+        return "missing_transfer_notice"
+    if "13(1)(c)" in anchors or "14(1)(c)" in anchors:
+        return "missing_legal_basis"
+    if "13(2)(a)" in anchors or "14(2)(a)" in anchors:
+        return "missing_retention_period"
+    if "13(2)(b)" in anchors or "14(2)(c)" in anchors:
+        return "missing_rights_notice"
+    if "13(2)(d)" in anchors or "14(2)(e)" in anchors:
+        return "missing_complaint_right"
+    if "13(1)(a)" in anchors or "14(1)(a)" in anchors:
+        return "missing_controller_contact"
+    if "13(1)(e)" in anchors or "14(1)(e)" in anchors:
+        return "recipients_disclosure_gap"
+    return None
+
+
+def _title_for_row(row: Finding | _SyntheticFinding) -> str:
+    issue_key = _derive_issue_key_for_row(row)
+    if issue_key and issue_key in ISSUE_TITLE_MAP:
+        return ISSUE_TITLE_MAP[issue_key]
+    # Fallback: use legal_requirement but strip machine-generated anchor strings
+    candidate = _sanitize_user_text(row.legal_requirement)
+    if candidate and re.search(r'\bprimary legal anchor\b|\bfor issue\b', candidate, re.IGNORECASE):
+        candidate = None
+    candidate = candidate or _sanitize_user_text(row.gap_note)
+    if candidate and bool(re.search(r'[a-zA-Z]{4,}', candidate)):
+        return candidate[:90]
+    return 'GDPR transparency disclosure gap'
 
 
 def _evidence_for_row(row: Finding | _SyntheticFinding, section_label: str) -> str:
     excerpt = next((c.excerpt for c in row.citations if _is_valid_evidence_excerpt(c.excerpt)), None)
     if excerpt:
         return f"{section_label}: {_sanitize_user_text(excerpt)}"
+    # Fall back to policy_evidence_excerpt when citations are absent
+    doc_excerpt = getattr(row, 'policy_evidence_excerpt', None)
+    if _is_valid_evidence_excerpt(doc_excerpt):
+        return f"{section_label}: {_sanitize_user_text(doc_excerpt)}"
     if section_label and section_label != "Document section":
         return "No explicit disclosure found in this section."
     return "No explicit disclosure found in this document."
@@ -731,14 +795,26 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
         meta = section_meta.get(finding.section_id, _SectionReportMeta(label="Document section", page_range=None))
         blocks.append(_TextBlock(meta.label, font_size=11, top_gap=10))
         blocks.append(_TextBlock(f"Finding: {_title_for_row(finding)}", bullet=True))
-        issue_hint = finding.legal_requirement or finding.section_id
+        issue_key_hint = _derive_issue_key_for_row(finding) or ''
+        issue_hint = issue_key_hint or finding.legal_requirement or finding.section_id
         blocks.append(_TextBlock(f"Status: {_user_status_label(finding.status)}", bullet=True))
         blocks.append(_TextBlock(f"Severity: {_user_severity_label(finding.severity, issue_hint)}", bullet=True))
-        safe_gap_note = _sanitize_user_text(finding.gap_note)
+        local_primary_anchors = _decode_json_list(finding.primary_legal_anchor)
+        if not local_primary_anchors and finding.legal_requirement:
+            lr = (_sanitize_user_text(finding.legal_requirement) or "").strip()
+            gdpr_refs = re.findall(r'GDPR Article\s+[\d()a-z/,\s]+', lr, re.IGNORECASE)
+            if gdpr_refs:
+                local_primary_anchors = [ref.strip().rstrip(',') for ref in gdpr_refs]
+        if local_primary_anchors:
+            blocks.append(_TextBlock(f"Legal basis: {', '.join(local_primary_anchors)}", bullet=True))
+        safe_gap_note = (
+            ISSUE_WHY_TEXT_MAP.get(issue_key_hint)
+            or _sanitize_user_text(finding.gap_note)
+        )
         safe_remediation_note = _sanitize_user_text(finding.remediation_note)
-        if safe_gap_note:
+        if safe_gap_note and bool(re.search(r'[a-zA-Z]{4,}', safe_gap_note)):
             blocks.append(_TextBlock(f"Why this matters: {safe_gap_note}", bullet=True))
-        if safe_remediation_note:
+        if safe_remediation_note and bool(re.search(r'[a-zA-Z]{4,}', safe_remediation_note)):
             blocks.append(_TextBlock(f"Recommended action: {safe_remediation_note}", bullet=True))
         blocks.append(_TextBlock(f"Evidence: {_evidence_for_row(finding, meta.label)}", bullet=True))
         for citation in finding.citations:
@@ -754,8 +830,15 @@ def generate_report_text(db: Session, audit_id: str) -> tuple[Report, Path]:
     if roadmap_items:
         blocks.append(_TextBlock("Recommended actions", font_size=13, top_gap=14))
         for finding in sorted(roadmap_items, key=lambda row: {"high": 0, "medium": 1, "low": 2}.get((row.severity or "low"), 3)):
-            title = finding.gap_note or "Remediate transparency obligation gap."
-            blocks.append(_TextBlock(_sanitize_user_text(title)[:180], bullet=True))
+            roadmap_issue_key = _derive_issue_key_for_row(finding) or ''
+            sanitized_title = (
+                ISSUE_WHY_TEXT_MAP.get(roadmap_issue_key)
+                or (_sanitize_user_text(finding.gap_note) or "").strip()
+                or _title_for_row(finding)
+            )
+            if not bool(re.search(r'[a-zA-Z]{4,}', sanitized_title)):
+                sanitized_title = _title_for_row(finding)
+            blocks.append(_TextBlock(sanitized_title[:180], bullet=True))
             blocks.append(_TextBlock(f"Action: {_sanitize_user_text(finding.remediation_note)}", bullet=True))
     blocks.append(_TextBlock(f"Report created at: {report_created_at}", bullet=True))
     blocks.append(_TextBlock(f"Export-ready findings: {contract['counts_by_status']['total']}", bullet=True))

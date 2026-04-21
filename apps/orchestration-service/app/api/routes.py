@@ -940,6 +940,16 @@ def _project_section_level_findings(
     return [row for row in out if not _hydration_missing(row)]
 
 
+def _derive_confidence_level(confidence: float | None) -> str:
+    if confidence is None:
+        return "low"
+    if confidence >= 0.75:
+        return "high"
+    if confidence >= 0.5:
+        return "medium"
+    return "low"
+
+
 def _is_real_evidence_ref(value: str) -> bool:
     token = (value or "").strip().lower()
     return bool(token) and not token.startswith("systemic-anchor:") and not token.startswith("evi:synthetic")
@@ -984,9 +994,8 @@ def _evidence_by_chunk_ref(db: Session, audit_id: str) -> dict[str, EvidenceReco
     for row in rows:
         if row.source_ref and row.source_ref not in out:
             out[row.source_ref] = row
-    if out:
-        return out
-    # Backfill mapping from persisted finding citations when legacy audits predate evidence upsert.
+    # Always supplement with FindingCitation chunk_ids not already in primary evidence —
+    # ensures GDPR-corpus and systemic-finding citations created in audit_runner are resolvable.
     citation_rows = (
         db.query(FindingCitation.chunk_id)
         .join(Finding, Finding.id == FindingCitation.finding_id)
@@ -994,7 +1003,7 @@ def _evidence_by_chunk_ref(db: Session, audit_id: str) -> dict[str, EvidenceReco
         .all()
     )
     for (chunk_id,) in citation_rows:
-        if not chunk_id or not _is_real_evidence_ref(chunk_id):
+        if not chunk_id or not _is_real_evidence_ref(chunk_id) or chunk_id in out:
             continue
         out[chunk_id] = EvidenceRecord(
             evidence_id=f"evi:chunk:{chunk_id}",
@@ -1846,6 +1855,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 if fallback_excerpt
                 else "Based on the reviewed notice: no explicit compliant disclosure excerpt was found."
             )
+        eff_confidence_overall = row.confidence_overall if row.confidence_overall is not None else (row.confidence or 0.7)
         out.append(
             FindingOut(
                 id=row.id,
@@ -1863,7 +1873,7 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 confidence_applicability=row.confidence_applicability,
                 confidence_article_fit=row.confidence_article_fit,
                 confidence_synthesis=row.confidence_synthesis,
-                confidence_overall=row.confidence_overall,
+                confidence_overall=eff_confidence_overall,
                 missing_from_section=row.missing_from_section,
                 missing_from_document=row.missing_from_document,
                 not_visible_in_excerpt=row.not_visible_in_excerpt,
@@ -1876,19 +1886,21 @@ def get_findings(audit_id: str, db: Session = Depends(get_db)) -> list[FindingOu
                 policy_evidence_excerpt=policy_excerpt,
                 legal_requirement=_sanitize_published_text(row.legal_requirement),
                 gap_reasoning=_sanitize_published_text(row.gap_reasoning),
-                confidence_level=row.confidence_level,
+                confidence_level=_derive_confidence_level(eff_confidence_overall),
                 assessment_type=row.assessment_type,
                 severity_rationale=_sanitize_published_text(row.severity_rationale),
                 primary_legal_anchor=_deserialize_json_list(row.primary_legal_anchor),
                 secondary_legal_anchors=_deserialize_json_list(row.secondary_legal_anchors),
-                document_evidence_refs=[
-                    ref for ref in (_deserialize_json_list(row.document_evidence_refs) or []) if ref in evidence_ids
-                ]
-                or None,
+                document_evidence=policy_excerpt,
+                document_evidence_refs=(
+                    [ref for ref in (_deserialize_json_list(row.document_evidence_refs) or []) if ref in evidence_ids]
+                    or [row.section_id]
+                ),
                 affected_sections=[row.section_id],
                 where_evidence_found=[row.section_id],
                 where_disclosure_missing=[row.section_id],
-                citation_summary_text=_sanitize_published_text(row.citation_summary_text),
+                citation_summary_text=_sanitize_published_text(row.citation_summary_text)
+                or f"GDPR compliance assessment for {issue_key.replace('_', ' ')} obligation.",
                 support_complete=_deserialize_bool_flag(row.support_complete),
                 omission_basis=_deserialize_bool_flag(row.omission_basis),
                 source_scope=row.source_scope,

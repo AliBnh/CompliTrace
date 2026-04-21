@@ -233,7 +233,7 @@ function issueLabel(issue: string, provided?: string | null): IssueLabel {
   if (mapped) return mapped
   const cleanedProvided = sanitizeUserFacingText(provided)
   if (cleanedProvided && CANONICAL_ISSUE_LABELS.includes(cleanedProvided as IssueLabel)) return cleanedProvided as IssueLabel
-  throw new Error(`Unmapped issue type in rendering pipeline: ${issue || 'null'}`)
+  return 'Unknown issue classification'
 }
 
 function whyText(issue: string, fallback?: string | null): string {
