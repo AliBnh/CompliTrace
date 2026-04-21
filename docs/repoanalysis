@@ -1,51 +1,84 @@
-# CompliTrace Repository Analysis (Code-Accurate Snapshot)
+# CompliTrace Repository Analysis (Exhaustive, Code-Aligned Deep Dive)
 
-_Last verified against repository code on 2026-04-21._
-
-## 0) Goal and method
-
-This document maps the current implementation in this repository to the real runtime behavior of the system.
-It is intentionally code-first: every claim below is based on files under `apps/*`, `scripts/*`, `infra/*`, and `docker-compose.yml`.
+**Verification date:** 2026-04-21 (UTC)
+**Scope:** Full repository (`apps/*`, `scripts/*`, `infra/*`, `data/*`, root compose/config/docs)
 
 ---
 
-## 1) Repository topology
+## 0) Purpose and framing
 
-- `apps/ingestion-service`: PDF upload, parsing, section extraction, document/section persistence.
-- `apps/knowledge-service`: GDPR chunk indexing and semantic search over Qdrant.
-- `apps/orchestration-service`: audit execution, legal gating, publication controls, review/export/report APIs.
-- `apps/frontend`: React/Vite UI for upload → sections → findings/review/analysis → report.
-- `scripts`: GDPR ingestion + validation + benchmarking utilities.
-- `infra/prometheus`, `infra/grafana`: monitoring and dashboard provisioning.
-- `data/raw`, `data/processed`: source PDFs + processed GDPR chunk corpus.
+This document provides a deeply detailed, implementation-centric analysis of how CompliTrace currently works end-to-end.
 
----
+It focuses on what the code actually does now:
 
-## 2) Runtime architecture (`docker-compose.yml`)
+- architecture and service boundaries,
+- runtime wiring,
+- DB models and persistence semantics,
+- per-service API contracts,
+- parser logic,
+- retrieval flow,
+- orchestration control flow,
+- deterministic legal/publication gates,
+- review and export projections,
+- report generation internals,
+- frontend normalization and UI flow,
+- observability and invariant tests.
 
-Default services and ports:
-
-- Postgres `5432`
-- Qdrant `6333`
-- Ingestion service `8001`
-- Knowledge service `8002`
-- Orchestration service `8003`
-- Prometheus `9090`
-- Grafana `${GRAFANA_PORT:-3001}`
-- Frontend `5173`
-
-Notable runtime configuration:
-
-- Orchestration exposes LLM provider routing (`MODEL_PROVIDER`, `FALLBACK_MODEL_PROVIDER`) and model names.
-- Knowledge service embedding default is `BAAI/bge-small-en-v1.5`.
-- Orchestration stores report artifacts in `REPORTS_DIR`.
-- CORS is configurable for all HTTP services.
+This is intentionally not a product pitch; it is an engineering map of the current behavior.
 
 ---
 
-## 3) Ingestion service (`apps/ingestion-service`)
+## 1) Repository topology and role of each area
 
-### 3.1 Endpoints
+### 1.1 Top-level layout
+
+- `apps/ingestion-service/`
+  - FastAPI service for document upload, PDF parse, section extraction, and persistence of `Document` + `Section` rows.
+- `apps/knowledge-service/`
+  - FastAPI retrieval service backed by Qdrant and FastEmbed.
+  - Responsible for loading/indexing GDPR chunks and serving semantic search/chunk lookup.
+- `apps/orchestration-service/`
+  - FastAPI service implementing audit lifecycle, section-by-section legal assessment, gating, publication controls, review datasets, export contract, and PDF report workflows.
+- `apps/frontend/`
+  - React + Vite UI with pages for upload, section review, findings/review/analysis workspace, and report management.
+- `scripts/`
+  - GDPR ingest/validation and benchmark scripts.
+- `infra/prometheus/`, `infra/grafana/`
+  - Monitoring scrape config + dashboard provisioning assets.
+- `data/raw/`, `data/processed/`
+  - Input PDFs and processed corpus chunks (`gdpr_chunks.jsonl`).
+
+### 1.2 Runtime composition (`docker-compose.yml`)
+
+Services and default ports:
+
+- Postgres (`5432`)
+- Qdrant (`6333`)
+- Ingestion service (`8001`)
+- Knowledge service (`8002`)
+- Orchestration service (`8003`)
+- Prometheus (`9090`)
+- Grafana (`3001` by default host mapping)
+- Frontend (`5173`)
+
+Notable configuration boundaries:
+
+- Orchestration owns LLM provider routing (`MODEL_PROVIDER`, `FALLBACK_MODEL_PROVIDER`) and model names.
+- Knowledge service has independent embedding runtime (`EMBEDDING_MODEL`, default `BAAI/bge-small-en-v1.5`).
+- Report artifact output path is controlled by `REPORTS_DIR`.
+- CORS is configured separately per service.
+
+### 1.3 Plane separation
+
+- **Document content plane:** ingestion produces canonical sections; orchestration consumes them.
+- **Legal evidence plane:** knowledge service returns GDPR chunks + scores; orchestration validates and projects citations.
+- **Decision/publication plane:** orchestration applies deterministic gates that can downgrade/suppress internal artifacts even after LLM output.
+
+---
+
+## 2) Ingestion service deep dive (`apps/ingestion-service`)
+
+### 2.1 API endpoints
 
 - `GET /health`
 - `POST /documents`
@@ -53,180 +86,422 @@ Notable runtime configuration:
 - `GET /documents/{document_id}/sections`
 - `GET /metrics`
 
-### 3.2 Upload modes
+### 2.2 Upload behavior (`app/api/routes.py`)
 
-`POST /documents` supports:
+`POST /documents` accepts two upload modes:
 
-1. multipart form-data (`file`)
-2. raw body upload when `Content-Type` is `application/pdf` or `application/octet-stream` (+ optional `X-Filename`)
+1. multipart upload (`file` field)
+2. raw body upload when content type is `application/pdf` or `application/octet-stream`
+   - optional filename via `X-Filename`
 
-Validation behavior:
+Validation and rejection behavior:
 
-- 422 if no valid file payload
-- 400 if filename is missing or not `.pdf`
-- parse failure is persisted as `Document(status="failed", error_message=...)` and returned as HTTP 422
+- 422 if no valid file payload is detected.
+- 400 if filename is missing/invalid or not `.pdf`.
+- file is written to `UPLOADS_DIR` using basename sanitization (`Path(...).name`).
 
-### 3.3 Parsing behavior (`services/parser.py`)
+Instrumentation:
 
-- PyMuPDF text extraction page-by-page
-- line cleanup and noise rejection (page markers, file-path-like lines, punctuation fragments, very short noise)
-- heading detection via numeric + title-case heuristics
-- inline heading/body splitting and embedded numbered heading extraction
-- repeated short cross-page boilerplate stripping
-- per-section page range tracking (`page_start`, `page_end`)
-- fallback section if structure detection is weak
+- `documents_upload_total`
+- `documents_parsed_total`
+- `documents_parse_failed_total`
+- `document_parse_duration_seconds`
 
-### 3.4 Persistence model
+Failure persistence model:
 
-- `Document`: id/title/filename/status/error_message/created_at
-- `Section`: id/document_id/order/title/content/page_start/page_end
+- on parse exception, persists `Document(status="failed", error_message=...)` and returns HTTP 422.
+
+### 2.3 Parser internals (`app/services/parser.py`)
+
+Core strategy:
+
+- Uses PyMuPDF (`fitz`) to extract page text.
+- Cleans lines and removes common noise:
+  - page markers,
+  - path-like strings,
+  - punctuation-only fragments,
+  - too-short noise lines.
+
+Heading logic:
+
+- multiple regexes for section headings, subsections, and numeric-only subsection stubs.
+- heuristics reject likely sentence lines (to prevent false heading detection).
+- handles inline numbered heading clusters and heading/body composites.
+
+Structural normalization:
+
+- attempts split of numbered heading + body.
+- detects repeated short lines across many pages as boilerplate headers/footers.
+- removes/normalizes boilerplate phrases.
+- tracks section page ranges (`page_start`, `page_end`).
+- includes fallback section if structure extraction is weak.
+
+### 2.4 Ingestion persistence schema (`app/models/document.py`)
+
+`Document`
+
+- `id`, `title`, `filename`, `status`, `error_message`, `created_at`
+
+`Section`
+
+- `id`, `document_id`, `section_order`, `section_title`, `content`, `page_start`, `page_end`
+
+### 2.5 Service bootstrap (`app/main.py`)
+
+- structured JSON logging formatter at startup.
+- CORS middleware from settings.
+- `Base.metadata.create_all(bind=engine)` on startup.
+- metrics endpoint via `prometheus_client.generate_latest()`.
 
 ---
 
-## 4) Knowledge service (`apps/knowledge-service`)
+## 3) Knowledge service deep dive (`apps/knowledge-service`)
 
-### 4.1 Startup sequence
+### 3.1 Startup lifecycle (`app/main.py`)
 
-1. connect Qdrant
-2. init fastembed `TextEmbedding`
-3. ensure collection exists (`COSINE` distance)
-4. load JSONL chunks from `GDPR_CHUNKS_PATH`
-5. index if collection empty, or reindex when `FORCE_REINDEX=true`
+Startup order:
 
-Point IDs are deterministic UUID5 from `chunk_id`.
+1. initialize Qdrant client.
+2. initialize FastEmbed `TextEmbedding`.
+3. ensure collection exists with cosine vector params.
+4. load chunks from JSONL file.
+5. index if needed (`count == 0` or `FORCE_REINDEX=true`).
 
-### 4.2 Endpoints
+Indexing details:
+
+- point IDs are deterministic UUID5 using `chunk_id`.
+- vector size probed from embedder at startup.
+- payload is stored with chunk metadata (plus `point_id`).
+
+### 3.2 API endpoints
 
 - `GET /health`
-- `POST /search` (`query`, `k` where `1..20`)
+- `POST /search`
 - `GET /chunks/{chunk_id}`
 - `GET /metrics`
 
-`/search` returns chunk metadata + similarity score. `/chunks/{chunk_id}` performs a payload-filtered Qdrant scroll lookup.
+`/search` contract:
+
+- input: `query` (min length 2), `k` (`1..20`)
+- execution: embed query → `query_points` in Qdrant
+- output includes: `chunk_id`, `article_number`, `article_title`, `paragraph_ref`, `subpoint_range`, `content`, `source_pdf`, `score`
+
+`/chunks/{chunk_id}` contract:
+
+- payload-filtered Qdrant scroll lookup by `chunk_id`.
+- returns rich chunk payload (chapter/page/subchunk metadata if present).
+
+### 3.3 Metrics
+
+- `retrieval_query_total`
+- `retrieval_latency_seconds`
+- `retrieval_results_returned_total`
+- `chunk_lookup_total`
+
+### 3.4 Service characteristics
+
+- No cross-service DB dependency; knowledge state is vector collection + source JSONL.
+- Retrieval is synchronous HTTP call style from orchestration.
+- Operational correctness depends on chunk corpus consistency and embedding model alignment.
 
 ---
 
-## 5) Orchestration service (`apps/orchestration-service`)
+## 4) Orchestration service architecture (`apps/orchestration-service`)
 
-### 5.1 Startup and schema hardening
+### 4.1 Startup and schema evolution (`app/main.py`)
 
-On startup, service creates metadata and then runs additive column guards for:
+On startup:
 
-- `findings`
-- `audit_analysis_items`
-- `evidence_records`
+1. `Base.metadata.create_all(...)`
+2. additive schema guards for `findings`
+3. additive schema guards for `audit_analysis_items`
+4. additive schema guards for `evidence_records`
+5. attempt `findings.section_id` widening to `VARCHAR(128)`
 
-It also attempts to widen `findings.section_id` to `VARCHAR(128)` for systemic/ledger IDs.
+These guards support upgrade-in-place behavior across partially migrated environments.
 
-### 5.2 Endpoints
+### 4.2 Public API surface (`app/api/routes.py`)
 
 - `GET /health`
 - `POST /audits`
-- `GET /audits/{id}`
-- `GET /audits/{id}/findings`
-- `GET /audits/{id}/analysis` (filters: `status`, `issue_type`, `artifact_role`, `section_id`, `analysis_stage`, `debug`)
-- `GET /audits/{id}/review` (`debug` flag)
-- `GET /audits/{id}/review/grouped` (`debug` flag)
-- `GET /audits/{id}/final-decision-ledger`
-- `GET /audits/{id}/export-contract`
-- `POST /audits/{id}/report`
-- `GET /audits/{id}/report`
-- `GET /audits/{id}/report/download`
+- `GET /audits/{audit_id}`
+- `GET /audits/{audit_id}/findings`
+- `GET /audits/{audit_id}/analysis`
+- `GET /audits/{audit_id}/review`
+- `GET /audits/{audit_id}/review/grouped`
+- `GET /audits/{audit_id}/final-decision-ledger`
+- `GET /audits/{audit_id}/export-contract`
+- `POST /audits/{audit_id}/report`
+- `GET /audits/{audit_id}/report`
+- `GET /audits/{audit_id}/report/download`
 - `GET /metrics`
 
-### 5.3 Core models
+Query/filter specifics:
 
-- `Audit`
-- `Finding`
-- `FindingCitation`
-- `AuditAnalysisItem`
-- `AnalysisCitation`
-- `EvidenceRecord`
-- `Report`
+- `/analysis` supports filters: `status`, `issue_type`, `artifact_role`, `section_id`, `analysis_stage`, `debug`.
+- `/review` and `/review/grouped` support `debug` toggling of ledger/internal suppression visibility.
 
----
+### 4.3 Canonical DB model (`app/models/audit.py`)
 
-## 6) Audit lifecycle (`services/audit_runner.py`)
+#### 4.3.1 `Audit`
 
-### 6.1 Entry flow
+- run identity + lifecycle (`status`, `started_at`, `completed_at`)
+- provenance fields:
+  - `model_provider`, `model_name`, `model_temperature`
+  - `prompt_template_version`
+  - `embedding_model`
+  - `corpus_version`
 
-`POST /audits` persists `Audit(status="pending")`, runs `run_audit(...)`, and marks failed state on exception.
+#### 4.3.2 `Finding`
 
-### 6.2 Pre-loop global setup
+High-density outcome row with:
 
-`run_audit(...)` computes and/or captures:
+- outcome/status/severity/classification
+- confidence decomposition fields (`confidence_*`)
+- publication controls (`publish_flag`, `artifact_role`, `finding_level`, `publication_state`)
+- scope/visibility controls (`missing_from_section`, `missing_from_document`, `source_scope`, `source_scope_confidence`, `assertion_level`, etc.)
+- legal narrative fields (`policy_evidence_excerpt`, `legal_requirement`, `gap_reasoning`, `severity_rationale`)
+- anchor/evidence metadata (`primary_legal_anchor`, `secondary_legal_anchors`, `document_evidence_refs`, `citation_summary_text`)
 
-- document sections from ingestion
-- cross references and source-scope confidence
-- document mode (`privacy_notice`/other inferred modes)
-- document posture and document-wide duty validation
-- obligation map
-- effective LLM budget cap
+#### 4.3.3 `FindingCitation`
 
-### 6.3 Per-section flow (implemented)
+- citation linkage to GDPR chunk evidence (`chunk_id`, article fields, excerpt).
 
-For each section, pipeline includes:
+#### 4.3.4 `AuditAnalysisItem` + `AnalysisCitation`
 
-- runtime-budget guard
-- applicability filtering (`_is_not_applicable`, `_section_auditability_type`)
-- collection-mode inference + candidate issue spotting
-- legal fact extraction + legal qualification per issue
-- retrieval query generation and mode-aware reranking
-- evidence sufficiency gating
-- conditional LLM call (`run_llm_classification`) with provider fallback
-- citation validation/salvage and legal-fit checks
-- deterministic overrides (violation patterns, consistency controls, dedupe)
-- finding + citation persistence
+- internal pipeline materialization for provisional and diagnostic artifacts.
+- includes stage/type/outcome, issue typing, candidate statuses, suppression reasoning, confidence fields, and citation candidates.
 
-### 6.4 Post-loop flow
+#### 4.3.5 `EvidenceRecord`
 
-- notice-level and systemic synthesis
-- support hydration for systemic findings
-- completeness enforcement
-- final disposition map build
-- final publication validator
-- review/publish invariant enforcement
-- suppression ledger recording
-- partner review pass
-- evidence record upsert
-- state invariant validator
-- analysis snapshot materialization
-- audit terminal state update
+- canonical evidence index by `evidence_id` with source refs, excerpts, derivation links, and legal metadata.
+
+#### 4.3.6 `Report`
+
+- report row with generation status and stored PDF path.
 
 ---
 
-## 7) LLM subsystem (`services/llm.py`)
+## 5) Full audit lifecycle (`services/audit_runner.py`)
 
-- strict JSON contract for model output (status/severity/notes/legal fields/citations/etc.)
-- provider adapters:
-  - Groq via OpenAI-compatible chat completions
-  - Gemini via `generateContent`
-- bounded retry handling for HTTP 429
-- sentinel path when all attempts are rate-limited
-- coercion + normalization into `LlmFinding` model
+### 5.1 Entry and failure semantics
+
+`POST /audits`:
+
+1. persist pending audit row,
+2. run `run_audit(db, audit)` synchronously,
+3. on exception: rollback/mark audit failed.
+
+### 5.2 `run_audit` initialization
+
+At execution start:
+
+- audit status set to `running`
+- model/corpus metadata stamped from config
+- sections fetched via ingestion client
+- runtime and counter state initialized
+
+Global pre-loop computations include:
+
+- `_extract_notice_cross_references(...)`
+- `_source_scope_qualification(...)`
+- `_infer_document_mode(...)`
+- `_document_posture_agent(...)`
+- `_document_wide_duty_validation(...)`
+- `_build_document_obligation_map(...)`
+- `_effective_llm_budget(...)`
+
+### 5.3 Per-section processing phases
+
+For each section in order:
+
+1. **Runtime budget guard**
+   - hard cap using `MAX_AUDIT_RUNTIME_SECONDS`.
+2. **Applicability/auditability filtering**
+   - `_is_not_applicable`, `_section_auditability_type`.
+3. **Issue spotting**
+   - collection mode inference,
+   - `_spot_candidate_issues` generation,
+   - obligation-first injections and suppressions when doc-wide evidence already satisfies conditions.
+4. **Legal fact extraction + qualification**
+   - `_extract_legal_facts`, `_legal_qualification_for_issue`.
+5. **Retrieval + reranking**
+   - mode-aware retrieval query construction,
+   - top-k retrieval from knowledge service,
+   - reranking and bounded retry under weak relevance signals.
+6. **Evidence sufficiency gating**
+   - score/obligation-language checks,
+   - deterministic fallback to review paths when insufficient.
+7. **LLM gate + invocation**
+   - call only if budget and runtime conditions permit,
+   - deterministic review fallback if rate-limited/exhausted.
+8. **LLM output normalization**
+   - strict JSON coercion into `LlmFinding`,
+   - status normalization and candidate publishability demotion hooks.
+9. **Applicability/specialized passes**
+   - family-specific checks (transfer/profiling/role ambiguity/special category/etc.).
+10. **Citation validation and salvage**
+    - retrieved-universe validation,
+    - article fit checks and salvage attempts from retrieved pool.
+11. **Deterministic override stack**
+    - explicit violation patterns,
+    - consistency/quality controls,
+    - publishability/diagnostic demotions.
+12. **Duplicate suppression**
+    - signature-based dedupe across sections.
+13. **Persistence**
+    - write final `Finding` row,
+    - write `FindingCitation` rows,
+    - optional split-finding generation for combined obligation situations.
+
+### 5.4 Post-loop synthesis and control plane
+
+After section loop:
+
+1. `_add_notice_level_synthesis`
+2. `_add_systemic_issue_synthesis`
+3. `_build_systemic_support`
+4. `_enforce_core_and_specialist_completeness`
+5. `_build_final_disposition_map`
+6. `_final_publication_validator`
+7. `_enforce_review_publish_invariant`
+8. `_record_suppression_ledger`
+9. `_partner_review_pass`
+10. `_upsert_evidence_records`
+11. `_state_invariant_validator`
+12. `_snapshot_analysis_items`
+13. audit terminal state update (`complete` or gate-adjusted state)
+
+### 5.5 Deterministic vs model-driven responsibility split
+
+Deterministic-heavy layers:
+
+- candidate taxonomy baselines,
+- legal family/article mapping,
+- retrieval sufficiency gates,
+- citation fit validation,
+- publication hydration/completeness enforcement,
+- review/publish invariant enforcement,
+- export dataset contracts.
+
+Model-driven layer (bounded):
+
+- textual synthesis/classification proposals inside strict prompt and schema constraints, then post-validated by deterministic controls.
 
 ---
 
-## 8) Publication and projection behavior
+## 6) LLM subsystem details (`services/llm.py`)
 
-### 8.1 Published findings endpoint
+### 6.1 Prompt contract
 
-`GET /audits/{id}/findings`:
+`SYSTEM_PROMPT` requires strict JSON output keys including:
 
-- returns 409 if audit status is `review_required`
-- sources rows from `final_exported_findings(...)`
-- enforces canonical issue-key mapping and evidence linkage checks
-- sanitizes internal/debug leakage tokens
+- status/severity
+- gap/remediation notes
+- legal requirement + reasoning
+- confidence/assessment fields
+- citations
 
-### 8.2 Review endpoint
+Policy constraints in prompt include:
 
-`GET /audits/{id}/review` merges:
+- allowed status values,
+- citation must come from retrieved chunks,
+- weak evidence should output `needs review`,
+- notice-priority guidance and transfer article guidance.
 
-- publishable and blocked/internal findings
-- selected analysis rows
-- synthesized review blocks from final-disposition ledger snapshot
+### 6.2 Prompt construction
 
-`GET /review/grouped` partitions into:
+`_build_user_prompt(...)` includes:
+
+- section title/content,
+- compact retrieval chunk lines with metadata and score,
+- optional section guidance text,
+- frozen rubric reminders.
+
+### 6.3 Provider routing and fallback
+
+- primary provider path from env (`groq` or `gemini` based on configuration and key presence)
+- fallback provider path similarly configured
+- 429 retry behavior on both provider adapters
+- returns sentinel `__rate_limited__` when all attempts fail specifically by rate limit
+
+### 6.4 Parsing and coercion
+
+- raw response JSON block extraction and repair attempts,
+- normalization map for status variants,
+- citation coercion validates minimum citation fields,
+- output projected into `LlmFinding` schema.
+
+---
+
+## 7) Retrieval and legal fit controls
+
+### 7.1 Retrieval flow in orchestration
+
+- retrieval query built from topic/mode/section context.
+- top-k from knowledge service then reranked.
+- retries on weak score/overlap paths.
+
+### 7.2 Evidence sufficiency
+
+- requires minimum support strength and obligation language signals.
+- when support is insufficient, flow chooses deterministic `needs review` or scoped omission-style fallbacks per duty context.
+
+### 7.3 Citation validation matrix
+
+- citation must map to retrieved chunk universe.
+- article parsing and issue-family rules applied.
+- disallowed article combinations can trigger demotion.
+- salvage logic attempts to recover valid chain from retrieved evidence.
+
+### 7.4 Issue family and normalization behavior
+
+Observed issue families include (non-exhaustive):
+
+- controller identity/contact
+- legal basis
+- retention
+- rights notice
+- complaint right
+- transfer notice / safeguards
+- profiling disclosure
+- recipient categories
+- purpose specificity
+- role ambiguity
+- special category conditions
+- article 14 source/timing family
+
+Normalization aliases exist in code to bridge legacy naming variants (e.g., rights/retention aliases) into canonical output families.
+
+---
+
+## 8) Publication, review, and ledger projections (`app/api/routes.py`)
+
+### 8.1 `/audits/{id}/findings` (published projection boundary)
+
+Behavior highlights:
+
+- returns 404 if audit missing.
+- returns 409 when audit is `review_required`.
+- sources rows from canonical dataset function `final_exported_findings`.
+- sanitizes internal tokens/markers.
+- enforces canonical issue key/label mapping; unmapped rows are downgraded to internal/support states.
+- validates evidence linkage and citation projection into public response structures.
+
+### 8.2 `/audits/{id}/analysis`
+
+- returns analysis artifacts with optional filters and stage slicing.
+- hides ledger-prefixed rows unless `debug=true`.
+
+### 8.3 `/audits/{id}/review`
+
+- merges findings (publishable + selected blocked/internal) and selected analysis records.
+- appends review blocks synthesized from final disposition ledger snapshot.
+- debug mode controls suppression of ledger/internal traces.
+
+### 8.4 `/audits/{id}/review/grouped`
+
+Partitions review stream into:
 
 - `publication_blockers`
 - `core_duty_resolution`
@@ -235,76 +510,155 @@ For each section, pipeline includes:
 - `internal_unresolved_items`
 - `diagnostics`
 
-### 8.3 Final ledger endpoint
+### 8.5 `/audits/{id}/final-decision-ledger`
 
-`GET /final-decision-ledger` returns canonicalized issue rows with scope, status/severity, evidence refs, and visibility flags.
+- emits canonical issue-key rows with scope metadata,
+- status/severity,
+- legal anchor set,
+- evidence refs,
+- visibility flags (`published_visible`, `report_visible`, `export_visible`),
+- blocker reason codes.
 
 ---
 
-## 9) Export contract and report generation (`services/reports.py`)
+## 9) Export contract and reporting (`services/reports.py`)
 
-### 9.1 Canonical export dataset
+### 9.1 Canonical dataset selector
 
-`final_exported_findings(...)` currently enforces:
+`final_exported_findings(...)` enforces:
 
 - `artifact_role == "publishable_finding"`
 - `publication_state == "publishable"`
-- excludes ledger/system bookkeeping rows
+- exclusion of ledger/system rows
+
+This same canonical dataset underpins published findings and report/export surfaces.
 
 ### 9.2 Export contract
 
-`build_export_contract(...)` provides:
+`build_export_contract(...)` returns structured export metadata such as:
 
-- dataset identity
-- export allowance + blockers
-- counts by status
-- finding IDs (document-wide vs section)
-- generation metadata + schema version
+- report type / schema version,
+- dataset source,
+- allow/block state + blocker reasons,
+- counts by status,
+- finding IDs and split sets (document-wide vs section).
 
-### 9.3 PDF generation
+### 9.3 Report text and PDF builder
 
-- custom low-level PDF writer (no heavy external PDF generation dependency at output stage)
-- line wrapping, bullet support, safe character normalization
-- user-safe text sanitization that strips internal pipeline terms
+Report generation pipeline:
 
----
+- loads canonical publishable findings,
+- applies user-safe text sanitization (internal token stripping),
+- synthesizes narrative/report sections,
+- writes PDF using custom lightweight object/stream writer.
 
-## 10) Frontend behavior (`apps/frontend/src`)
+PDF engine characteristics:
 
-Routes:
-
-- `/` upload
-- `/sections` section review + start audit
-- `/findings` findings/review/analysis workspace
-- `/report` report center
-
-API layer (`src/lib/api.ts`) uses ingestion + orchestration base URLs and XHR upload progress reporting.
-
-Presentation layer (`src/lib/presentation.ts`) performs normalization/sanitization and parity-style checks used by UI contract testing.
+- explicit page layout/margins,
+- wrapped text estimation,
+- bullet handling,
+- safe character replacement,
+- multipage object/xref assembly.
 
 ---
 
-## 11) Observability
+## 10) Frontend architecture (`apps/frontend/src`)
 
-All backend services expose `/metrics`.
+### 10.1 Route map (`app/App.tsx`)
 
-Implemented orchestration counters/histograms include, among others:
+- `/` → upload
+- `/sections` → section review + audit start
+- `/findings` → findings workspace
+- `/report` → report center
 
-- retrieval retries
-- evidence gate failures
-- citation validation failures
-- LLM latency
-- end-to-end audit duration
-- section counters (total/auditable/filtered)
-- publication counters (local/systemic/not-assessable)
+### 10.2 API layer (`lib/api.ts`)
 
-Prometheus and Grafana are provisioned in `infra/` with a preloaded dashboard.
+- ingestion + orchestration base URLs via env (`VITE_INGESTION_URL`, `VITE_ORCHESTRATION_URL`)
+- upload performed with XHR for progress events
+- wrapper functions for all major orchestration endpoints and report download URL helper
+
+### 10.3 Presentation normalization (`lib/presentation.ts`)
+
+Frontend applies aggressive normalization/sanitization to:
+
+- issue labels/keys,
+- evidence text rendering,
+- status/severity mapping,
+- internal token suppression,
+- dataset parity checks used by contract/presentation tests.
+
+### 10.4 UI feature areas
+
+- upload workflow (`features/upload`)
+- sections review/start audit (`features/sections`)
+- findings/review/analysis views (`features/findings`)
+- report create/status/download (`features/report`)
 
 ---
 
-## 12) Status semantics in code
+## 11) Infrastructure and observability
 
-### Audit status values observed in code paths
+### 11.1 Metrics endpoints
+
+- all three backend services expose `/metrics`.
+
+### 11.2 Ingestion metrics
+
+- upload count,
+- parse success/failure,
+- parse duration.
+
+### 11.3 Knowledge metrics
+
+- query count,
+- retrieval latency,
+- results returned,
+- chunk lookups.
+
+### 11.4 Orchestration metrics (selected)
+
+- `retrieval_retry_total`
+- `evidence_gate_failure_total`
+- `citation_validation_failure_total`
+- `llm_inference_latency_seconds`
+- `audit_duration_seconds`
+- section counters (`audit_sections_total`, `audit_sections_auditable_total`, `audit_sections_filtered_total`)
+- pass counters (`issue_spotting_calls_total`, `applicability_calls_total`, `legal_qualification_calls_total`, etc.)
+- publication counters (`publishable_findings_total`, `local_findings_published_total`, `systemic_findings_published_total`, `not_assessable_findings_published_total`)
+
+### 11.5 Dashboard stack
+
+- Prometheus scrape config in `infra/prometheus/prometheus.yml`
+- Grafana datasource + dashboard provisioning in `infra/grafana/*`
+
+---
+
+## 12) Tests and policy contracts
+
+Repository tests include strong policy-contract style coverage, especially in orchestration:
+
+- dataset consistency/parity checks,
+- publication-guard behavior,
+- report/export contract invariants,
+- route projection safety,
+- evidence/ledger consistency assertions,
+- backend pipeline invariant tests.
+
+Notable test files include:
+
+- `apps/orchestration-service/tests/test_backend_pipeline_invariants.py`
+- `apps/orchestration-service/tests/test_published_dataset_consistency.py`
+- `apps/orchestration-service/tests/test_final_exported_findings_contract.py`
+- `apps/orchestration-service/tests/test_routes_publication_guards.py`
+- plus service-level parser/client/report/llm tests
+
+Ingestion and frontend include targeted parser/upload and presentation contract tests.
+
+---
+
+## 13) Status and publication semantics (observed values)
+
+### 13.1 Audit status values
 
 - `pending`
 - `running`
@@ -313,7 +667,7 @@ Prometheus and Grafana are provisioned in `infra/` with a preloaded dashboard.
 - `review_required`
 - `audit_incomplete`
 
-### Finding status values observed
+### 13.2 Finding status values
 
 - `compliant`
 - `partial`
@@ -321,39 +675,85 @@ Prometheus and Grafana are provisioned in `infra/` with a preloaded dashboard.
 - `needs review`
 - `not applicable`
 
-### Publication states
+### 13.3 Publication state values
 
 - `publishable`
 - `blocked`
 - `internal_only`
 
-### Artifact roles (representative)
+### 13.4 Artifact role values (representative)
 
 - `publishable_finding`
 - `support_only`
-- analysis-oriented candidate roles (`analysis_candidate`, etc.)
+- analysis-oriented candidate roles (e.g., `analysis_candidate`)
 
 ---
 
-## 13) Boundaries and known constraints
+## 14) Scripts and data pipeline utilities
 
-- Designed for GDPR transparency-style audits; not a general legal engine.
-- Clean text-extractable PDFs are assumed; OCR/scanned-PDF workflow is not implemented.
-- LLM output is advisory inside a deterministic gating pipeline.
-- Publication path is conservative by design and can suppress borderline findings.
+### 14.1 Data preparation scripts
+
+- `scripts/ingest_gdpr.py` for corpus chunk preparation.
+- `scripts/validation/knowledge_gate_day3_5.py` for validation gates.
+- `scripts/benchmark.py` for benchmark comparisons.
+
+### 14.2 Corpus assets
+
+- raw PDFs under `data/raw/`
+- processed chunk corpus under `data/processed/gdpr_chunks.jsonl`
+
+Operationally, the knowledge service startup behavior assumes this processed corpus is present and readable.
 
 ---
 
-## 14) Summary conclusion
+## 15) Practical end-to-end chronology (single audit run)
 
-CompliTrace is implemented as a multi-service compliance pipeline with:
+1. User uploads PDF in frontend.
+2. Ingestion stores file, parses sections, persists document + sections.
+3. Frontend displays sections and triggers `POST /audits`.
+4. Orchestration starts audit, stamps run metadata.
+5. Global scope/mode/posture/obligation precomputation executes.
+6. For each section:
+   - applicability filtering,
+   - issue spotting,
+   - legal qualification,
+   - retrieval/rerank,
+   - evidence sufficiency gate,
+   - optional LLM classify,
+   - deterministic validation/override,
+   - finding + citation persist.
+7. Post-loop synthesis/completeness/disposition map execute.
+8. Final publication validator and review/publish invariants run.
+9. Evidence records + analysis snapshots materialize.
+10. Audit enters terminal state.
+11. `/findings` provides published projection (unless review-required gate).
+12. `/review` and `/review/grouped` provide reviewer triage surfaces.
+13. Report endpoint generates PDF from canonical publishable dataset.
 
-- deterministic ingestion + structured sectioning,
-- retrieval-grounded legal evidence lookup,
-- constrained LLM classification,
-- deterministic legal/publication controls,
+---
+
+## 16) Constraints and caveats
+
+1. Purpose-built for GDPR transparency audit workflows; not general legal reasoning.
+2. Clean text-extractable PDFs expected; no OCR pipeline for scanned/image docs.
+3. LLM output is constrained and heavily post-gated; deterministic controls are primary decision layer.
+4. Publication model is intentionally conservative and may suppress borderline findings into internal/review tracks.
+5. Operational quality depends on corpus indexing health and external LLM provider availability/limits.
+
+---
+
+## 17) Final conclusion
+
+CompliTrace is best described as a **deterministic compliance pipeline with bounded model assistance**, not as a free-form assistant.
+
+Its architecture combines:
+
+- structured document ingestion,
+- retrieval-backed legal evidence,
+- constrained model proposal,
+- deterministic legal/publication gates,
 - explicit review and export contracts,
-- user-facing sanitization barriers,
-- metrics-first observability.
+- strong projection sanitization,
+- invariant-oriented tests and observability.
 
-This is materially different from a generic chatbot architecture.
+That design choice is visible in every major subsystem: generation is allowed, but publication is earned through deterministic controls.
