@@ -50,7 +50,7 @@ jobs:
           pip install -r apps/ingestion-service/requirements.txt
           pip install -r apps/knowledge-service/requirements.txt
           pip install -r apps/orchestration-service/requirements.txt
-          pip install ruff pytest pytest-asyncio httpx pytest-cov
+          pip install ruff==0.15.12 pytest pytest-asyncio httpx pytest-cov
 
       - name: Lint Python code
         run: |
