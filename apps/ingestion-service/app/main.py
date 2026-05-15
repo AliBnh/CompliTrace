@@ -2,15 +2,15 @@ import json
 import logging
 import sys
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
+
 from app.api.routes import router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
 from app.models import document  # noqa: F401
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import Response
-
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 

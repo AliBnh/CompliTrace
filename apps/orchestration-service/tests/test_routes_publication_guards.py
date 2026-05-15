@@ -3,6 +3,10 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.api.routes import (
     _DUTY_LABELS,
     _NOTICE_WIDE_ISSUE_KEYS,
@@ -28,9 +32,6 @@ from app.api.routes import (
 from app.db.base import Base
 from app.models.audit import Audit, EvidenceRecord, Finding, FindingCitation
 from app.schemas.audit import CitationOut, PublishedFindingOut
-from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 
 @pytest.fixture()

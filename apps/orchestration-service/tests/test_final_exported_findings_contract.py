@@ -2,6 +2,9 @@ import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.core.config import settings
 from app.db.base import Base
 from app.models.audit import Audit, Finding, FindingCitation
@@ -11,8 +14,6 @@ from app.services.reports import (
     final_exported_findings,
     generate_report_text,
 )
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 
 def _session() -> Session:

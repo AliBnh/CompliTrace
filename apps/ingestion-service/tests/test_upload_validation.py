@@ -7,8 +7,9 @@ os.environ["UPLOADS_DIR"] = "./ingestion_test_uploads"
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.main import app
 from fastapi.testclient import TestClient
+
+from app.main import app
 
 client = TestClient(app)
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.api.routes import get_findings
 from app.db.base import Base
 from app.models.audit import Audit, Finding
 from app.services.audit_runner import _enforce_review_publish_invariant, _finding_issue_id
 from app.services.reports import build_export_contract, final_findings_dataset, generate_report_text
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 
 def _session() -> Session:

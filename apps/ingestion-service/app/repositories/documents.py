@@ -1,6 +1,7 @@
+from sqlalchemy.orm import Session
+
 from app.models.document import Document, Section
 from app.services.parser import ParsedSection
-from sqlalchemy.orm import Session
 
 
 def create_document_with_sections(

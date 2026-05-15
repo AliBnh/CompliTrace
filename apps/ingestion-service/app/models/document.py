@@ -1,9 +1,10 @@
 import uuid
 from datetime import datetime
 
-from app.db.base import Base
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
 
 
 class Document(Base):

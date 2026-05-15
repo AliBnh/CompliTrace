@@ -17,6 +17,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.api.routes import get_findings
 from app.core.config import settings
 from app.db.base import Base
@@ -27,8 +30,6 @@ from app.services.reports import (
     canonical_published_findings,
     generate_report_text,
 )
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 # ---------------------------------------------------------------------------
 # Helpers

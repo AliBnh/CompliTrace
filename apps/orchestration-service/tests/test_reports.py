@@ -5,6 +5,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.core.config import settings
 from app.db.base import Base
 from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, Finding, FindingCitation
@@ -16,8 +19,6 @@ from app.services.reports import (
     build_export_contract,
     generate_report_text,
 )
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 
 def test_generate_report_writes_valid_pdf(tmp_path: Path):

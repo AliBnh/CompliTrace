@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.api.routes import get_findings
 from app.db.base import Base
 from app.models.audit import Audit, Finding, FindingCitation
 from app.services.reports import build_export_contract, canonical_published_findings, final_findings_dataset
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 
 def _db() -> Session:

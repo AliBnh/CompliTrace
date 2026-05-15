@@ -3,6 +3,9 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.db.base import Base
 from app.models.audit import Audit, AuditAnalysisItem, EvidenceRecord, Finding, FindingCitation
 from app.services.audit_runner import (
@@ -75,8 +78,6 @@ from app.services.audit_runner import (
     _violates_forbidden_article_matrix,
 )
 from app.services.clients import LlmCitation, LlmFinding, RetrievalChunk, SectionData
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 
 def test_not_applicable_admin_section():
@@ -3341,10 +3342,11 @@ def test_add_systemic_finding_citations_uses_legal_text(tmp_path):
     """_add_systemic_finding_citations must produce GDPR rule text excerpts, not policy/conclusion text."""
     import uuid
 
-    from app.models.audit import Audit, Base, Finding, FindingCitation
-    from app.services.audit_runner import _add_systemic_finding_citations
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+
+    from app.models.audit import Audit, Base, Finding, FindingCitation
+    from app.services.audit_runner import _add_systemic_finding_citations
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
