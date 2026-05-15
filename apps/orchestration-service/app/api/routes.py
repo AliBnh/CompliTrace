@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from prometheus_client import Counter, Histogram
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
@@ -52,7 +53,6 @@ from app.services.reports import (
     final_exported_findings,
     generate_report_text,
 )
-from prometheus_client import Counter, Histogram
 
 router = APIRouter()
 GENERIC_NOT_ASSESSABLE_GAP = "Not assessable from provided excerpt; additional documentary context is required."

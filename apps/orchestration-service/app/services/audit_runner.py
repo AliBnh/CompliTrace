@@ -8,13 +8,13 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import TypedDict
 
+from prometheus_client import Counter, Histogram
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, EvidenceRecord, Finding, FindingCitation
 from app.services.clients import IngestionClient, KnowledgeClient, LlmCitation, LlmFinding, RetrievalChunk, SectionData
 from app.services.llm import run_llm_classification
-from prometheus_client import Counter, Histogram
 
 retrieval_retry_total = Counter("retrieval_retry_total", "Retries triggered by frozen threshold")
 evidence_gate_failure_total = Counter("evidence_gate_failure_total", "Sections failing evidence gate")

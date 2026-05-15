@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from prometheus_client import Counter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -6,7 +7,6 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import AuthResponse, UserLoginRequest, UserOut, UserRegisterRequest, VerifyResponse
 from app.services.auth import create_access_token, decode_access_token, hash_password, verify_password
-from prometheus_client import Counter
 
 router = APIRouter()
 

@@ -4,6 +4,7 @@ import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
 from app.api.routes import router
@@ -11,7 +12,6 @@ from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
 from app.models import document  # noqa: F401
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 
 class _JsonFormatter(logging.Formatter):

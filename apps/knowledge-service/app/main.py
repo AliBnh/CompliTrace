@@ -8,12 +8,11 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastembed import TextEmbedding
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from starlette.responses import Response
-
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 
 class _JsonFormatter(logging.Formatter):

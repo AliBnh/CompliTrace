@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from prometheus_client import Counter, Histogram
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -10,7 +11,6 @@ from app.models.document import Document, Section
 from app.repositories.documents import create_document_with_sections
 from app.schemas.document import DocumentOut, SectionOut
 from app.services.parser import parse_pdf_into_sections
-from prometheus_client import Counter, Histogram
 
 router = APIRouter()
 

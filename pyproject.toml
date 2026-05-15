@@ -11,6 +11,8 @@ ignore = ["E501", "F401", "B008", "N806", "N817", "SIM102", "SIM103", "SIM105", 
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+known-third-party = ["prometheus_client"]
+detect-same-package = false
 
 [tool.ruff.format]
 quote-style = "double"
