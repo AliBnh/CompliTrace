@@ -1,0 +1,8236 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+from collections.abc import Iterable
+from datetime import datetime
+from typing import TypedDict
+
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.models.audit import AnalysisCitation, Audit, AuditAnalysisItem, EvidenceRecord, Finding, FindingCitation
+from app.services.clients import IngestionClient, KnowledgeClient, LlmCitation, LlmFinding, RetrievalChunk, SectionData
+from app.services.llm import run_llm_classification
+from prometheus_client import Counter, Histogram
+
+retrieval_retry_total = Counter("retrieval_retry_total", "Retries triggered by frozen threshold")
+evidence_gate_failure_total = Counter("evidence_gate_failure_total", "Sections failing evidence gate")
+citation_validation_failure_total = Counter("citation_validation_failure_total", "Rejected citations")
+llm_inference_latency_seconds = Histogram("llm_inference_latency_seconds", "LLM inference latency")
+audit_duration_seconds = Histogram("audit_duration_seconds", "End-to-end audit duration")
+findings_by_status_total = Counter("findings_by_status_total", "Findings persisted by status", ["status"])
+audit_sections_total = Counter("audit_sections_total", "Total sections processed by audit")
+audit_sections_auditable_total = Counter("audit_sections_auditable_total", "Auditable sections processed by audit")
+audit_sections_filtered_total = Counter("audit_sections_filtered_total", "Sections filtered before substantive audit")
+issue_spotting_calls_total = Counter("issue_spotting_calls_total", "Issue spotting agent calls")
+applicability_calls_total = Counter("applicability_calls_total", "Applicability agent calls")
+legal_qualification_calls_total = Counter("legal_qualification_calls_total", "Legal qualification calls")
+profiling_pass_total = Counter("profiling_pass_total", "Profiling pass triggered")
+transfer_pass_total = Counter("transfer_pass_total", "Transfer pass triggered")
+reviewer_pass_total = Counter("reviewer_pass_total", "Reviewer pass runs")
+publishable_findings_total = Counter("publishable_findings_total", "Publishable findings generated")
+contradiction_fail_total = Counter("contradiction_fail_total", "Findings rejected by contradiction controls")
+local_findings_published_total = Counter("local_findings_published_total", "Published local findings")
+systemic_findings_published_total = Counter("systemic_findings_published_total", "Published systemic findings")
+not_assessable_findings_published_total = Counter(
+    "not_assessable_findings_published_total", "Published not-assessable findings"
+)
+
+
+def compute_compliance_score(review_blocks: list[dict]) -> int:
+    """Compute compliance score (0-100) from review_block dicts.
+
+    Only applicable duties (triggered != False) count in both numerator and
+    denominator — not-applicable duties are excluded from both so they neither
+    help nor hurt the score.
+    Score = round(satisfied_applicable / total_applicable * 100), or 100 when
+    there are no applicable duties.
+    """
+    blocks = [b for b in review_blocks if b.get("item_kind", "review_block") == "review_block"]
+    applicable = [b for b in blocks if b.get("triggered") is not False]
+    if not applicable:
+        return 100
+    compliant = sum(1 for b in applicable if b.get("final_disposition") == "satisfied")
+    return round(compliant / len(applicable) * 100)
+
+
+def _review_blocks_from_disposition_map(disposition_map: dict) -> list[dict]:
+    """Build review_block dicts from the final disposition map.
+
+    Mirrors the logic in routes._build_review_blocks so the score is derived
+    from exactly the same data the review endpoint surfaces to the UI.
+    """
+    blocks: list[dict] = []
+    core_duties = [
+        "controller_identity_contact",
+        "legal_basis",
+        "retention",
+        "rights_notice",
+        "complaint_right",
+    ]
+    for duty in core_duties:
+        item = disposition_map.get(duty, {})
+        blocks.append(
+            {
+                "item_kind": "review_block",
+                "triggered": bool(item.get("triggered", True)),
+                "final_disposition": item.get("status"),
+            }
+        )
+    specialist_duties = [
+        "transfer",
+        "profiling",
+        "role_ambiguity",
+        "article14_source",
+        "recipients",
+        "special_category",
+        "dpo_contact",
+        "purpose_mapping",
+    ]
+    for duty in specialist_duties:
+        item = disposition_map.get(duty, {})
+        triggered = bool(item.get("triggered", item.get("status") != "satisfied"))
+        blocks.append(
+            {
+                "item_kind": "review_block",
+                "triggered": triggered,
+                "final_disposition": item.get("status"),
+            }
+        )
+    return blocks
+
+
+ADMIN_PATTERNS = {
+    "scope",
+    "purpose of this document",
+    "definitions",
+    "terms",
+    "introduction",
+    "overview",
+    "document control",
+    "version history",
+    "amendment history",
+    "references",
+    "contact us",
+    "contacts",
+}
+
+PROCESSING_SIGNALS = {
+    "personal data",
+    "data subject",
+    "process",
+    "collect",
+    "store",
+    "retain",
+    "share",
+    "transfer",
+    "consent",
+    "sensitive data",
+    "recipient",
+    "controller",
+    "processor",
+}
+
+OBLIGATION_WORDS = {"shall", "must", "required", "obligation", "necessary", "appropriate"}
+
+DOCUMENT_MODE_HINTS: dict[str, set[str]] = {
+    "privacy_notice": {
+        "privacy notice",
+        "privacy policy",
+        "data subject rights",
+        "legal basis",
+        "recipients",
+        "international transfers",
+    },
+    "internal_policy": {
+        "policy purpose",
+        "roles and responsibilities",
+        "incident response",
+        "security controls",
+        "retention schedule",
+    },
+}
+
+MODE_ARTICLE_HINTS: dict[str, str] = {
+    "privacy_notice": "prioritize GDPR Articles 12, 13, 14, and Article 5 principles",
+    "internal_policy": "prioritize GDPR Articles 5, 24, 25, 30, 32 and accountability obligations",
+}
+
+PRIVACY_NOTICE_PREFERRED_ARTICLES = {5, 6, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
+PRIVACY_NOTICE_DISCOURAGED_ARTICLES = {30, 88}
+INTERNAL_POLICY_PREFERRED_ARTICLES = {5, 24, 25, 30, 32, 35}
+
+EMPLOYMENT_SIGNALS = {"employee", "employment", "worker", "staff", "hr", "human resources"}
+ROPA_SIGNALS = {"record of processing", "ropa", "processing register", "register of processing"}
+THIRD_COUNTRY_TRANSFER_SIGNALS = {
+    "third country",
+    "outside the eea",
+    "outside eea",
+    "international transfer",
+    "cross-border",
+    "transfer",
+}
+
+NOTICE_REQUIREMENT_SIGNALS: dict[str, set[str]] = {
+    "controller_contact": {"controller", "contact", "email", "address"},
+    "legal_basis": {"legal basis", "lawful basis", "consent", "contract", "legitimate interest", "legal obligation"},
+    "rights": {
+        "right to access",
+        "rectification",
+        "erasure",
+        "restriction",
+        "portability",
+        "object",
+        "data subject rights",
+    },
+    "retention": {"retention", "retain", "kept for", "storage period"},
+    "complaint": {"complaint", "supervisory authority", "data protection authority"},
+}
+CORE_NOTICE_CLAIMS = {"controller_contact", "legal_basis", "retention", "rights", "complaint", "transfer"}
+CORE_NOTICE_SYSTEMIC_ISSUES = {
+    "missing_controller_identity",
+    "missing_legal_basis",
+    "missing_retention_period",
+    "missing_rights_notice",
+    "missing_complaint_right",
+}
+
+SYSTEMIC_ANCHOR_MAP: dict[str, dict[str, list[str]]] = {
+    "missing_controller_identity": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_legal_basis": {
+        "primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_retention_period": {
+        "primary": ["GDPR Art. 13(2)(a)", "GDPR Art. 14(2)(a)"],
+        "secondary": ["GDPR Art. 5(1)(e)"],
+    },
+    "missing_rights_notice": {
+        "primary": ["GDPR Art. 13(2)(b)-(d)", "GDPR Art. 14(2)(c)-(e)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_complaint_right": {
+        "primary": ["GDPR Art. 13(2)(d)", "GDPR Art. 14(2)(e)"],
+        "secondary": ["GDPR Art. 77"],
+    },
+    "missing_controller_contact": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "missing_transfer_notice": {
+        "primary": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)"],
+        "secondary": ["GDPR Art. 44", "GDPR Art. 45", "GDPR Art. 46"],
+    },
+    "profiling_disclosure_gap": {
+        "primary": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)"],
+        "secondary": ["GDPR Art. 22"],
+    },
+    "recipients_disclosure_gap": {
+        "primary": ["GDPR Art. 13(1)(e)", "GDPR Art. 14(1)(e)"],
+        "secondary": ["GDPR Art. 12(1)"],
+    },
+    "purpose_specificity_gap": {
+        "primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"],
+        "secondary": ["GDPR Art. 5(1)(b)"],
+    },
+    "controller_processor_role_ambiguity": {
+        "primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"],
+        "secondary": ["GDPR Art. 5(1)(a)"],
+    },
+}
+
+# ── OBLIGATION_TAXONOMY ────────────────────────────────────────────────────────
+# Single canonical source of truth for every GDPR obligation the system tracks.
+# All functions that need severity, anchors, gap text, family, or duty key MUST
+# read from here instead of maintaining separate local dicts.
+# ──────────────────────────────────────────────────────────────────────────────
+OBLIGATION_TAXONOMY: dict[str, dict] = {
+    "missing_controller_identity": {
+        "family": "controller_identity_contact",
+        "duty_key": "controller_identity_contact",
+        "obligation_key": "controller_identity_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not clearly identify the controller legal entity and contact route.",
+    },
+    "missing_controller_contact": {
+        "family": "controller_identity_contact",
+        "duty_key": "controller_identity_contact",
+        "obligation_key": "controller_contact_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not provide an actionable privacy contact route (email, webform, or postal address).",
+    },
+    "missing_legal_basis": {
+        "family": "legal_basis",
+        "duty_key": "legal_basis_notice",
+        "obligation_key": "legal_basis_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 6}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not explain the lawful basis for each processing purpose.",
+    },
+    "missing_retention_period": {
+        "family": "retention",
+        "duty_key": "retention_notice",
+        "obligation_key": "retention_present",
+        "severity": "high",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+        "anchors": {"primary": ["GDPR Art. 13(2)(a)", "GDPR Art. 14(2)(a)"], "secondary": ["GDPR Art. 5(1)(e)"]},
+        "gap_note": "The notice does not provide retention periods or objective retention criteria by data category.",
+    },
+    "missing_rights_notice": {
+        "family": "rights_notice",
+        "duty_key": "rights_notice",
+        "obligation_key": "rights_present",
+        "severity": "medium",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 12, 15, 16, 17, 18, 19, 20, 21, 22}, "support": {5}, "disallowed": set()},
+        "anchors": {"primary": ["GDPR Art. 13(2)(b)-(d)", "GDPR Art. 14(2)(c)-(e)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not describe data subject rights, including access, erasure, restriction, objection, and portability.",
+    },
+    "missing_complaint_right": {
+        "family": "complaint_right",
+        "duty_key": "complaint_right_notice",
+        "obligation_key": "complaint_present",
+        "severity": "medium",
+        "category": "core_notice",
+        "article_ints": {"primary": {13, 14, 77}, "support": {12}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(2)(d)", "GDPR Art. 14(2)(e)"], "secondary": ["GDPR Art. 77"]},
+        "gap_note": "The notice does not explain the right to lodge a complaint with a supervisory authority.",
+    },
+    "missing_transfer_notice": {
+        "family": "transfer",
+        "duty_key": "transfers_notice",
+        "obligation_key": "transfer_present",
+        "severity": "high",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14, 44, 45, 46}, "support": {47, 49}, "disallowed": {15, 21}},
+        "anchors": {
+            "primary": ["GDPR Art. 13(1)(f)", "GDPR Art. 14(1)(f)"],
+            "secondary": ["GDPR Art. 44", "GDPR Art. 45", "GDPR Art. 46"],
+        },
+        "gap_note": "The notice does not identify international transfer mechanisms or safeguards for data sent outside the EEA.",
+    },
+    "profiling_disclosure_gap": {
+        "family": "profiling",
+        "duty_key": "profiling_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14}, "support": {22}, "disallowed": {15}},
+        "anchors": {"primary": ["GDPR Art. 13(2)(f)", "GDPR Art. 14(2)(g)"], "secondary": ["GDPR Art. 22"]},
+        "gap_note": "The notice does not explain the logic, significance, or envisaged consequences of profiling or automated decision-making.",
+    },
+    "recipients_disclosure_gap": {
+        "family": "recipients",
+        "duty_key": "recipients_notice",
+        "obligation_key": "recipients_present",
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(e)", "GDPR Art. 14(1)(e)"], "secondary": ["GDPR Art. 12(1)"]},
+        "gap_note": "The notice does not disclose categories of recipients or the main contexts in which personal data is shared.",
+    },
+    "purpose_specificity_gap": {
+        "family": "purpose_mapping",
+        "duty_key": "purposes_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14, 5}, "support": {12, 6}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(c)", "GDPR Art. 14(1)(c)"], "secondary": ["GDPR Art. 5(1)(b)"]},
+        "gap_note": "The notice does not clearly map each data category to specific processing purposes.",
+    },
+    "special_category_basis_unclear": {
+        "family": "special_category",
+        "duty_key": None,
+        "obligation_key": None,
+        "severity": "high",
+        "category": "conditional",
+        "article_ints": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
+        "anchors": {"primary": ["GDPR Art. 9(2)", "GDPR Art. 13(1)(c)"], "secondary": ["GDPR Art. 6"]},
+        "gap_note": "The notice does not explain the Article 9(2) condition under which special-category data is processed.",
+    },
+    "controller_processor_role_ambiguity": {
+        "family": "role_ambiguity",
+        "duty_key": "role_allocation_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "specialist",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 13(1)(a)", "GDPR Art. 14(1)(a)"], "secondary": ["GDPR Art. 5(1)(a)"]},
+        "gap_note": "The notice does not clearly allocate controller and processor roles for described processing activities.",
+    },
+    "article_14_indirect_collection_gap": {
+        "family": "article14_source",
+        "duty_key": "article14_source_notice",
+        "obligation_key": None,
+        "severity": "high",
+        "category": "conditional",
+        "article_ints": {"primary": {14}, "support": {13}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 14(2)(f)", "GDPR Art. 14(3)"], "secondary": ["GDPR Art. 14(1)(d)"]},
+        "gap_note": "The notice does not identify source categories for data obtained from third parties or comply with Article 14 timing requirements.",
+    },
+    "dpo_contact_gap": {
+        "family": "dpo_contact",
+        "duty_key": "dpo_contact_notice",
+        "obligation_key": None,
+        "severity": "medium",
+        "category": "conditional",
+        "article_ints": {"primary": {13, 14}, "support": {12}, "disallowed": set()},
+        "anchors": {"primary": ["GDPR Art. 13(1)(b)", "GDPR Art. 14(1)(b)"], "secondary": ["GDPR Art. 37-39"]},
+        "gap_note": "The notice does not provide the DPO contact details required under Article 13(1)(b)/14(1)(b).",
+    },
+    "invalid_consent_or_legal_basis": {
+        "family": "invalid_consent",
+        "duty_key": "invalid_consent_notice",
+        "obligation_key": None,
+        "severity": "high",
+        "category": "specialist",
+        "article_ints": {"primary": {6, 7}, "support": {13, 14, 4}, "disallowed": {21, 22, 44}},
+        "anchors": {
+            "primary": ["GDPR Art. 6(1)(a)", "GDPR Art. 7(1)"],
+            "secondary": ["GDPR Art. 4(11)", "GDPR Art. 13(1)(c)"],
+        },
+        "gap_note": "The notice relies on invalid consent mechanisms — consent inferred from use, implied by continued usage, or bundled with other interactions — which do not satisfy GDPR Article 7 requirements for freely given, specific, informed, and unambiguous indication.",
+    },
+    "cookies_tracking_consent_gap": {
+        "family": "cookies_tracking",
+        "duty_key": "cookies_consent_notice",
+        "obligation_key": None,
+        "severity": "high",
+        "category": "specialist",
+        "article_ints": {"primary": {6, 13, 14}, "support": {5}, "disallowed": {21, 44}},
+        "anchors": {"primary": ["GDPR Art. 6(1)(a)", "GDPR Art. 13(1)(c)"], "secondary": ["GDPR Art. 5(1)(a)"]},
+        "gap_note": "The notice does not describe the lawful basis or consent controls for tracking technologies (cookies, SDKs, fingerprinting, cross-device identifiers).",
+    },
+    "article14_source_transparency_gap": {
+        "family": "article14_source",
+        "duty_key": "article14_source_notice",
+        "obligation_key": None,
+        "severity": "high",
+        "category": "conditional",
+        "article_ints": {"primary": {14}, "support": {13}, "disallowed": {21, 22}},
+        "anchors": {"primary": ["GDPR Art. 14(2)(f)", "GDPR Art. 14(3)"], "secondary": ["GDPR Art. 14(1)(d)"]},
+        "gap_note": "The notice does not identify the source categories of personal data obtained from third parties (marketing lists, data aggregators, public records, demographic providers).",
+    },
+}
+# Aliases — canonical name is the longer form; keep shortcuts for candidate-spotting compatibility
+OBLIGATION_TAXONOMY["missing_retention"] = OBLIGATION_TAXONOMY["missing_retention_period"]
+OBLIGATION_TAXONOMY["missing_rights_information"] = OBLIGATION_TAXONOMY["missing_rights_notice"]
+OBLIGATION_TAXONOMY["missing_transfer_disclosure"] = OBLIGATION_TAXONOMY["missing_transfer_notice"]
+OBLIGATION_TAXONOMY["article_14_indirect_collection_gap"]["_alt_key"] = "article14_source_transparency_gap"
+
+
+def _obligation_severity(issue: str) -> str:
+    """Canonical severity for an obligation issue. Returns 'medium' for unknowns."""
+    return str(OBLIGATION_TAXONOMY.get(issue, {}).get("severity") or "medium")
+
+
+def _obligation_anchors(issue: str) -> dict[str, list[str]]:
+    """Canonical GDPR anchors (primary + secondary) for an obligation issue."""
+    return dict(OBLIGATION_TAXONOMY.get(issue, {}).get("anchors") or {"primary": [], "secondary": []})
+
+
+def _obligation_gap_note(issue: str) -> str | None:
+    """Canonical publishable gap note text for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("gap_note")
+
+
+def _obligation_family(issue: str) -> str | None:
+    """Canonical family name for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("family")
+
+
+def _obligation_duty_key(issue: str) -> str | None:
+    """Duty-registry / duty_validation key for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("duty_key")
+
+
+def _obligation_key(issue: str) -> str | None:
+    """obligation_map presence key (e.g. 'legal_basis_present') for an obligation issue."""
+    return OBLIGATION_TAXONOMY.get(issue, {}).get("obligation_key")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+SYSTEMIC_REQUIRED_OBLIGATION_KEYS: dict[str, str] = {
+    "missing_controller_identity": "controller_identity_present",
+    "missing_controller_contact": "controller_contact_present",
+    "missing_legal_basis": "legal_basis_present",
+    "missing_retention_period": "retention_present",
+    "missing_rights_notice": "rights_present",
+    "missing_complaint_right": "complaint_present",
+}
+
+SYSTEMIC_GAP_NOTE_MAP: dict[str, str] = {
+    "missing_legal_basis": "The notice does not explain the lawful basis for each processing purpose.",
+    "missing_retention_period": "The notice does not provide retention periods or objective retention criteria by data category.",
+    "missing_rights_notice": "The notice does not describe data subject rights, including access, erasure, restriction, objection, and portability.",
+    "missing_complaint_right": "The notice does not explain the right to lodge a complaint with a supervisory authority.",
+    "missing_controller_identity": "The notice does not clearly identify the controller legal entity and contact route.",
+    "missing_controller_contact": "The notice does not provide an actionable privacy contact route (email, webform, or postal address).",
+    "missing_transfer_notice": "The notice does not identify international transfer mechanisms or safeguards for data sent outside the EEA.",
+    "profiling_disclosure_gap": "The notice does not explain the logic, significance, or envisaged consequences of profiling or automated decision-making.",
+    "recipients_disclosure_gap": "The notice does not disclose categories of recipients or the main contexts in which personal data is shared.",
+    "purpose_specificity_gap": "The notice does not clearly map each data category to specific processing purposes.",
+    "invalid_consent_or_legal_basis": "The notice relies on invalid consent mechanisms — consent inferred from use, implied by continued usage, or bundled with other interactions — which do not satisfy GDPR Article 7 requirements.",
+    "cookies_tracking_consent_gap": "The notice does not describe the lawful basis or consent controls for tracking technologies (cookies, SDKs, fingerprinting, cross-device identifiers).",
+    "article14_source_transparency_gap": "The notice does not identify the source categories of personal data obtained from third parties (marketing lists, data aggregators, public records, demographic providers).",
+}
+
+SYSTEMIC_SECTION_SIGNALS: dict[str, set[str]] = {
+    "missing_controller_identity": {"controller", "company", "contact", "privacy notice", "personal data"},
+    "missing_controller_contact": {"contact", "email", "privacy@", "webform", "address", "data subject"},
+    "missing_legal_basis": {"purpose", "process", "collect", "use", "personal data"},
+    "missing_retention_period": {"retain", "retention", "storage", "personal data", "process"},
+    "missing_rights_notice": {"right", "data subject", "access", "rectification", "erasure", "process"},
+    "missing_complaint_right": {"complaint", "supervisory authority", "rights", "personal data", "privacy"},
+    "missing_transfer_notice": {"transfer", "third country", "international", "recipient"},
+    "profiling_disclosure_gap": {"profil", "automated", "decision", "score", "segmentation"},
+    "invalid_consent_or_legal_basis": {"consent", "legal basis", "lawful basis", "use of", "agree", "process"},
+    "cookies_tracking_consent_gap": {"cookie", "tracking", "analytics", "advertising", "retarget", "pixel"},
+    "article14_source_transparency_gap": {"source", "third party", "data broker", "marketing", "public records"},
+}
+
+CORE_DUTY_TO_ISSUE: dict[str, str] = {
+    "controller_identity": "missing_controller_identity",
+    "controller_contact": "missing_controller_contact",
+    "legal_basis": "missing_legal_basis",
+    "retention": "missing_retention_period",
+    "rights": "missing_rights_notice",
+    "complaint_right": "missing_complaint_right",
+}
+
+CORE_DUTY_OBLIGATION_KEYS: dict[str, str] = {
+    "controller_identity": "controller_identity_present",
+    "controller_contact": "controller_contact_present",
+    "legal_basis": "legal_basis_present",
+    "retention": "retention_present",
+    "rights": "rights_present",
+    "complaint_right": "complaint_present",
+}
+
+# Maps candidate_issue_type to obligation_map presence key for early compliance pruning.
+_ISSUE_TO_OBLIGATION_KEY: dict[str, str] = {
+    "missing_legal_basis": "legal_basis_present",
+    "missing_retention": "retention_present",
+    "missing_retention_period": "retention_present",
+    "missing_rights_information": "rights_present",
+    "missing_rights_notice": "rights_present",
+    "missing_complaint_right": "complaint_present",
+    "missing_controller_identity": "controller_identity_present",
+    "missing_controller_contact": "controller_contact_present",
+    "missing_transfer_notice": "transfer_present",
+    "recipients_disclosure_gap": "recipients_present",
+}
+
+SPECIALIST_TRIGGER_RULES: dict[str, tuple[set[str], str]] = {
+    "missing_transfer_notice": (THIRD_COUNTRY_TRANSFER_SIGNALS, "triggered_transfer_family"),
+    "profiling_disclosure_gap": (
+        {"profil", "automated decision", "scoring", "segmentation"},
+        "triggered_profiling_family",
+    ),
+    "article_14_indirect_collection_gap": (
+        {
+            "from third parties",
+            "obtained from third parties",
+            "received from third parties",
+            "from external sources",
+            "obtained indirectly",
+            "indirectly obtained",
+            "authorized integration",
+            "connected service",
+            "third-party integration",
+            "customer-authorized",
+            "indirect source",
+            "indirectly",
+            "from partners",
+            "integration partner",
+            "through authorized",
+        },
+        "triggered_article_14_indirect_collection",
+    ),
+    "controller_processor_role_ambiguity": (
+        {"controller", "processor", "on behalf of"},
+        "triggered_role_ambiguity_family",
+    ),
+    "recipients_disclosure_gap": (
+        {
+            "third party",
+            "third-party",
+            "vendor",
+            "partner",
+            "reseller",
+            "marketplace",
+            "payment provider",
+            "cloud provider",
+        },
+        "triggered_recipients_family",
+    ),
+    "purpose_specificity_gap": (
+        {"purpose", "use of data", "we use", "we process", "category of personal data"},
+        "triggered_purpose_mapping_family",
+    ),
+    "special_category_basis_unclear": (
+        {"special category", "article 9", "health data", "biometric", "genetic", "sensitive information"},
+        "triggered_special_category_family",
+    ),
+    "invalid_consent_or_legal_basis": (
+        {
+            "consent inferred",
+            "inferred consent",
+            "implied consent",
+            "consent is implied",
+            "continued usage",
+            "continuing to use",
+            "consent via browsing",
+            "use of the service constitutes",
+            "use of this service constitutes",
+            "use constitutes your consent",
+            "by using you agree",
+            "consent inferred from use",
+            "consent inferred from continued",
+        },
+        "triggered_invalid_consent_family",
+    ),
+    "cookies_tracking_consent_gap": (
+        {
+            "cookie",
+            "tracking",
+            "fingerprint",
+            "cross-device",
+            "advertising sdk",
+            "ad network",
+            "retargeting",
+            "remarketing",
+            "tracking pixel",
+            "behavioural advertising",
+            "behavioral advertising",
+            "interest-based advertising",
+            "analytics cookie",
+            "advertising cookie",
+            "non-essential cookie",
+        },
+        "triggered_cookies_tracking_family",
+    ),
+    "article14_source_transparency_gap": (
+        {
+            "marketing list",
+            "data broker",
+            "data aggregator",
+            "demographic segment",
+            "public records",
+            "third-party data provider",
+            "purchased list",
+            "purchased data",
+            "lead list",
+            "compiled from public",
+            "data enrichment",
+            "sourced from third parties",
+        },
+        "triggered_article14_source_transparency",
+    ),
+    "dpo_contact_gap": (
+        {
+            "data protection officer",
+            "dpo",
+            "dpo@",
+            "dpo contact",
+            "privacy officer",
+            "article 37",
+        },
+        "triggered_dpo_contact_family",
+    ),
+}
+
+DIRECT_COLLECTION_SIGNALS = {
+    "you provide",
+    "provided by you",
+    "from you",
+    "submitted by you",
+    "when you",
+    "you submit",
+    "you share",
+    "you choose to provide",
+    "you enter",
+    "you fill",
+    "account registration",
+    "signup form",
+    "contact form",
+    "application form",
+}
+INDIRECT_COLLECTION_SIGNALS = {
+    "from third parties",
+    "from partners",
+    "from customers",
+    "from suppliers",
+    "from resellers",
+    "from integrated providers",
+    "provided by third parties",
+    "obtained from third parties",
+    "received from third parties",
+    "public authorities",
+    "publicly available",
+    "data brokers",
+    "social media platforms",
+    "affiliate companies",
+    "our clients provide",
+    "employer provides",
+    "background screening provider",
+    "identity verification provider",
+    "authorized integration",
+    "connected service",
+    "third-party integration",
+    "customer-authorized",
+    "indirectly obtained",
+    "obtained indirectly",
+    "indirect collection",
+    "integration partner",
+    "through authorized",
+    "received through",
+}
+
+_RECIPIENT_NAMED_CATEGORY_SIGNALS: frozenset[str] = frozenset(
+    {
+        # Cloud and infrastructure
+        "cloud infrastructure provider",
+        "cloud service provider",
+        "cloud storage provider",
+        "cloud storage",
+        "cloud provider",
+        "hosting provider",
+        "infrastructure provider",
+        # Analytics and data processing
+        "analytics provider",
+        "analytics platform",
+        "analytics service",
+        "analytics tool",
+        "analytics partner",
+        # Payment and financial
+        "payment processor",
+        "payment service provider",
+        "payment provider",
+        "payment gateway",
+        "payment partner",
+        # Marketing and advertising
+        "marketing provider",
+        "marketing platform",
+        "marketing partner",
+        "advertising platform",
+        "advertising partner",
+        "advertising network",
+        "ad network",
+        # Integration and technology
+        "integration partner",
+        "technology partner",
+        "technology provider",
+        "it service provider",
+        "it vendor",
+        "cloud vendor",
+        "software provider",
+        # Support and professional services
+        "support provider",
+        "customer support provider",
+        "support service",
+        "professional advisor",
+        "legal advisor",
+        # GDPR-specific roles
+        "data processor",
+        "sub-processor",
+        "subprocessor",
+        "joint controller",
+        # Communication
+        "email service provider",
+        "email platform",
+        # Security
+        "security provider",
+        "security service provider",
+        "fraud prevention service",
+        "identity verification service",
+        # Logistics
+        "logistics provider",
+        "shipping provider",
+        "delivery service",
+        # CRM and social
+        "crm provider",
+        "social media platform",
+    }
+)
+
+DIRECT_COLLECTION_HINTS = {
+    "we collect directly",
+    "we ask you",
+    "you give us",
+    "information you provide",
+    "directly from data subjects",
+}
+
+INDIRECT_COLLECTION_HINTS = {
+    "we receive",
+    "we obtain",
+    "received from",
+    "obtained from",
+    "collected from",
+    "sourced from",
+    "from external sources",
+    "from other sources",
+    "from third-party",
+    "from third party",
+}
+
+NOTICE_REQUIREMENT_LABELS: dict[str, str] = {
+    "controller_contact": "controller identity and contact details",
+    "legal_basis": "legal basis for processing",
+    "rights": "data subject rights information",
+    "retention": "retention period or criteria",
+    "complaint": "complaint-right and supervisory authority details",
+}
+
+CLAIM_PRIMARY_ARTICLES: dict[str, set[int]] = {
+    "legal_basis": {6, 13, 14},
+    "retention": {5, 13, 14},
+    "rights": {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22},
+    "controller_contact": {13, 14},
+    "complaint": {13, 14, 77},
+    "transfer": {13, 14, 44, 45, 46, 47, 49},
+    "sensitive_data": {9, 13, 14},
+    "profiling": {13, 14, 22},
+    "right_to_object": {21, 13, 14},
+}
+
+PRIVACY_NOTICE_SCOPE_PRIMARY = {5, 6, 9, 12, 13, 14, 21, 22, 44, 45, 46, 47, 49, 77}
+
+CLAIM_ARTICLE_RULES: dict[str, dict[str, set[int]]] = {
+    "missing_controller_identity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_controller_contact": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_legal_basis": {"primary": {13, 14, 6}, "support": {5}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_retention_period": {"primary": {13, 14, 5}, "support": {12}, "disallowed": {21, 22, 44, 45, 46, 47, 49}},
+    "missing_rights_notice": {
+        "primary": {13, 14, 12, 15, 16, 17, 18, 19, 20, 21, 22},
+        "support": {5},
+        "disallowed": set(),
+    },
+    "missing_complaint_right": {"primary": {13, 14, 77}, "support": {12}, "disallowed": {21, 22}},
+    "missing_transfer_notice": {"primary": {13, 14, 44, 45, 46}, "support": {47, 49}, "disallowed": {15, 21}},
+    "profiling_disclosure_gap": {"primary": {13, 14}, "support": {22}, "disallowed": {15}},
+    "recipients_disclosure_gap": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+    "purpose_specificity_gap": {"primary": {13, 14, 5}, "support": {12, 6}, "disallowed": {21, 22}},
+    "special_category_basis_unclear": {"primary": {9, 13, 14}, "support": {6}, "disallowed": {21}},
+    "controller_processor_role_ambiguity": {"primary": {13, 14}, "support": {12}, "disallowed": {21, 22}},
+    "cookies_tracking_consent_gap": {"primary": {6, 13, 14}, "support": {5}, "disallowed": {21, 44}},
+    "article14_source_transparency_gap": {"primary": {14}, "support": {13}, "disallowed": {21, 22}},
+    "article_14_indirect_collection_gap": {"primary": {14}, "support": {13}, "disallowed": {21, 22}},
+    "invalid_consent_or_legal_basis": {"primary": {6, 7}, "support": {13, 14}, "disallowed": {21, 22, 44}},
+}
+
+NOTICE_SECTION_TITLE_SIGNALS = {
+    "privacy notice",
+    "privacy policy",
+    "data we collect",
+    "information we collect",
+    "how we use your data",
+    "your rights",
+    "retention",
+    "contact us",
+    "international transfer",
+}
+
+NOTICE_SECTION_CONTENT_SIGNALS = {
+    "we collect",
+    "we process",
+    "personal data",
+    "data subject",
+    "your rights",
+    "legal basis",
+    "retention period",
+    "supervisory authority",
+    "complaint",
+}
+
+
+class DocumentPosture(TypedDict):
+    document_type: str
+    triggered_duties: list[str]
+    not_triggered_duties: list[str]
+    not_assessable_duties: list[str]
+
+
+class ApplicabilityMemo(TypedDict):
+    obligation: str
+    applicability_reasoning: str
+    collection_mode: str
+    visibility: str
+    applicability_confidence: float
+    disqualifying_alternatives: list[str]
+
+
+class ApplicabilityDecision(TypedDict):
+    collection_mode: str
+    applicability_status: str
+    allowed_notice_articles: list[int]
+    unresolved_trigger: str | None
+
+
+class SpecializedReview(TypedDict):
+    profiling: str | None
+    transfer: str | None
+    special_category: str | None
+    role_allocation: str | None
+
+
+class CandidateIssue(TypedDict):
+    candidate_issue_type: str
+    evidence_text: str
+    evidence_strength: float
+    local_or_document_level: str
+    possible_collection_mode: str
+    is_visible_gap: bool
+    legal_posture: str
+    legal_posture_reason: str
+
+
+class LegalQualification(TypedDict):
+    issue_name: str
+    obligation_family: str
+    defect_type: str
+    priority_bucket: str
+    primary_article: str
+    secondary_articles: list[str]
+    rejected_articles: list[str]
+    reason_primary_article_fits: str
+    reason_rejected_articles_do_not_fit: str
+
+
+class CrossReference(TypedDict):
+    referenced_topic: str
+    referenced_section_label: str
+    reference_text: str
+    section_present_in_reviewed_source: str
+
+
+class LegalFact(TypedDict):
+    fact_type: str
+    value: str
+    evidence: str
+
+
+class GdprDutySpec(TypedDict):
+    duty_id: str
+    document_types: list[str]
+    primary_articles: list[str]
+    secondary_articles: list[str]
+    trigger_conditions: list[str]
+    satisfaction_requirements: list[str]
+    clear_failure_patterns: list[str]
+    allowed_outcomes: list[str]
+
+
+GDPR_DUTY_REGISTRY: dict[str, GdprDutySpec] = {
+    "controller_identity_contact": {
+        "duty_id": "controller_identity_contact",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(a)", "Art. 14(1)(a)"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["controller identity", "contact route (email/webform/address)"],
+        "clear_failure_patterns": ["controller not named", "no contact route", "contact missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "purposes_notice": {
+        "duty_id": "purposes_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(c)", "Art. 14(1)(c)"],
+        "secondary_articles": ["Art. 5(1)(b)"],
+        "trigger_conditions": ["document presents processing purposes"],
+        "satisfaction_requirements": ["specific purpose statements"],
+        "clear_failure_patterns": ["generic business purposes only", "purpose categories not specific"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "legal_basis_notice": {
+        "duty_id": "legal_basis_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(c)", "Art. 14(1)(c)"],
+        "secondary_articles": ["Art. 6", "Art. 7"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["lawful basis disclosed", "mapped to purpose where needed"],
+        "clear_failure_patterns": ["consent inferred from use", "legal basis not mapped", "implied consent only"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "recipients_notice": {
+        "duty_id": "recipients_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(e)", "Art. 14(1)(e)"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["document mentions sharing/disclosure"],
+        "satisfaction_requirements": ["recipient categories or specific recipients"],
+        "clear_failure_patterns": ["partners/vendors mentioned without categories"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "transfers_notice": {
+        "duty_id": "transfers_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(f)", "Art. 14(1)(f)"],
+        "secondary_articles": ["Art. 44", "Art. 45", "Art. 46"],
+        "trigger_conditions": ["international transfer signal present"],
+        "satisfaction_requirements": ["transfer disclosed", "safeguard/mechanism disclosed"],
+        "clear_failure_patterns": ["safeguards where practical", "no specific mechanism disclosed"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "retention_notice": {
+        "duty_id": "retention_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(a)", "Art. 14(2)(a)"],
+        "secondary_articles": ["Art. 5(1)(e)"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["specific retention period or objective criteria"],
+        "clear_failure_patterns": ["retained indefinitely", "retained for business needs", "extended periods"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "rights_notice": {
+        "duty_id": "rights_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(b)", "Art. 14(2)(c)"],
+        "secondary_articles": ["Art. 12", "Art. 15-22"],
+        "trigger_conditions": ["document presents personal data processing to data subjects"],
+        "satisfaction_requirements": ["rights listed and actionable"],
+        "clear_failure_patterns": ["rights not disclosed"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "complaint_right_notice": {
+        "duty_id": "complaint_right_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(d)", "Art. 14(2)(e)"],
+        "secondary_articles": ["Art. 77"],
+        "trigger_conditions": ["document presents data-subject rights"],
+        "satisfaction_requirements": ["supervisory authority complaint right disclosed"],
+        "clear_failure_patterns": ["complaint right missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "profiling_notice": {
+        "duty_id": "profiling_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(2)(f)", "Art. 14(2)(g)"],
+        "secondary_articles": ["Art. 22"],
+        "trigger_conditions": ["profiling or automated decision signal present"],
+        "satisfaction_requirements": ["logic involved", "significance", "effects/safeguards where relevant"],
+        "clear_failure_patterns": ["automated profiling without logic", "automated decision without explanation"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "cookies_consent_notice": {
+        "duty_id": "cookies_consent_notice",
+        "document_types": [
+            "cookie_notice",
+            "consent_text",
+            "privacy_notice",
+            "external_privacy_notice",
+            "mixed_document",
+        ],
+        "primary_articles": ["Art. 6", "ePrivacy consent requirements"],
+        "secondary_articles": ["Art. 7", "Art. 5(3) ePrivacy"],
+        "trigger_conditions": ["non-essential cookies or trackers are described"],
+        "satisfaction_requirements": [
+            "non-essential cookies require opt-in consent",
+            "withdrawal/rejection route disclosed",
+        ],
+        "clear_failure_patterns": [
+            "consent inferred from use",
+            "continued use means consent",
+            "pre-ticked consent",
+            "implied consent",
+        ],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "role_allocation_notice": {
+        "duty_id": "role_allocation_notice",
+        "document_types": ["dpa", "internal_policy", "mixed_document", "privacy_notice", "external_privacy_notice"],
+        "primary_articles": ["Art. 4(7)", "Art. 4(8)", "Art. 28"],
+        "secondary_articles": ["Art. 24", "Art. 26"],
+        "trigger_conditions": ["controller/processor signals present"],
+        "satisfaction_requirements": ["controller and processor contexts distinguished"],
+        "clear_failure_patterns": [
+            "acts as both controller and processor without allocation",
+            "role allocation unclear",
+        ],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "article14_source_notice": {
+        "duty_id": "article14_source_notice",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 14(2)(f)", "Art. 14(3)"],
+        "secondary_articles": ["Art. 14(1)(d)"],
+        "trigger_conditions": ["indirect source collection signals present"],
+        "satisfaction_requirements": ["source categories disclosed", "article 14 timing disclosed where triggered"],
+        "clear_failure_patterns": [
+            "indirect collection without source categories",
+            "indirect collection timing missing",
+        ],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "eu_representative_contact": {
+        "duty_id": "eu_representative_contact",
+        "document_types": ["privacy_notice", "privacy_policy", "external_privacy_notice", "mixed_document"],
+        "primary_articles": ["Art. 13(1)(a)", "Art. 14(1)(a)", "Art. 27"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["non-eu establishment and eu data-subject context indicated"],
+        "satisfaction_requirements": ["eu representative identified", "eu representative contact route disclosed"],
+        "clear_failure_patterns": ["eu representative required but not disclosed", "representative contact missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "dpo_contact_notice": {
+        "duty_id": "dpo_contact_notice",
+        "document_types": [
+            "privacy_notice",
+            "privacy_policy",
+            "external_privacy_notice",
+            "mixed_document",
+            "internal_policy",
+            "dpa",
+        ],
+        "primary_articles": ["Art. 13(1)(b)", "Art. 14(1)(b)", "Art. 37-39"],
+        "secondary_articles": ["Art. 12(1)"],
+        "trigger_conditions": ["dpo exists or dpo duty signaled"],
+        "satisfaction_requirements": ["dpo role mentioned", "dpo contact route disclosed"],
+        "clear_failure_patterns": ["dpo appointed but contact missing"],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+    "invalid_consent_notice": {
+        "duty_id": "invalid_consent_notice",
+        "document_types": [
+            "privacy_notice",
+            "privacy_policy",
+            "external_privacy_notice",
+            "consent_text",
+            "mixed_document",
+        ],
+        "primary_articles": ["Art. 6(1)(a)", "Art. 7(1)"],
+        "secondary_articles": ["Art. 4(11)", "Art. 13(1)(c)"],
+        "trigger_conditions": ["consent is relied upon as legal basis", "consent-based processing described"],
+        "satisfaction_requirements": [
+            "consent is freely given, specific, informed, and unambiguous",
+            "withdrawal mechanism disclosed",
+            "affirmative consent action described",
+        ],
+        "clear_failure_patterns": [
+            "consent inferred from use",
+            "implied consent",
+            "continued use constitutes consent",
+            "consent assumed from browsing",
+        ],
+        "allowed_outcomes": ["compliant", "partially_compliant", "non_compliant", "not_assessable_from_provided_text"],
+    },
+}
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _explicit_violation_library() -> dict[str, dict[str, object]]:
+    return {
+        "invalid_consent": {
+            "patterns": {
+                "consent inferred from use",
+                "consent inferred from continued",
+                "consent inferred from interactions",
+                "consent is inferred from interactions",
+                "consent inferred from continued usage",
+                "continued usage",
+                "continuing to use",
+                "consent via browsing",
+                "implied consent",
+                # Expanded: broader inferred-consent language
+                "inferred consent",
+                "consent is implied",
+                "continued use implies consent",
+                "continued use constitutes consent",
+                "use of this service constitutes",
+                "use of the service constitutes",
+                "using this service constitutes",
+                "use constitutes your consent",
+                "by accessing you consent",
+                "by using you agree",
+                "browsing constitutes consent",
+            },
+            "articles": ["Art. 6", "Art. 7", "Art. 4(11)"],
+            "issue": "missing_legal_basis",
+        },
+        "unlawful_retention_wording": {
+            "patterns": {
+                "retained indefinitely",
+                "retained for extended periods",
+                "archived datasets may be retained indefinitely",
+                "retained long-term for business needs",
+                "archived indefinitely",
+                "operational constraints",
+                # Expanded: broader indefinite/vague retention language
+                "retain data indefinitely",
+                "no fixed retention period",
+                "no specific retention period",
+                "as long as necessary for business",
+                "indefinite period",
+                "for as long as we consider",
+                "until we no longer need",
+                "for extended periods",
+                "may be retained for longer",
+                "retain for operational purposes",
+            },
+            "articles": ["Art. 13(2)(a)", "Art. 14(2)(a)", "Art. 5(1)(e)"],
+            "issue": "missing_retention_period",
+        },
+        "weak_transfer_safeguards": {
+            "patterns": {
+                "safeguards where practical",
+                "protection may vary",
+                "operational needs",
+                "no specific mechanism disclosed",
+                "appropriate safeguards where possible",
+                # Expanded: weak-safeguard language — must indicate missing or inadequate mechanism,
+                # NOT just the existence of international transfers (which can be compliant).
+                "where practical safeguards",
+                "best efforts to ensure",
+                "make reasonable efforts to protect",
+                "transfers to countries that may not",
+                "we cannot guarantee the same level of protection",
+                "protection may not be equivalent",
+                "no transfer mechanism",
+                "no safeguard mechanism",
+                "transfer occurs without",
+                "no adequacy decision",
+                "without standard contractual",
+                "without scc",
+            },
+            "articles": ["Art. 13(1)(f)", "Art. 14(1)(f)", "Art. 44", "Art. 45", "Art. 46"],
+            "issue": "missing_transfer_notice",
+        },
+        "profiling_without_required_explanation": {
+            "patterns": {
+                "automated profiling",
+                "risk scores",
+                "service availability influenced",
+                "without logic explanation",
+                "without detailed logic explanations",
+                # Expanded: broader profiling/automated decision language
+                "without human intervention",
+                "without human review",
+                "without human oversight",
+                "service availability may be affected",
+                "service availability determined by",
+                "eligibility is determined automatically",
+                "credit score",
+                "insurance risk score",
+                "automated eligibility",
+                "automated assessment",
+                "automated credit",
+                "risk profiling",
+                "profiling to determine eligibility",
+                "profiling affects",
+                "profiling that affects",
+                "profile to determine",
+                "scoring algorithm",
+                "risk-based pricing",
+            },
+            "articles": ["Art. 13(2)(f)", "Art. 14(2)(g)", "Art. 22"],
+            "issue": "profiling_disclosure_gap",
+        },
+        "recipient_structure_missing": {
+            "patterns": {
+                "partners and affiliates",
+                "selected partners",
+                "third parties for business purposes",
+                # Expanded: broader recipient disclosure gaps
+                "advertising partners",
+                "integration partners",
+                "cloud vendors",
+                "technology partners",
+                "marketing partners",
+                "analytics providers",
+                "third-party advertising",
+                "share with our partners",
+                "shared with third parties",
+                "disclose to third parties",
+                "disclosed to partners",
+                "we may share with",
+                "we share your data with",
+                "data shared with advertisers",
+                "shared with analytics",
+            },
+            "articles": ["Art. 13(1)(e)", "Art. 14(1)(e)"],
+            "issue": "recipients_disclosure_gap",
+        },
+        "tracking_without_consent_controls": {
+            "patterns": {
+                "device fingerprinting",
+                "fingerprinting",
+                "cross-device tracking",
+                "cross device tracking",
+                "advertising sdk",
+                "advertising identifier",
+                "tracking pixel",
+                "third-party tracking",
+                "third party tracking",
+                "third-party cookies",
+                "behavioural advertising",
+                "behavioral advertising",
+                "interest-based advertising",
+                "interest based advertising",
+                "advertising ecosystem",
+                "ad network",
+                "ad networks",
+                "advertising network",
+                "targeting cookies",
+                "analytics cookies",
+                "marketing cookies",
+                "cookies for advertising",
+                "sdk collects",
+                "sdk tracking",
+                "pixel tracking",
+                "retargeting",
+                "remarketing",
+            },
+            "articles": ["Art. 6(1)(a)", "Art. 13(1)(c)"],
+            "issue": "cookies_tracking_consent_gap",
+        },
+        "third_party_data_source_gap": {
+            "patterns": {
+                "marketing list",
+                "marketing lists",
+                "marketing dataset",
+                "demographic segment",
+                "demographic segments",
+                "demographic data",
+                "demographic profile",
+                "public records",
+                "data broker",
+                "data brokers",
+                "data aggregator",
+                "data aggregators",
+                "data enrichment",
+                "purchased list",
+                "purchased data",
+                "third-party data provider",
+                "third party data provider",
+                "lead list",
+                "lead generation partner",
+                "compiled from public",
+                "sourced from third parties",
+                "obtained from third-party",
+                "collected from external",
+            },
+            "articles": ["Art. 14(2)(f)", "Art. 14(3)"],
+            "issue": "article14_source_transparency_gap",
+        },
+    }
+
+
+def _explicit_violation_hits(text: str) -> list[tuple[str, dict[str, object]]]:
+    norm = _norm(text)
+    hits: list[tuple[str, dict[str, object]]] = []
+    for key, cfg in _explicit_violation_library().items():
+        patterns = cfg.get("patterns", set())
+        if any(p in norm for p in patterns if isinstance(p, str)):
+            hits.append((key, cfg))
+    return hits
+
+
+def _duty_registry_key_for_issue(issue_name: str) -> str | None:
+    """Return the GDPR_DUTY_REGISTRY key for a given obligation issue name.
+    Delegates to OBLIGATION_TAXONOMY as the single source of truth.
+    Falls back to a legacy hardcoded mapping for duty keys not yet in the taxonomy.
+    """
+    from_taxonomy = _obligation_duty_key(issue_name)
+    if from_taxonomy is not None:
+        return from_taxonomy
+    # Legacy entries not in OBLIGATION_TAXONOMY (e.g. duty-registry keys differ from taxonomy)
+    _legacy: dict[str, str] = {
+        "missing_retention": "retention_notice",
+        "missing_rights_information": "rights_notice",
+        "missing_transfer_disclosure": "transfers_notice",
+    }
+    return _legacy.get(issue_name)
+
+
+def _issue_relevance_score(issue_name: str, section: SectionData) -> int:
+    text = _norm(f"{section.section_title} {section.content}")
+    signals: dict[str, set[str]] = {
+        "missing_controller_contact": {"controller", "contact", "email", "address", "privacy@"},
+        "purpose_specificity_gap": {"purpose", "why we process", "processing purpose"},
+        "missing_legal_basis": {"legal basis", "lawful basis", "consent", "legitimate interests", "contract"},
+        "recipients_disclosure_gap": {"recipient", "third party", "vendor", "partner", "share"},
+        "missing_transfer_notice": {"transfer", "third country", "outside eea", "safeguard", "scc", "adequacy"},
+        "missing_retention": {"retention", "retain", "storage period", "kept for"},
+        "missing_rights_information": {"right to access", "rectification", "erasure", "objection", "portability"},
+        "missing_complaint_right": {"complaint", "supervisory authority"},
+        "article_14_indirect_collection_gap": {"source", "third-party source", "obtained from"},
+        "profiling_disclosure_gap": {"profiling", "automated decision", "logic involved", "significance", "effects"},
+        "cookies_tracking_consent_gap": {
+            "cookie",
+            "fingerprint",
+            "tracking",
+            "advertising sdk",
+            "cross-device",
+            "behavioural",
+        },
+        "article14_source_transparency_gap": {
+            "marketing list",
+            "data broker",
+            "aggregator",
+            "demographic",
+            "public records",
+        },
+    }
+    tokens = signals.get(issue_name, set())
+    return sum(1 for token in tokens if token in text)
+
+
+def _base_document_type(document_type: str) -> str:
+    base = (document_type or "").lower().replace("_excerpt", "")
+    if base.startswith("external_"):
+        base = base[len("external_") :]
+    return base
+
+
+def _duty_applies(duty_id: str, document_type: str, corpus: str) -> bool:
+    base_type = _base_document_type(document_type)
+    if duty_id in {"cookies_consent_notice"}:
+        return base_type in {
+            "cookie_notice",
+            "consent_text",
+            "privacy_notice",
+            "privacy_policy",
+            "mixed_document",
+        } and _contains_any(corpus, {"cookie", "tracking", "analytics cookie", "advertising cookie", "consent"})
+    if duty_id in {"role_allocation_notice"}:
+        return base_type in {
+            "dpa",
+            "internal_policy",
+            "mixed_document",
+            "privacy_notice",
+            "privacy_policy",
+        } and _contains_any(corpus, {"controller", "processor", "on behalf of", "instructions"})
+    if duty_id in {"article14_source_notice"}:
+        return base_type in {"privacy_notice", "privacy_policy", "mixed_document"} and _contains_any(
+            corpus, INDIRECT_COLLECTION_SIGNALS
+        )
+    if duty_id in {"eu_representative_contact"}:
+        if base_type not in {"privacy_notice", "privacy_policy", "mixed_document"}:
+            return False
+        outside_eu = _contains_any(
+            corpus, {"outside the eu", "not established in the union", "non-eu controller", "uk company"}
+        )
+        eu_data_subjects = _contains_any(corpus, {"eu resident", "eea", "european union"})
+        return outside_eu and eu_data_subjects
+    if duty_id in {"dpo_contact_notice"}:
+        return base_type in {
+            "privacy_notice",
+            "privacy_policy",
+            "mixed_document",
+            "internal_policy",
+            "dpa",
+        } and _contains_any(corpus, {"dpo", "data protection officer", "privacy officer", "article 37"})
+    return True
+
+
+def _eval_presence(corpus: str, tokens: set[str]) -> bool:
+    return any(t in corpus for t in tokens)
+
+
+def _validate_duty_outcome(duty_id: str, duty: GdprDutySpec, sections: list[SectionData], document_type: str) -> str:
+    corpus = _norm(" ".join(f"{s.section_title} {s.content}" for s in sections))
+    if len(corpus) < 80:
+        return "not_assessable_from_provided_text"
+    if not _duty_applies(duty_id, document_type, corpus):
+        return "compliant"
+
+    explicit_hits = _explicit_violation_hits(corpus)
+
+    if duty_id == "controller_identity_contact":
+        if _eval_presence(
+            corpus,
+            {"identity and contact details are provided", "controller identity and contact details are provided"},
+        ):
+            return "compliant"
+        identity = _eval_presence(corpus, {"inc.", "inc", "llc", "ltd", "limited", "corporation", "corp", "controller"})
+        contact = _eval_presence(
+            corpus, {"privacy@", "dpo@", "contact us", "contact route", "email", "webform", "postal address", "address"}
+        )
+        if identity and contact:
+            return "compliant"
+        if identity or contact:
+            return "partially_compliant"
+        return "non_compliant"
+    if duty_id == "legal_basis_notice":
+        # A compliant legal basis disclosure requires naming at least one specific Art. 6 ground.
+        # Merely mentioning "legal basis" as a concept is not a disclosure.
+        has_specific_ground = _eval_presence(
+            corpus,
+            {
+                "consent",
+                "contractual",
+                "performance of a contract",
+                "contract performance",
+                "legitimate interest",
+                "legitimate interests",
+                "legal obligation",
+                "comply with our legal",
+                "required by law",
+                "vital interest",
+                "vital interests",
+                "public task",
+                "public interest",
+                "official authority",
+                "article 6(1)(a)",
+                "article 6(1)(b)",
+                "article 6(1)(c)",
+                "article 6(1)(f)",
+                "6(1)(a)",
+                "6(1)(b)",
+                "6(1)(c)",
+                "6(1)(f)",
+            },
+        )
+        mapped = _eval_presence(
+            corpus,
+            {
+                "for this purpose",
+                "for the following purposes",
+                "mapped to",
+                "each purpose",
+                "purpose mapping",
+                "for the purposes of",
+                "the purpose of",
+                "in order to",
+                "we rely on",
+                "relies on",
+                "on the grounds of",
+                "on the basis of",
+                "the legal basis for",
+                "the lawful basis for",
+                "based on consent",
+                "based on contract",
+                "based on legitimate",
+                "based on legal obligation",
+            },
+        )
+        invalid = any(k == "invalid_consent" for k, _ in explicit_hits)
+        if has_specific_ground and mapped and not invalid:
+            return "compliant"
+        if has_specific_ground and not invalid:
+            return "partially_compliant"
+        if invalid or _eval_presence(
+            corpus, {"consent inferred from use", "implied consent", "continued usage means consent"}
+        ):
+            return "non_compliant"
+        # Document mentions "legal basis" concept but names no specific Art. 6 ground — non_compliant
+        if _eval_presence(
+            corpus, {"legal basis", "lawful basis", "article 6", "legal bases", "lawful bases", "lawful ground"}
+        ):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "retention_notice":
+        has_period = _eval_presence(
+            corpus, {"months", "years", "days", "retention period", "kept for", "retention periods"}
+        )
+        has_criteria = _eval_presence(
+            corpus,
+            {
+                "until no longer necessary",
+                "objective criteria",
+                "as required by law",
+                "criteria are listed",
+                "no longer necessary",
+                "no longer required",
+                "as long as necessary",
+                "as long as needed",
+                "storage limitation",
+                "storage period",
+                "legal requirement",
+                "statutory retention",
+                "required by law",
+                "required by regulation",
+                "legal obligation requires",
+                "by applicable law",
+                "for the duration",
+                "throughout the period",
+                "during the period",
+                "for a period of",
+                "unless required",
+                "unless we are required",
+            },
+        )
+        invalid = any(k == "unlawful_retention_wording" for k, _ in explicit_hits)
+        if (has_period or has_criteria) and not invalid:
+            return "compliant" if (has_period and has_criteria) else "partially_compliant"
+        if invalid or _eval_presence(
+            corpus,
+            {
+                "retained indefinitely",
+                "archived indefinitely",
+                "extended periods",
+                "data indefinitely",
+                "keep data indefinitely",
+            },
+        ):
+            return "non_compliant"
+        return "non_compliant" if "privacy_notice" in document_type else "not_assessable_from_provided_text"
+    if duty_id == "rights_notice":
+        if _eval_presence(corpus, {"rights listed and actionable", "data subject rights include"}):
+            return "compliant"
+        rights = {"access", "rectification", "erasure", "restriction", "objection", "portability"}
+        hits = sum(1 for r in rights if r in corpus)
+        if hits >= 5:
+            return "compliant"
+        if 2 <= hits < 5:
+            return "partially_compliant"
+        if _eval_presence(corpus, {"rights are limited", "no data subject rights"}):
+            return "non_compliant"
+        if _eval_presence(corpus, {"some rights may apply", "rights may apply"}):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "complaint_right_notice":
+        complaint = _eval_presence(corpus, {"lodge a complaint", "supervisory authority", "data protection authority"})
+        if complaint:
+            return "compliant"
+        if _eval_presence(corpus, {"no complaint right"}):
+            return "non_compliant"
+        return "non_compliant" if "privacy_notice" in document_type else "not_assessable_from_provided_text"
+    if duty_id == "transfers_notice":
+        transfer = _eval_presence(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS)
+        safeguards = _eval_presence(
+            corpus, {"adequacy", "standard contractual clauses", "scc", "binding corporate rules", "article 49"}
+        )
+        weak = any(k == "weak_transfer_safeguards" for k, _ in explicit_hits)
+        if transfer and safeguards and not weak:
+            return "compliant"
+        if transfer and (safeguards or _eval_presence(corpus, {"safeguards"})) and not weak:
+            return "partially_compliant"
+        if transfer and (weak or not safeguards):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "profiling_notice":
+        profiling = _eval_presence(corpus, {"profiling", "automated decision", "automated decision-making"})
+        logic = _eval_presence(corpus, {"logic involved", "meaningful information about the logic"})
+        effects = _eval_presence(corpus, {"significance", "effects", "legal effect", "similarly significant"})
+        safeguards = _eval_presence(corpus, {"human intervention", "right to contest", "review by a person"})
+        if profiling and logic and (effects or safeguards):
+            return "compliant"
+        if profiling and (logic or effects or safeguards):
+            return "partially_compliant"
+        if profiling and not (logic and effects):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "recipients_notice":
+        third_party = _eval_presence(corpus, {"vendor", "partner", "processor", "third party", "recipient"})
+        formal_categories = _eval_presence(
+            corpus, {"categories of recipients", "recipient categories", "types of recipients"}
+        )
+        named_categories = any(t in corpus for t in _RECIPIENT_NAMED_CATEGORY_SIGNALS)
+        if formal_categories or named_categories:
+            return "compliant"
+        if third_party:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "purposes_notice":
+        specific = _eval_presence(
+            corpus,
+            {
+                "for fraud prevention",
+                "for account security",
+                "for payment processing",
+                "for support requests",
+                "for service provision",
+                "to enable platform",
+                "to authenticate",
+                "to deliver customer support",
+                "to generate insights",
+                "to detect fraud",
+                "to prevent abuse",
+                "service delivery",
+                "service provision",
+                "for these activities",
+                "analytics",
+                "to communicate",
+                "to comply with",
+            },
+        )
+        broad = _eval_presence(corpus, {"for business purposes", "as necessary", "operational purposes"})
+        if specific and not broad:
+            return "compliant"
+        if specific:
+            return "partially_compliant"
+        if broad and not specific:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "cookies_consent_notice":
+        non_essential = _eval_presence(
+            corpus, {"analytics cookie", "advertising cookie", "non-essential", "cookies", "ad networks", "tracking"}
+        )
+        opt_in = _eval_presence(corpus, {"opt-in", "prior consent", "accept all / reject all", "consent banner"})
+        withdraw = _eval_presence(corpus, {"withdraw consent", "change cookie settings", "reject non-essential"})
+        if non_essential and opt_in and withdraw:
+            return "compliant"
+        if non_essential and (opt_in or withdraw):
+            return "partially_compliant"
+        if non_essential and not opt_in:
+            return "non_compliant"
+        return "non_compliant" if non_essential else "not_assessable_from_provided_text"
+    if duty_id == "role_allocation_notice":
+        mixed = _eval_presence(
+            corpus,
+            {
+                "controller and processor",
+                "both controller and processor",
+                "acts as controller",
+                "acts as processor",
+                "act as controller",
+                "act as processor",
+                "acting as controller",
+                "acting as processor",
+            },
+        )
+        clear = _eval_presence(
+            corpus,
+            {
+                "when we act as controller",
+                "when we act as processor",
+                "where we act as controller",
+                "where we act as processor",
+                "we act as a controller",
+                "we act as a processor",
+                "we act as the controller",
+                "we act as the processor",
+                "we act as a data controller",
+                "we act as a data processor",
+                "acting as a data controller",
+                "acting as a data processor",
+                "acting as the data controller",
+                "acting as the data processor",
+                "acting as a controller",
+                "acting as a processor",
+                "as a data controller for",
+                "as a data processor for",
+                "processor on behalf of our",
+                "controller for our own",
+                "processor for our clients",
+                "processor for our customers",
+                "for our own purposes we act as controller",
+                "for customer instructions we act as processor",
+                "role allocation",
+                "controller when processing",
+                "processor when processing",
+            },
+        )
+        if mixed and clear:
+            return "compliant"
+        if mixed and not clear:
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "article14_source_notice":
+        indirect = _eval_presence(corpus, INDIRECT_COLLECTION_SIGNALS)
+        source_cats = _eval_presence(
+            corpus,
+            {
+                "source categories",
+                "categories of sources",
+                "obtained from",
+                "received from",
+                "receive data from",
+                "receive personal data from",
+                "authorized integration",
+                "connected service",
+                "data your",
+                "where we obtained",
+                "the source of",
+            },
+        )
+        timing = _eval_presence(
+            corpus,
+            {
+                "within one month",
+                "first communication",
+                "before disclosure",
+                "at the time",
+                "article 14(3)",
+                "at the point",
+            },
+        )
+        if indirect and source_cats and timing:
+            return "compliant"
+        if indirect and (source_cats or timing):
+            return "partially_compliant"
+        if indirect and not (source_cats and timing):
+            return "non_compliant"
+        return "not_assessable_from_provided_text"
+    if duty_id == "eu_representative_contact":
+        rep = _eval_presence(corpus, {"eu representative", "article 27 representative"})
+        contact = _eval_presence(corpus, {"representative contact", "representative email", "representative address"})
+        if rep and contact:
+            return "compliant"
+        if rep or contact:
+            return "partially_compliant"
+        return "non_compliant"
+    if duty_id == "dpo_contact_notice":
+        dpo = _eval_presence(corpus, {"data protection officer", "dpo", "privacy officer", "article 37"})
+        has_email_address = bool(re.search(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", corpus))
+        direct_contact = _eval_presence(
+            corpus,
+            {
+                "dpo@",
+                "dpo contact",
+                "privacy officer email",
+                "contact our dpo",
+                "contact the dpo",
+                "dpo can be contacted",
+                "dpo email",
+            },
+        )
+        contact = direct_contact or (dpo and has_email_address)
+        if dpo and contact:
+            return "compliant"
+        if dpo or contact:
+            return "partially_compliant"
+        return "not_assessable_from_provided_text"
+
+    failure_patterns = {p for p in duty["clear_failure_patterns"]}
+    if any(p in corpus for p in failure_patterns):
+        return "non_compliant"
+    requirements = {r for r in duty["satisfaction_requirements"]}
+    req_hits = sum(1 for r in requirements if any(token in corpus for token in _norm(r).split()[:2]))
+    if req_hits == 0:
+        return "not_assessable_from_provided_text"
+    if req_hits < len(requirements):
+        return "partially_compliant"
+    return "compliant"
+
+
+def _document_wide_duty_validation(sections: list[SectionData], document_type: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    corpus = _norm(" ".join(f"{s.section_title} {s.content}" for s in sections))
+    for duty_id, duty in GDPR_DUTY_REGISTRY.items():
+        if not any(t in document_type for t in duty["document_types"]):
+            continue
+        if not _duty_applies(duty_id, document_type, corpus):
+            continue
+        out[duty_id] = _validate_duty_outcome(duty_id, duty, sections, document_type)
+    return out
+
+
+def _not_assessable_allowed(text: str, status: str, classification: str | None) -> bool:
+    norm = _norm(text)
+    explicit_unlawful = bool(_explicit_violation_hits(text))
+    clearly_partial = status == "partial" or any(t in norm for t in {"partially", "incomplete", "not mapped"})
+    clearly_missing = status == "gap" or any(t in norm for t in {"missing", "not disclosed", "absent"})
+    explicitly_assessable_context = any(
+        t in norm
+        for t in {
+            "legal basis",
+            "lawful basis",
+            "retention",
+            "transfer",
+            "third country",
+            "profil",
+            "recipient",
+            "purpose",
+            "cookies",
+            "controller",
+            # Expanded: new explicit risk-language signals that always constitute assessable content
+            "fingerprint",
+            "cross-device",
+            "advertising sdk",
+            "tracking pixel",
+            "behavioural",
+            "behavioral",
+            "interest-based advertising",
+            "ad network",
+            "marketing list",
+            "data broker",
+            "data aggregator",
+            "demographic segment",
+            "inferred consent",
+            "implied consent",
+            "continued use",
+            "without human intervention",
+            "risk score",
+            "service availability",
+        }
+    )
+    if explicit_unlawful or clearly_partial or clearly_missing:
+        return False
+    if explicitly_assessable_context:
+        return False
+    if classification in {"diagnostic_internal_only", "retrieval_failure_internal_only"}:
+        return True
+    return len(norm) < 80 and "excerpt" in norm
+
+
+def _is_not_applicable(section: SectionData) -> bool:
+    title = re.sub(r"[^a-z0-9\s]", "", _norm(section.section_title))
+    if title not in ADMIN_PATTERNS:
+        return False
+    content = _norm(section.content)
+    return not any(k in content for k in PROCESSING_SIGNALS)
+
+
+def _section_auditability_type(section: SectionData) -> str:
+    title = _norm(section.section_title)
+    text = _section_context_signals(section)
+    auditable_signals = {
+        "process",
+        "collect",
+        "data categories",
+        "source",
+        "transfer",
+        "profil",
+        "retention",
+        "rights",
+        "recipient",
+        "controller",
+        "processor",
+        "audience",
+        "application",
+        "territorial",
+        "partner",
+        "customer-sourced",
+        "device",
+        "behavioral",
+        "special category",
+        "sensitive",
+        "personal data",
+        "personal information",
+        "identifier",
+        "identity",
+        "usage",
+        "share",
+    }
+    if any(signal in text for signal in auditable_signals):
+        high_value = {"legal basis", "retention", "right", "complaint", "controller", "recipient", "transfer"}
+        if any(sig in text for sig in high_value):
+            return "auditable_primary"
+        return "auditable_secondary"
+    if any(t in title for t in {"definition", "glossary", "terms"}):
+        return "definition_section"
+    if any(t in title for t in {"effective date", "owner", "version", "introduction"}):
+        return "administrative_section"
+    if any(t in text for t in {"we process", "we collect", "recipient", "rights", "retention", "transfer", "profil"}):
+        return "auditable_primary"
+    if any(t in text for t in {"controller", "processor", "third party", "source"}):
+        return "auditable_secondary"
+    return "meta_section"
+
+
+def _issue_specific_remediation(issue_name: str, document_type: str, systemic: bool) -> str:
+    prefix = "For the notice as a whole" if systemic else "For this section"
+    mapping = {
+        "missing_controller_identity": f"{prefix}, identify the controller legal entity and provide a direct contact route in the external privacy notice.",
+        "missing_controller_contact": f"{prefix}, add a direct contact channel (email/webform/address) for privacy inquiries.",
+        "missing_dpo_contact": f"{prefix}, disclose DPO contact details where a DPO is appointed or legally required.",
+        "missing_purposes": f"{prefix}, list processing purposes in plain language and map each to relevant processing activities.",
+        "missing_legal_basis": f"{prefix}, for each processing purpose described in the notice, state the lawful basis relied upon (e.g., contract, legal obligation, legitimate interests, or consent).",
+        "missing_recipients": f"{prefix}, identify recipient categories and third-party disclosure contexts.",
+        "missing_retention": f"{prefix}, state either the applicable retention periods or the objective criteria used to determine them for each relevant category of personal data.",
+        "missing_rights_information": f"{prefix}, add complete rights information (access, rectification, erasure, restriction, objection, portability).",
+        "missing_complaint_right": f"{prefix}, state that data subjects have the right to lodge a complaint with a supervisory authority and identify the relevant supervisory authority route where appropriate.",
+        "missing_transfer_notice": f"{prefix}, disclose whether third-country transfers occur and in what contexts.",
+        "missing_transfer_safeguards_disclosure": f"{prefix}, specify adequacy/SCC/BCR/derogation mechanism and how safeguard details can be obtained.",
+        "profiling_disclosure_gap": (
+            f"{prefix}, explain profiling existence, logic, significance, and envisaged consequences under Articles 13(2)(f)/14(2)(g)."
+        ),
+        "article_22_threshold_unclear": f"{prefix}, clarify whether automated decision-making with legal/similarly significant effects is performed and apply Article 22 safeguards if triggered.",
+        "special_category_basis_unclear": f"{prefix}, identify Article 9 category and explicit Article 9(2) condition relied upon.",
+        "controller_processor_role_ambiguity": f"{prefix}, clarify when the organization acts as controller vs processor and how role changes are communicated.",
+        "missing_retention_period": f"{prefix}, state either the applicable retention periods or the objective criteria used to determine them for each relevant category of personal data.",
+        "missing_rights_notice": f"{prefix}, add a dedicated rights section describing access, rectification, erasure, restriction, objection, portability, and any other applicable rights.",
+        "missing_transfer_notice": f"{prefix}, disclose whether third-country transfers occur and in what contexts.",
+    }
+    return mapping.get(
+        issue_name,
+        f"{prefix}, update the notice to include the required GDPR transparency disclosure for this obligation.",
+    )
+
+
+def _consistency_validator(
+    issue_name: str, claim_types: set[str], citations: list[LlmCitation], remediation_note: str | None
+) -> bool:
+    issue_from_claim = _claim_issue_ids(claim_types)
+    if issue_name and issue_from_claim and issue_name not in issue_from_claim:
+        return False
+    if citations and _violates_forbidden_article_matrix(claim_types, citations):
+        return False
+    if remediation_note:
+        rem = _norm(remediation_note)
+        if "transfer" in issue_name and "retention" in rem:
+            return False
+        if "retention" in issue_name and "transfer" in rem:
+            return False
+    return True
+
+
+def _assessment_type_for(finding: LlmFinding, classification: str | None) -> str:
+    if classification == "clear_non_compliance":
+        return "confirmed"
+    if classification == "probable_gap":
+        return "probable"
+    return "not_assessable"
+
+
+def _confidence_level_for(confidence: float | None) -> str:
+    if confidence is None:
+        return "low"
+    if confidence >= 0.75:
+        return "high"
+    if confidence >= 0.5:
+        return "medium"
+    return "low"
+
+
+def _severity_rationale(finding: LlmFinding, claim_types: set[str]) -> str:
+    risk_tier = _risk_tier_for_claims(finding, claim_types)
+    high_policy_claims = {
+        "controller_identity",
+        "controller_contact",
+        "controller_identity_contact",
+        "legal_basis",
+        "rights",
+        "complaint",
+    }
+    medium_policy_claims = {"retention", "recipients", "purpose_mapping", "role_ambiguity"}
+    conditional_high_claims = {"transfer", "profiling"}
+
+    if risk_tier == "critical":
+        return "Risk tier: critical. Explicit text indicates potentially unlawful processing model requiring immediate remediation."
+    if risk_tier == "major" and (claim_types & {"transfer", "profiling", "retention", "legal_basis"}):
+        return "Risk tier: major. Material legal risk with potential rights impact; prompt remediation is required."
+    if claim_types & high_policy_claims:
+        return "Risk tier: major. High severity under policy for core identity/legal-basis/rights/complaint transparency duties."
+    if claim_types & medium_policy_claims:
+        return "Medium severity under policy for bounded transparency gaps (retention/recipients/purpose/role clarity)."
+    if claim_types & conditional_high_claims:
+        text = _norm(finding.gap_note or "")
+        explicit_activity = any(
+            t in text for t in {"transfer", "third country", "profiling", "automated decision", "logic involved"}
+        )
+        if explicit_activity:
+            return "High severity under policy because activity is explicit and required disclosure is absent."
+        return "Medium severity under policy pending explicit transfer/profiling activity confirmation."
+
+    if finding.severity == "high":
+        return "High severity due to central GDPR transparency obligation impact and broad rights exposure."
+    if finding.severity == "medium":
+        return "Medium severity due to meaningful transparency gap with partially bounded scope."
+    if finding.severity == "low":
+        return "Low severity due to localized clarity issue without clear document-wide omission."
+    if finding.status == "needs review":
+        return "Severity withheld because substantive legal support is not yet assessable."
+    if "transfer" in claim_types:
+        return "Severity calibrated to transfer disclosure context and safeguard visibility."
+    return "Risk tier: minor. Severity calibrated from obligation criticality, scope, and evidence confidence."
+
+
+def _risk_tier_for_claims(finding: LlmFinding, claim_types: set[str]) -> str:
+    text = _norm(f"{finding.gap_note or ''} {finding.remediation_note or ''}")
+    critical_markers = {
+        "inferred consent",
+        "continued use",
+        "indefinite",
+        "indefinitely",
+        "without human intervention",
+        "similarly significant",
+    }
+    major_markers = {
+        "third country",
+        "outside the eea",
+        "transfer safeguards",
+        "lawful basis",
+        "legal basis",
+        "profiling",
+        "risk scoring",
+    }
+    if any(marker in text for marker in critical_markers):
+        return "critical"
+    if any(marker in text for marker in major_markers) or claim_types & {
+        "transfer",
+        "profiling",
+        "retention",
+        "legal_basis",
+    }:
+        return "major"
+    return "minor"
+
+
+def _defect_type_for_issue(issue: CandidateIssue) -> str:
+    issue_name = issue["candidate_issue_type"]
+    text = _norm(issue.get("evidence_text") or "")
+    if issue_name in {"missing_controller_identity", "missing_rights_information", "missing_complaint_right"}:
+        return "missing_disclosure"
+
+    invalidity_signals_by_issue: dict[str, set[str]] = {
+        "missing_legal_basis": {
+            "inferred consent",
+            "continued use",
+            "implied consent",
+            "consent inferred",
+            "legitimate interests for all",
+        },
+        "missing_retention": {"extended period", "as long as necessary"},
+        "missing_transfer_notice": {"where practical", "as appropriate", "when needed", "case by case"},
+        "profiling_disclosure_gap": {"automated decision", "without human intervention"},
+        "recipients_disclosure_gap": {"selected partners", "affiliates and partners"},
+    }
+    unlawful_practice_signals_by_issue: dict[str, set[str]] = {
+        "missing_legal_basis": {"inferred consent", "consent inferred", "continued use"},
+        "missing_retention": {"indefinite", "indefinitely", "retain forever"},
+        "profiling_disclosure_gap": {"similarly significant", "legal effect"},
+    }
+    unlawful_signals = unlawful_practice_signals_by_issue.get(issue_name, set())
+    if any(signal in text for signal in unlawful_signals):
+        return "potential_unlawful_practice"
+    issue_signals = invalidity_signals_by_issue.get(issue_name, set())
+    if any(signal in text for signal in issue_signals):
+        return "present_but_invalid_disclosure"
+    if issue_name == "article_14_indirect_collection_gap":
+        return "incomplete_disclosure"
+    return "missing_disclosure"
+
+
+def _legal_posture_layer(issue: CandidateIssue, facts: list[LegalFact]) -> tuple[str, str]:
+    """
+    Mandatory legal qualification layer applied after issue spotting.
+    """
+    issue_name = issue["candidate_issue_type"]
+    text = _norm(issue.get("evidence_text") or "")
+    facts_set = {(f["fact_type"], f["value"]) for f in facts}
+
+    if issue_name == "missing_legal_basis" and (
+        ("lawful_basis_model", "consent_inferred_from_use") in facts_set
+        or any(t in text for t in {"consent inferred", "continued use", "inferred consent"})
+    ):
+        return (
+            "present_but_legally_invalid",
+            "Detected inferred/continued-use consent model; treat as present but legally invalid consent basis (Art. 6/7 pathway).",
+        )
+
+    if issue_name == "missing_retention" and ("retention_policy", "undefined_duration") in facts_set:
+        return ("potential_unlawful_practice", "Retention language indicates indefinite or undefined duration.")
+
+    if issue_name == "missing_transfer_notice" and ("transfer_safeguards", "vague") in facts_set:
+        return (
+            "present_but_legally_invalid",
+            "Transfer disclosure is present but safeguards appear vague/conditional.",
+        )
+
+    if issue_name == "profiling_disclosure_gap" and ("profiling_transparency", "missing_required_details") in facts_set:
+        return (
+            "incomplete_disclosure",
+            "Profiling appears present, but mandatory transparency details are incomplete.",
+        )
+
+    if issue_name == "recipients_disclosure_gap" and ("recipient_categories", "missing") in facts_set:
+        return ("incomplete_disclosure", "Recipient actors are mentioned without required category-level disclosure.")
+
+    defect_type = _defect_type_for_issue(issue)
+    if defect_type == "potential_unlawful_practice":
+        return ("potential_unlawful_practice", "Issue signals indicate a potentially unlawful practice pattern.")
+    if defect_type == "present_but_invalid_disclosure":
+        return ("present_but_legally_invalid", "Disclosure exists but fails legal validity expectations.")
+    if defect_type == "incomplete_disclosure":
+        return ("incomplete_disclosure", "Disclosure appears partial/incomplete for the obligation.")
+    return ("missing_disclosure", "Required disclosure is not visible in the reviewed excerpt.")
+
+
+def _priority_bucket_for_claims(finding: LlmFinding, claim_types: set[str]) -> str:
+    text = _norm(f"{finding.gap_note or ''} {finding.remediation_note or ''}")
+    fatal_signals = {
+        "inferred consent",
+        "continued use",
+        "indefinite",
+        "indefinitely",
+        "without human intervention",
+        "similarly significant",
+        "legal effect",
+    }
+    material_claims = {
+        "rights",
+        "complaint",
+        "recipients",
+        "purpose_mapping",
+        "retention",
+        "legal_basis",
+        "transfer",
+        "profiling",
+    }
+    if any(signal in text for signal in fatal_signals):
+        return "fatal"
+    if claim_types & material_claims:
+        return "material"
+    return "secondary"
+
+
+def _obligation_family_for_issue(issue_name: str) -> str:
+    family_map = {
+        "missing_controller_identity": "identity_contact_transparency",
+        "missing_controller_contact": "identity_contact_transparency",
+        "missing_legal_basis": "lawful_basis_and_validity",
+        "missing_retention": "retention_transparency_and_storage_limitation",
+        "missing_rights_information": "rights_and_complaints",
+        "missing_complaint_right": "rights_and_complaints",
+        "missing_transfer_notice": "international_transfers",
+        "profiling_disclosure_gap": "profiling_and_article22",
+        "special_category_basis_unclear": "special_category_processing",
+        "article_14_indirect_collection_gap": "indirect_collection_article14",
+        "controller_processor_role_ambiguity": "role_allocation_transparency",
+        "recipients_disclosure_gap": "recipients_transparency",
+        "purpose_specificity_gap": "purpose_specification",
+    }
+    return family_map.get(issue_name, "general_transparency")
+
+
+FAMILY_ARTICLE_MAP: dict[str, tuple[str, list[str], list[str]]] = {
+    "identity_contact_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["21", "22"]),
+    "lawful_basis_and_validity": ("13(1)(c)", ["14(1)(c)"], ["13(1)(a)"]),
+    "retention_transparency_and_storage_limitation": ("13(2)(a)", ["14(2)(a)"], ["6(1)"]),
+    "rights_and_complaints": ("13(2)(b)", ["13(2)(d)", "14(2)(c)", "14(2)(e)", "77"], ["5(1)(a)"]),
+    "international_transfers": ("13(1)(f)", ["14(1)(f)", "44", "45", "46"], ["15"]),
+    "profiling_and_article22": ("13(2)(f)", ["14(2)(g)"], ["21"]),
+    "recipients_transparency": ("13(1)(e)", ["14(1)(e)", "12(1)"], ["21", "22"]),
+    "purpose_specification": ("13(1)(c)", ["14(1)(c)", "5(1)(b)"], ["21"]),
+    "indirect_collection_article14": ("14(1)", ["14(2)", "14(3)", "14(5)"], ["13(1)"]),
+    "role_allocation_transparency": ("13(1)(a)", ["14(1)(a)", "12(1)"], ["28"]),
+    "special_category_processing": ("9(1)", ["9(2)", "13(1)(c)", "14(1)(c)"], ["21"]),
+}
+
+
+def _validate_family_obligations(family: str, text: str, facts: list[LegalFact]) -> dict[str, object]:
+    norm = _norm(text)
+    missing: list[str] = []
+    if family == "indirect_collection_article14":
+        checks = {
+            "source_identity_or_category": any(
+                t in norm
+                for t in {"source categories", "sources of personal data", "obtained from", "from third parties"}
+            ),
+            "purposes": any(t in norm for t in {"purpose", "we use", "for the purpose"}),
+            "legal_basis": any(f["fact_type"] == "lawful_basis" and f["value"] == "present" for f in facts),
+            "rights": any(
+                t in norm for t in {"right of access", "rectification", "erasure", "objection", "portability"}
+            ),
+            "retention": any(t in norm for t in {"retention", "kept for", "storage period"}),
+            "complaint_right": any(t in norm for t in {"supervisory authority", "complaint"}),
+        }
+        missing = [name for name, ok in checks.items() if not ok]
+    satisfied = len(missing) == 0
+    return {"family": family, "satisfied": satisfied, "missing": missing}
+
+
+def _extract_legal_facts(text: str) -> list[LegalFact]:
+    norm = _norm(text)
+    facts: list[LegalFact] = []
+
+    def _add_fact(fact_type: str, value: str, evidence: str) -> None:
+        if any(f["fact_type"] == fact_type and f["value"] == value for f in facts):
+            return
+        facts.append(LegalFact(fact_type=fact_type, value=value, evidence=evidence))
+
+    if any(
+        t in norm
+        for t in {"from partners", "from third parties", "data aggregators", "public records", "external datasets"}
+    ):
+        _add_fact("data_source", "third_party", "collect/obtain data from partners/third parties/external sources")
+    if any(t in norm for t in {"as long as necessary", "indefinite", "indefinitely", "extended period"}):
+        _add_fact(
+            "retention_policy",
+            "undefined_duration",
+            "retention period wording indicates indefinite or undefined duration",
+        )
+    if any(t in norm for t in {"inferred consent", "continued use", "consent inferred"}):
+        _add_fact(
+            "lawful_basis_model", "consent_inferred_from_use", "consent model appears inferred from continued use"
+        )
+    if any(t in norm for t in {"without human intervention", "legal effect", "similarly significant"}):
+        _add_fact(
+            "automated_decisioning",
+            "article22_risk_signal",
+            "automated-decisioning effects/safeguard risk wording detected",
+        )
+    if any(t in norm for t in {"outside the eea", "third country", "international transfer", "outside jurisdiction"}):
+        _add_fact("transfer_scope", "outside_jurisdiction", "international/third-country transfer wording is visible")
+        if any(t in norm for t in {"where necessary", "where appropriate", "when needed", "as applicable"}):
+            _add_fact("transfer_safeguards", "vague", "transfer safeguards wording appears vague/conditional")
+    _formal_recipient_phrases = {"categories of recipients", "recipient categories", "types of recipients"}
+    recipient_actor_signals = {"third party", "third-party", "partners", "vendors", "processors", "service providers"}
+    has_formal_recipients = any(t in norm for t in _formal_recipient_phrases)
+    has_named_categories = any(t in norm for t in _RECIPIENT_NAMED_CATEGORY_SIGNALS)
+    if has_formal_recipients or has_named_categories:
+        _add_fact("recipient_categories", "present", "recipient category disclosure is present")
+    elif any(t in norm for t in recipient_actor_signals):
+        _add_fact("recipient_categories", "missing", "recipient actors are mentioned without identifiable categories")
+    has_lawful_basis = any(t in norm for t in {"legal basis", "lawful basis", "article 6"})
+    if has_lawful_basis:
+        _add_fact("lawful_basis", "present", "lawful basis disclosure language is present")
+        purpose_mapped = any(
+            t in norm for t in {"for the purpose of", "for purposes of", "for each purpose", "by purpose"}
+        )
+        if not purpose_mapped:
+            _add_fact(
+                "lawful_basis", "present_but_unmapped", "lawful basis is present but not clearly mapped to purposes"
+            )
+    profiling_present = any(t in norm for t in {"profiling", "automated decision", "scoring", "segmentation"})
+    profiling_detail_present = any(
+        t in norm for t in {"logic involved", "significance", "envisaged consequences", "human intervention"}
+    )
+    if profiling_present and not profiling_detail_present:
+        _add_fact(
+            "profiling_transparency",
+            "missing_required_details",
+            "profiling/ADM is present without required transparency detail",
+        )
+    return facts
+
+
+def _defect_type_from_facts(issue_name: str, facts: list[LegalFact]) -> str | None:
+    facts_set = {(f["fact_type"], f["value"]) for f in facts}
+    if issue_name == "missing_legal_basis" and ("lawful_basis", "present_but_unmapped") in facts_set:
+        return "present_but_invalid_disclosure"
+    if issue_name == "missing_legal_basis" and ("lawful_basis_model", "consent_inferred_from_use") in facts_set:
+        return "potential_unlawful_practice"
+    if issue_name == "missing_retention" and ("retention_policy", "undefined_duration") in facts_set:
+        return "potential_unlawful_practice"
+    if issue_name == "missing_transfer_notice" and ("transfer_safeguards", "vague") in facts_set:
+        return "present_but_invalid_disclosure"
+    if issue_name == "recipients_disclosure_gap" and ("recipient_categories", "missing") in facts_set:
+        return "present_but_invalid_disclosure"
+    if issue_name == "profiling_disclosure_gap" and ("profiling_transparency", "missing_required_details") in facts_set:
+        return "present_but_invalid_disclosure"
+    return None
+
+
+def _legal_reasoning_step(
+    section: SectionData,
+    issue: CandidateIssue,
+    qualification: LegalQualification,
+    precomputed_facts: list[LegalFact] | None = None,
+) -> tuple[list[LegalFact], str]:
+    facts = (
+        precomputed_facts
+        if precomputed_facts is not None
+        else _extract_legal_facts(f"{section.section_title}. {section.content}")
+    )
+    validation = _validate_family_obligations(
+        qualification["obligation_family"], f"{section.section_title}. {section.content}", facts
+    )
+    severity_recommendation = "high" if qualification["priority_bucket"] == "fatal" else "medium"
+    narrative = (
+        f"Legal reasoning pipeline: facts={facts}; "
+        f"mandatory_posture={issue.get('legal_posture')}; "
+        f"posture_reason={issue.get('legal_posture_reason')}; "
+        f"triggered_obligation_family={qualification['obligation_family']}; "
+        f"obligation_validation={validation}; "
+        f"legal_validation={qualification['defect_type']}; "
+        f"severity_recommendation={severity_recommendation}."
+    )
+    return facts, narrative
+
+
+def _is_publishable_finding(section_id: str, status: str, classification: str | None, finding_type: str) -> bool:
+    if section_id.startswith("__"):
+        return False
+    if status in {"needs review", "not applicable"}:
+        return False
+    if finding_type == "supporting_evidence":
+        return False
+    if classification == "supporting_evidence_internal_only":
+        return False
+    if classification in {"diagnostic_internal_only", "contradiction_internal_only", "retrieval_failure_internal_only"}:
+        return False
+    # Blocker 2: not_assessable findings must never reach publish stage
+    if classification == "not_assessable":
+        return False
+    return True
+
+
+def _pre_persist_consistency_gate(
+    issue_name: str,
+    claim_types: set[str],
+    obligation_under_review: str,
+    citations: list[LlmCitation],
+    remediation_note: str | None,
+    classification: str | None,
+) -> tuple[bool, str | None]:
+    if not _consistency_validator(issue_name, claim_types, citations, remediation_note):
+        return False, "issue/article/citation/remediation mismatch"
+    claim_issue_ids = _claim_issue_ids(claim_types)
+    if claim_issue_ids and issue_name not in claim_issue_ids:
+        return False, "issue type does not match extracted claim type"
+    if obligation_under_review:
+        obligation_map = {
+            "controller_contact": {"missing_controller_identity", "missing_controller_contact"},
+            "legal_basis": {"missing_legal_basis"},
+            "retention": {"missing_retention", "missing_retention_period"},
+            "rights": {"missing_rights_information", "missing_rights_notice"},
+            "complaint": {"missing_complaint_right"},
+            "transfer": {
+                "missing_transfer_notice",
+                "missing_transfer_safeguards_disclosure",
+                "missing_transfer_disclosure",
+            },
+        }
+        allowed_issues = obligation_map.get(obligation_under_review, set())
+        if allowed_issues and issue_name not in allowed_issues:
+            return False, "obligation_under_review mismatches issue type"
+    if classification == "not_assessable" and citations:
+        return False, "not_assessable finding should not carry substantive citation chain"
+    return True, None
+
+
+def _spot_candidate_issues(section: SectionData, collection_mode: str) -> list[CandidateIssue]:
+    text = _section_context_signals(section)
+    candidates: list[CandidateIssue] = []
+    patterns: list[tuple[str, set[str], str]] = [
+        ("missing_controller_identity", {"controller", "identity", "contact"}, "document"),
+        ("missing_legal_basis", {"legal basis", "lawful basis"}, "document"),
+        ("missing_retention", {"retention", "kept for", "storage period"}, "document"),
+        ("missing_rights_information", {"right to access", "rectification", "erasure", "object"}, "document"),
+        ("missing_complaint_right", {"supervisory authority", "complaint"}, "document"),
+        ("missing_transfer_notice", {"transfer", "third country", "outside the eea"}, "local"),
+        ("profiling_disclosure_gap", {"profil", "score", "segmentation", "predictive"}, "local"),
+        (
+            "special_category_basis_unclear",
+            {"health", "biometric", "religious", "political", "ethnic", "genetic"},
+            "local",
+        ),
+        ("controller_processor_role_ambiguity", {"controller", "processor", "on behalf of"}, "local"),
+    ]
+    for issue, signals, level in patterns:
+        hits = sum(1 for s in signals if s in text)
+        if hits == 0:
+            continue
+        candidates.append(
+            CandidateIssue(
+                candidate_issue_type=issue,
+                evidence_text=section.content[:260],
+                evidence_strength=min(0.95, 0.55 + (hits * 0.12)),
+                local_or_document_level=level,
+                possible_collection_mode=collection_mode,
+                is_visible_gap=hits > 0,
+                legal_posture="missing_disclosure",
+                legal_posture_reason="Initial issue-spotting placeholder; overwritten by mandatory legal posture layer.",
+            )
+        )
+    # Family-first fallback for notice disclosure sections: avoid defaulting to controller identity.
+    facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+    if not candidates and (_is_notice_disclosure_section(section) or bool(facts)):
+        fact_set = {(f["fact_type"], f["value"]) for f in facts}
+        fallback_issue = "missing_legal_basis"
+        if ("data_source", "third_party") in fact_set:
+            fallback_issue = "article_14_indirect_collection_gap"
+        elif ("transfer_scope", "outside_jurisdiction") in fact_set:
+            fallback_issue = "missing_transfer_notice"
+        elif ("profiling_transparency", "missing_required_details") in fact_set or (
+            "automated_decisioning",
+            "article22_risk_signal",
+        ) in fact_set:
+            fallback_issue = "profiling_disclosure_gap"
+        elif ("recipient_categories", "missing") in fact_set:
+            fallback_issue = "recipients_disclosure_gap"
+        elif ("retention_policy", "undefined_duration") in fact_set:
+            fallback_issue = "missing_retention"
+        elif ("lawful_basis_model", "consent_inferred_from_use") in fact_set or (
+            "lawful_basis",
+            "present_but_unmapped",
+        ) in fact_set:
+            fallback_issue = "missing_legal_basis"
+        if any(t in text for t in {"profil", "automated", "score", "segmentation"}):
+            fallback_issue = "profiling_disclosure_gap"
+        elif any(t in text for t in {"transfer", "third country", "outside the eea"}):
+            fallback_issue = "missing_transfer_notice"
+        elif any(t in text for t in {"processor", "on behalf of"}):
+            fallback_issue = "controller_processor_role_ambiguity"
+        elif any(t in text for t in {"partner", "affiliate", "broker", "source", "indirect"}):
+            fallback_issue = "article_14_indirect_collection_gap"
+        elif any(t in text for t in {"retention", "storage period", "kept for"}):
+            fallback_issue = "missing_retention"
+        elif any(t in text for t in {"rights", "access", "erasure", "rectification", "objection"}):
+            fallback_issue = "missing_rights_information"
+        elif any(t in text for t in {"supervisory authority", "complaint"}):
+            fallback_issue = "missing_complaint_right"
+        candidates.append(
+            CandidateIssue(
+                candidate_issue_type=fallback_issue,
+                evidence_text=section.content[:220],
+                evidence_strength=0.42,
+                local_or_document_level="local",
+                possible_collection_mode=collection_mode,
+                is_visible_gap=False,
+                legal_posture="missing_disclosure",
+                legal_posture_reason="Initial fallback placeholder; overwritten by mandatory legal posture layer.",
+            )
+        )
+    priority = [
+        "profiling_disclosure_gap",
+        "missing_transfer_notice",
+        "article_14_indirect_collection_gap",
+        "controller_processor_role_ambiguity",
+        "missing_legal_basis",
+        "missing_retention",
+        "missing_rights_information",
+        "missing_complaint_right",
+        "missing_controller_identity",
+    ]
+    rank = {name: idx for idx, name in enumerate(priority)}
+    facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+    for candidate in candidates:
+        posture, reason = _legal_posture_layer(candidate, facts)
+        candidate["legal_posture"] = posture
+        candidate["legal_posture_reason"] = reason
+    candidates.sort(key=lambda c: (rank.get(c["candidate_issue_type"], 999), -(c["evidence_strength"] or 0.0)))
+    return candidates[:6]
+
+
+def _legal_qualification_for_issue(issue: CandidateIssue, facts: list[LegalFact] | None = None) -> LegalQualification:
+    posture_to_defect = {
+        "missing_disclosure": "missing_disclosure",
+        "incomplete_disclosure": "incomplete_disclosure",
+        "present_but_legally_invalid": "present_but_invalid_disclosure",
+        "potential_unlawful_practice": "potential_unlawful_practice",
+    }
+    posture = issue.get("legal_posture")
+    defect_type = posture_to_defect[posture] if posture in posture_to_defect else _defect_type_for_issue(issue)
+    issue_name = issue["candidate_issue_type"]
+    obligation_family = _obligation_family_for_issue(issue_name)
+    if facts:
+        defect_from_facts = _defect_type_from_facts(issue_name, facts)
+        if defect_from_facts and defect_type not in {"present_but_invalid_disclosure", "potential_unlawful_practice"}:
+            defect_type = defect_from_facts
+    primary, secondary, rejected = FAMILY_ARTICLE_MAP.get(
+        obligation_family,
+        ("13(1)(a)", ["14(1)(a)"], ["21", "22"]),
+    )
+    secondary = list(secondary)
+    reason_fit = (
+        f"Article set selected from obligation family '{obligation_family}' rather than snippet-level matching."
+    )
+    reason_reject = "Rejected articles are outside the triggered obligation family for this finding."
+    facts_set = {(f["fact_type"], f["value"]) for f in (facts or [])}
+
+    if obligation_family == "lawful_basis_and_validity" and defect_type in {
+        "present_but_invalid_disclosure",
+        "potential_unlawful_practice",
+    }:
+        secondary = [*secondary, "6(1)", "7(1)"]
+        reason_fit = "Lawful-basis issue kept in Article 13/14 notice family, with Articles 6/7 added because validity is implicated."
+    if (
+        obligation_family == "retention_transparency_and_storage_limitation"
+        and defect_type == "potential_unlawful_practice"
+    ):
+        secondary = [*secondary, "5(1)(e)"]
+        reason_fit = "Retention issue mapped to Articles 13/14, with Article 5(1)(e) added due to excessive/indefinite retention pattern."
+    if obligation_family == "profiling_and_article22" and (
+        defect_type == "potential_unlawful_practice" or ("automated_decisioning", "article22_risk_signal") in facts_set
+    ):
+        secondary = [*secondary, "22"]
+        reason_fit = "Profiling issue mapped to Articles 13/14 with Article 22 added because legal/similarly-significant effects are indicated."
+
+    if defect_type == "potential_unlawful_practice":
+        if issue_name == "missing_legal_basis":
+            primary = "6(1)"
+            secondary = ["7(1)", "13(1)(c)", "14(1)(c)"]
+            rejected = ["13(1)(a)"]
+            reason_fit = (
+                "Visible wording indicates potentially invalid lawful-basis practice, not only missing notice text."
+            )
+            reason_reject = "Identity anchors are not primary for lawful-basis validity failures."
+        elif issue_name == "missing_retention":
+            primary = "5(1)(e)"
+            secondary = ["13(2)(a)", "14(2)(a)"]
+            rejected = ["6(1)"]
+            reason_fit = "Visible indefinite/excessive retention wording may indicate storage-limitation breach."
+            reason_reject = "Lawful basis provisions are not primary for storage-limitation defects."
+        elif issue_name == "profiling_disclosure_gap":
+            primary = "22"
+            secondary = ["13(2)(f)", "14(2)(g)"]
+            rejected = ["21"]
+            reason_fit = "Visible legal/similarly-significant effects indicate potential Article 22 regime relevance."
+            reason_reject = "Article 21 objection right is not primary for automated decisioning safeguards."
+    priority_bucket = (
+        "fatal" if defect_type in {"present_but_invalid_disclosure", "potential_unlawful_practice"} else "material"
+    )
+    return LegalQualification(
+        issue_name=issue_name,
+        obligation_family=obligation_family,
+        defect_type=defect_type,
+        priority_bucket=priority_bucket,
+        primary_article=primary,
+        secondary_articles=secondary,
+        rejected_articles=rejected,
+        reason_primary_article_fits=reason_fit,
+        reason_rejected_articles_do_not_fit=reason_reject,
+    )
+
+
+def _infer_topic(section: SectionData) -> str:
+    title = _norm(section.section_title)
+    content = _norm(section.content)[:1200]
+    if "retention" in title or "retain" in content:
+        return "data retention storage limitation"
+    if "rights" in title or "data subject" in content:
+        return "data subject rights access rectification erasure"
+    if "transfer" in title or "international" in title:
+        return "international transfer safeguards"
+    if "security" in title or "incident" in title:
+        return "security of processing technical organizational measures"
+    if "consent" in title or "lawful" in title:
+        return "lawful basis consent processing"
+    return section.section_title
+
+
+def _infer_document_mode(sections: list[SectionData]) -> str:
+    scores = dict.fromkeys(DOCUMENT_MODE_HINTS, 0)
+    for section in sections:
+        haystack = _norm(f"{section.section_title} {section.content[:500]}")
+        for mode, hints in DOCUMENT_MODE_HINTS.items():
+            scores[mode] += sum(1 for hint in hints if hint in haystack)
+    best_mode = max(scores, key=scores.get)
+    if scores[best_mode] == 0:
+        return "internal_policy"
+    return best_mode
+
+
+def _document_posture_agent(sections: list[SectionData], document_mode: str) -> DocumentPosture:
+    corpus = " ".join(_norm(f"{s.section_title} {s.content[:700]}") for s in sections)
+    has_notice_signals = any(token in corpus for token in {"privacy notice", "privacy policy", "data subject rights"})
+    has_dpa_signals = any(token in corpus for token in {"data processing agreement", "processor", "sub-processor"})
+    has_consent_signals = any(token in corpus for token in {"consent", "withdraw consent"})
+    has_internal_signals = any(
+        token in corpus for token in {"roles and responsibilities", "incident response", "security controls"}
+    )
+    excerpt_like = len(corpus) < 1800 or "..." in corpus
+
+    if has_notice_signals and has_internal_signals:
+        document_type = "mixed_document"
+    elif has_dpa_signals:
+        document_type = "dpa"
+    elif has_notice_signals or document_mode == "privacy_notice":
+        document_type = "external_privacy_notice"
+    elif has_consent_signals:
+        document_type = "consent_text"
+    else:
+        document_type = "internal_policy"
+    if excerpt_like:
+        document_type = f"{document_type}_excerpt"
+
+    triggered = ["articles_12_14_transparency", "article_5_1_a_fairness_transparency"]
+    not_triggered = ["article_22_automated_decision_making"] if "automated" not in corpus else []
+    not_assessable = (
+        ["article_14_source_disclosure"] if _contains_any(corpus, INDIRECT_COLLECTION_SIGNALS) is False else []
+    )
+    if _contains_any(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        triggered.append("articles_44_49_transfers")
+    if "legal basis" in corpus or "lawful basis" in corpus:
+        triggered.append("article_6_legal_basis")
+    return DocumentPosture(
+        document_type=document_type,
+        triggered_duties=triggered,
+        not_triggered_duties=not_triggered,
+        not_assessable_duties=not_assessable,
+    )
+
+
+def _build_document_obligation_map(sections: list[SectionData]) -> dict[str, bool]:
+    corpus = " ".join(_norm(f"{s.section_title} {s.content}") for s in sections)
+    has_controller_identity = any(t in corpus for t in {"controller", "legal entity", "company name"})
+    has_controller_identity = has_controller_identity or any(
+        t in corpus for t in {"inc.", "llc", "corporation", "registered office", "registered address"}
+    )
+    has_controller_identity = has_controller_identity or bool(
+        re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd\.?|limited|corporation|corp\.)\b", corpus)
+    )
+    return {
+        "controller_identity_present": has_controller_identity,
+        "controller_contact_present": any(
+            t in corpus for t in {"contact details", "privacy@", "email", "contact us", "address"}
+        ),
+        "dpo_present": any(t in corpus for t in {"data protection officer", "dpo"}),
+        "rights_present": any(t in corpus for t in {"right of access", "right to object", "rectification", "erasure"}),
+        "retention_present": any(t in corpus for t in {"retention", "kept for", "storage period"}),
+        "complaint_present": any(
+            t in corpus for t in {"complaint", "supervisory authority", "data protection authority"}
+        ),
+        "transfer_present": any(t in corpus for t in THIRD_COUNTRY_TRANSFER_SIGNALS),
+        "recipients_present": any(t in corpus for t in {"recipient", "third party", "processor"}),
+        "legal_basis_present": any(
+            t in corpus
+            for t in {
+                "legal basis",
+                "lawful basis",
+                "article 6",
+                "legal bases",
+                "lawful bases",
+                "lawful ground",
+                "processing ground",
+                "basis for processing",
+                "bases for processing",
+            }
+        ),
+    }
+
+
+def _applicability_decision(
+    section: SectionData, memo: ApplicabilityMemo, claim_types: set[str] | None = None
+) -> ApplicabilityDecision:
+    claim_types = claim_types or set()
+    mode = memo["collection_mode"]
+    if mode == "direct":
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="confirmed",
+            allowed_notice_articles=[13],
+            unresolved_trigger=None,
+        )
+    if mode == "indirect":
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="confirmed",
+            allowed_notice_articles=[14],
+            unresolved_trigger=None,
+        )
+    if mode == "mixed":
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="probable",
+            allowed_notice_articles=[13, 14],
+            unresolved_trigger="mixed collection signals",
+        )
+    hint_text = _section_context_signals(section)
+    unresolved = "insufficient source wording to resolve direct vs indirect collection"
+    if "collect" in hint_text and "from" not in hint_text:
+        return ApplicabilityDecision(
+            collection_mode="direct",
+            applicability_status="probable",
+            allowed_notice_articles=[13],
+            unresolved_trigger=unresolved,
+        )
+    if claim_types & CORE_NOTICE_CLAIMS:
+        return ApplicabilityDecision(
+            collection_mode=mode,
+            applicability_status="probable",
+            allowed_notice_articles=[13, 14],
+            unresolved_trigger=unresolved,
+        )
+    return ApplicabilityDecision(
+        collection_mode=mode,
+        applicability_status="unresolved",
+        allowed_notice_articles=[],
+        unresolved_trigger=unresolved,
+    )
+
+
+def _build_retrieval_query(section: SectionData, topic: str, document_mode: str) -> str:
+    article_hint = MODE_ARTICLE_HINTS.get(document_mode, "prioritize directly applicable GDPR obligations")
+    snippet = section.content[:700]
+    return f"GDPR obligations for {topic}. Context: {article_hint}. Section text: {snippet}"
+
+
+def _article_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    m = re.search(r"\d+", str(value))
+    if not m:
+        return None
+    return int(m.group(0))
+
+
+def _contains_any(text: str, signals: Iterable[str]) -> bool:
+    return any(signal in text for signal in signals)
+
+
+def _section_context_signals(section: SectionData) -> str:
+    return _norm(f"{section.section_title} {section.content[:1200]}")
+
+
+def _profiling_tier_from_corpus(corpus: str) -> str | None:
+    profiling_signals = {"profile", "profiling", "score", "scoring", "segment", "segmentation", "model", "ranking"}
+    automated_decision_signals = {
+        "automated decision",
+        "automated decision-making",
+        "solely automated",
+        "without human intervention",
+        "algorithmic decision",
+    }
+    significant_effect_signals = {
+        "legal effect",
+        "similarly significant",
+        "credit denial",
+        "loan denial",
+        "employment decision",
+        "benefit denial",
+        "eligibility decision",
+    }
+    if not _contains_any(corpus, profiling_signals):
+        return None
+    if _contains_any(corpus, automated_decision_signals) and _contains_any(corpus, significant_effect_signals):
+        return "high_impact_automated_decisioning"
+    if _contains_any(corpus, automated_decision_signals):
+        return "automated_decisioning"
+    return "profiling_only"
+
+
+def _extract_notice_cross_references(sections: list[SectionData]) -> list[CrossReference]:
+    visible_section_numbers: set[str] = set()
+    section_num_re = re.compile(r"\bsection\s+(\d+[a-z]?)\b", re.IGNORECASE)
+    for section in sections:
+        title = _norm(section.section_title)
+        visible_section_numbers.update(section_num_re.findall(title))
+        if re.match(r"^\d+[a-z]?(?:\.\d+)?", title):
+            visible_section_numbers.add(re.match(r"^\d+[a-z]?", title).group(0))  # type: ignore[union-attr]
+
+    references: list[CrossReference] = []
+    topic_tokens = {
+        "rights": {"rights", "access", "rectification", "erasure", "complaint"},
+        "retention": {"retention", "storage", "kept"},
+        "legal_basis": {"legal basis", "lawful basis"},
+        "controller_contact": {"controller", "contact", "details"},
+        "transfer": {"transfer", "third country", "outside eea"},
+    }
+    for section in sections:
+        content = section.content
+        for sentence in re.split(r"(?<=[.!?])\s+", content):
+            lowered = _norm(sentence)
+            if "section" not in lowered:
+                continue
+            for match in section_num_re.finditer(lowered):
+                sec = match.group(1)
+                topic = "general"
+                for topic_name, tokens in topic_tokens.items():
+                    if any(t in lowered for t in tokens):
+                        topic = topic_name
+                        break
+                references.append(
+                    CrossReference(
+                        referenced_topic=topic,
+                        referenced_section_label=f"Section {sec}",
+                        reference_text=sentence.strip()[:260],
+                        section_present_in_reviewed_source="yes" if sec in visible_section_numbers else "no",
+                    )
+                )
+    return references
+
+
+def _source_scope_qualification(
+    sections: list[SectionData], references: list[CrossReference]
+) -> tuple[str, float, list[str]]:
+    unseen = [r["referenced_section_label"] for r in references if r["section_present_in_reviewed_source"] == "no"]
+    if unseen:
+        return "partial_notice_excerpt", 0.9, sorted(list(dict.fromkeys(unseen)))
+    # Any forward/cross reference introduces uncertainty that this excerpt is self-contained.
+    if references:
+        return "uncertain_scope", 0.64, []
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+    if "..." in corpus or any(_section_context_signals(s).endswith(("and", "or", ",")) for s in sections):
+        return "partial_notice_excerpt", 0.72, []
+    numbered_titles = [s.section_title.strip() for s in sections if re.match(r"^\d+", s.section_title.strip())]
+    if numbered_titles and len(numbered_titles) < 3:
+        return "uncertain_scope", 0.55, []
+    parser_completeness_confidence = min(0.98, 0.45 + (len(sections) * 0.06))
+    # Full-notice is only allowed under strict completeness signals.
+    if parser_completeness_confidence >= 0.86:
+        return "full_notice", round(parser_completeness_confidence, 2), []
+    return "uncertain_scope", round(max(0.6, parser_completeness_confidence - 0.1), 2), []
+
+
+def _source_scope_proof_gate(
+    sections: list[SectionData],
+    source_scope: str,
+    source_scope_confidence: float,
+    unseen_sections: list[str],
+) -> tuple[str, float]:
+    if source_scope != "full_notice":
+        return source_scope, source_scope_confidence
+    numbered_titles = [s.section_title.strip() for s in sections if re.match(r"^\\d+", s.section_title.strip())]
+    has_abrupt_tail = any(_section_context_signals(s).endswith(("and", "or", ",")) for s in sections)
+    has_numbering_gaps = bool(numbered_titles) and len(numbered_titles) < 4
+    parser_complete = len(sections) >= 5 and not has_abrupt_tail
+    if unseen_sections or has_numbering_gaps or not parser_complete:
+        downgraded = "partial_notice_excerpt" if unseen_sections else "uncertain_scope"
+        return downgraded, min(source_scope_confidence, 0.74)
+    return source_scope, source_scope_confidence
+
+
+def _issue_has_unseen_reference(issue_id: str, refs: list[CrossReference]) -> bool:
+    topic_map = {
+        "missing_legal_basis": "legal_basis",
+        "missing_retention_period": "retention",
+        "missing_rights_notice": "rights",
+        "missing_complaint_right": "rights",
+        "missing_controller_identity": "controller_identity",
+        "missing_controller_contact": "controller_contact",
+        "missing_transfer_notice": "transfer",
+    }
+    wanted = topic_map.get(issue_id, "general")
+    for ref in refs:
+        if ref["section_present_in_reviewed_source"] == "no" and (ref["referenced_topic"] in {wanted, "general"}):
+            return True
+    return False
+
+
+def _preferred_articles_for_section(section: SectionData, document_mode: str) -> set[int]:
+    topic = _norm(_infer_topic(section))
+    section_ctx = _section_context_signals(section)
+    if document_mode == "privacy_notice":
+        preferred = set(PRIVACY_NOTICE_PREFERRED_ARTICLES)
+        if "transfer" in topic or "international" in topic:
+            preferred |= {13, 14, 44, 45, 49}
+            if _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+                preferred |= {46, 47}
+        if "rights" in topic or "data subject" in topic:
+            preferred |= {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
+        if "retention" in topic:
+            preferred |= {5, 13, 14}
+        return preferred
+    return set(INTERNAL_POLICY_PREFERRED_ARTICLES)
+
+
+def _section_guidance(section: SectionData, document_mode: str) -> str:
+    topic = _norm(_infer_topic(section))
+    section_ctx = _section_context_signals(section)
+    if document_mode != "privacy_notice":
+        return (
+            "Use accountability-focused analysis. Prefer Articles 5, 24, 25, 30, and 32 for internal controls. "
+            "Use Article 88 only for explicit employment-processing context."
+        )
+    if "transfer" in topic or "international" in topic:
+        return (
+            "For privacy notices: first test disclosure obligations under Articles 13(1)(f) and 14(1)(f). "
+            "Use Chapter V transfer mechanism support (Articles 44-49, especially 46) only when transfer context is explicit. "
+            "Do not use Articles 13(3)-(4), 15, or 18 as primary transfer-safeguard basis."
+        )
+    if "rights" in topic or "data subject" in topic:
+        return (
+            "For privacy notices: assess rights notice coverage under Articles 13(2)(b)-(d) and 14(2)(c)-(e), "
+            "then use Articles 15-21 only as supporting rights context."
+        )
+    if "lawful basis" in topic or "consent" in topic:
+        return (
+            "For privacy notices: legal basis and purpose disclosures should map to Articles 13(1)(c) and 14(1)(c). "
+            "Do not use Articles 24 or 25 as substitute citations for notice disclosure duties."
+        )
+    if "profile" in section_ctx or "scor" in section_ctx or "segment" in section_ctx or "churn" in section_ctx:
+        return (
+            "The section appears to discuss profiling outputs; evaluate transparency under Articles 13(2)(f) and 14(2)(g), "
+            "and reference Article 22 only conditionally if legal or similarly significant effects are explicitly indicated."
+        )
+    if "retention" in topic:
+        return "For privacy notices: prioritize retention transparency under Articles 13(2)(a), 14(2)(a), and Article 5(1)(e)."
+    return (
+        "For privacy notices: check mandatory disclosures (controller identity/contact, DPO where applicable, legal basis, "
+        "recipients, transfer disclosures, retention criteria, rights, and complaint rights) with Articles 12-14 priority."
+    )
+
+
+def _rerank_chunks_for_mode(
+    section: SectionData, chunks: list[RetrievalChunk], document_mode: str
+) -> list[RetrievalChunk]:
+    if not chunks:
+        return chunks
+    section_ctx = _section_context_signals(section)
+    preferred = _preferred_articles_for_section(section, document_mode)
+    allows_employment = _contains_any(section_ctx, EMPLOYMENT_SIGNALS)
+    allows_ropa = _contains_any(section_ctx, ROPA_SIGNALS)
+
+    scored: list[tuple[float, RetrievalChunk]] = []
+    for ch in chunks:
+        article = _article_int(ch.article_number)
+        adjusted = ch.score
+        if article in preferred:
+            adjusted += 0.12
+        if document_mode == "privacy_notice":
+            if article == 88 and not allows_employment:
+                adjusted -= 0.20
+            if article == 30 and not allows_ropa:
+                adjusted -= 0.15
+            if article in PRIVACY_NOTICE_DISCOURAGED_ARTICLES:
+                adjusted -= 0.05
+        scored.append((adjusted, ch))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [ch for _score, ch in scored]
+
+
+def _topic_keywords(topic: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", _norm(topic)) if len(w) > 3}
+
+
+def _retry_needed(chunks: list[RetrievalChunk], topic: str) -> bool:
+    if not chunks:
+        return True
+    top1 = chunks[0].score
+    keys = _topic_keywords(topic)
+    overlap_hits = 0
+    for ch in chunks[:5]:
+        txt = _norm(ch.content)
+        if any(k in txt for k in keys):
+            overlap_hits += 1
+    return top1 < 0.45 or overlap_hits < 2
+
+
+def _evidence_sufficient(chunks: list[RetrievalChunk]) -> bool:
+    strong = [c for c in chunks[:5] if c.score >= 0.50]
+    if len(strong) < 2:
+        return False
+    for c in chunks[:5]:
+        txt = _norm(c.content)
+        if any(k in txt for k in OBLIGATION_WORDS):
+            return True
+    return False
+
+
+def _paragraph_ref_compatible(citation_ref: str | None, chunk_ref: str | None) -> bool:
+    if not citation_ref or not chunk_ref:
+        return True
+    a = _norm(citation_ref)
+    b = _norm(chunk_ref)
+    return a == b or a in b or b in a
+
+
+def _claim_types_from_text(text: str) -> set[str]:
+    norm = _norm(text)
+    claims: set[str] = set()
+    if any(token in norm for token in {"legal basis", "lawful basis", "article 6"}):
+        claims.add("legal_basis")
+    if any(token in norm for token in {"retention", "storage period", "kept for"}):
+        claims.add("retention")
+    if any(token in norm for token in {"rights", "access", "erasure", "portability", "rectification"}):
+        claims.add("rights")
+    if any(token in norm for token in {"right to object", "object to processing", "direct marketing"}):
+        claims.add("right_to_object")
+    if any(token in norm for token in {"controller identity", "contact details", "controller"}):
+        claims.add("controller_contact")
+    if any(token in norm for token in {"supervisory authority", "complaint"}):
+        claims.add("complaint")
+    if any(token in norm for token in {"transfer", "third country", "adequacy", "safeguards"}):
+        claims.add("transfer")
+    if any(token in norm for token in {"special category", "sensitive data", "article 9", "explicit consent"}):
+        claims.add("sensitive_data")
+    if any(
+        token in norm
+        for token in {"profiling", "automated decision", "article 22", "meaningful information about logic"}
+    ):
+        claims.add("profiling")
+    return claims
+
+
+def _citation_claim_compatible(citation: LlmCitation, chunk: RetrievalChunk, claim_types: set[str]) -> bool:
+    if not claim_types:
+        return True
+    article = _article_int(citation.article_number)
+    para = _norm(chunk.paragraph_ref or citation.paragraph_ref or "")
+    para_known = bool(para)
+    if article is None:
+        return False
+
+    allowed = False
+    if "legal_basis" in claim_types:
+        allowed = allowed or (article in {6}) or (article in {13, 14} and (not para_known or para.startswith("1")))
+    if "retention" in claim_types:
+        allowed = allowed or (article == 5) or (article in {13, 14} and (not para_known or para.startswith("2")))
+    if "rights" in claim_types:
+        allowed = (
+            allowed
+            or (article == 12)
+            or (article in {13, 14} and (not para_known or para.startswith("2")))
+            or (article in {15, 16, 17, 18, 19, 20, 22})
+        )
+        if "right_to_object" in claim_types:
+            allowed = allowed or article == 21
+    if "controller_contact" in claim_types:
+        allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("1")))
+    if "complaint" in claim_types:
+        allowed = allowed or (article in {13, 14} and (not para_known or para.startswith("2"))) or article == 77
+    if "transfer" in claim_types:
+        if article in {44, 45, 46, 47, 49}:
+            allowed = True
+        elif article in {13, 14}:
+            transfer_terms = {"third country", "international transfer", "outside the eea", "outside eea", "safeguard"}
+            content = _norm(chunk.content)
+            has_transfer_content = any(term in content for term in transfer_terms)
+            allowed = allowed or ((not para_known or para.startswith("1")) and has_transfer_content)
+    if "sensitive_data" in claim_types:
+        allowed = allowed or article in {9, 13, 14}
+    if "profiling" in claim_types:
+        norm_text = _norm(chunk.content)
+        has_significant_effect_signal = any(
+            t in norm_text for t in {"legal effect", "similarly significant", "automated decision-making", "article 22"}
+        )
+        if article in {13, 14}:
+            allowed = True
+        elif article == 22:
+            allowed = allowed or has_significant_effect_signal
+    return allowed
+
+
+def _claim_has_primary_anchor(claim_types: set[str], citations: list[LlmCitation]) -> bool:
+    if not claim_types:
+        return bool(citations)
+    article_set = {_article_int(c.article_number) for c in citations}
+    for claim in claim_types:
+        allowed = CLAIM_PRIMARY_ARTICLES.get(claim)
+        if not allowed:
+            continue
+        if not any(article in allowed for article in article_set):
+            return False
+    return True
+
+
+def _claim_type_to_issue_id(claim_type: str) -> str:
+    mapping = {
+        "controller_contact": "missing_controller_contact",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights": "missing_rights_notice",
+        "complaint": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "sensitive_data": "special_category_basis_unclear",
+        "right_to_object": "missing_rights_notice",
+    }
+    return mapping.get(claim_type, claim_type)
+
+
+def _claim_issue_ids(claim_types: set[str]) -> set[str]:
+    return {_claim_type_to_issue_id(c) for c in claim_types}
+
+
+def _has_explicit_gdpr_fact(text: str) -> bool:
+    norm = _norm(text)
+    explicit_fact_signals = {
+        "consent",
+        "lawful basis",
+        "legal basis",
+        "retention",
+        "storage period",
+        "kept for",
+        "recipient",
+        "share",
+        "third party",
+        "third-party",
+        "outside the eea",
+        "third country",
+        "international transfer",
+        "profiling",
+        "automated decision",
+        "without human intervention",
+        "data source",
+        "partner",
+        "cookies",
+        "tracking",
+        "supervisory authority",
+        "complaint",
+        "right to access",
+        "rectification",
+        "erasure",
+        "objection",
+    }
+    return any(signal in norm for signal in explicit_fact_signals)
+
+
+def _most_specific_article_for_claim(claim_type: str, available_articles: set[int]) -> int | None:
+    preference = {
+        "legal_basis": [13, 14, 6, 7, 5],
+        "retention": [13, 14, 5],
+        "rights": [13, 14, 12, 21, 22, 15, 16, 17, 18, 19, 20],
+        "right_to_object": [21, 13, 14, 12],
+        "controller_contact": [13, 14, 12],
+        "complaint": [13, 14, 77, 12],
+        "transfer": [13, 14, 44, 45, 46, 47, 49],
+        "sensitive_data": [9, 13, 14, 6],
+        "profiling": [13, 14, 22, 21],
+    }
+    for article in preference.get(claim_type, []):
+        if article in available_articles:
+            return article
+    return None
+
+
+def _applicability_memo(section: SectionData, claim_types: set[str], posture: DocumentPosture) -> ApplicabilityMemo:
+    mode = _collection_mode(section)
+    visibility = "visible"
+    section_text = f"{section.section_title}. {section.content}"
+    explicit_fact_visible = _has_explicit_gdpr_fact(section_text)
+    # Never suppress as not_assessable when explicit risk patterns are present — they
+    # constitute assessable evidence regardless of excerpt length.
+    explicit_violations_present = bool(_explicit_violation_hits(section_text))
+    if len(section.content.strip()) < 140 and not explicit_fact_visible and not explicit_violations_present:
+        visibility = "not_assessable"
+    elif any(token in _norm(section.content) for token in {"may", "might", "where applicable"}):
+        visibility = "inferred"
+    obligation = ", ".join(sorted(claim_types)) if claim_types else "mandatory transparency disclosures"
+    alternatives = ["internal governance articles (24/25/30/32) for external notice gaps"]
+    if mode in {"direct", "indirect"}:
+        alternatives.append(f"using Article {'14' if mode == 'direct' else '13'} as primary notice article")
+    confidence = 0.78 if visibility == "visible" else 0.58 if visibility == "inferred" else 0.35
+    if "excerpt" in posture["document_type"]:
+        confidence = max(0.25, confidence - 0.2)
+    return ApplicabilityMemo(
+        obligation=obligation,
+        applicability_reasoning=(
+            f"Section posture={posture['document_type']}; collection_mode={mode}; "
+            f"triggered duties={', '.join(posture['triggered_duties']) or 'none'}."
+        ),
+        collection_mode=mode,
+        visibility=visibility,
+        applicability_confidence=round(confidence, 2),
+        disqualifying_alternatives=alternatives,
+    )
+
+
+def _reviewer_agent(
+    finding: LlmFinding,
+    citations: list[LlmCitation],
+    claim_types: set[str],
+    memo: ApplicabilityMemo,
+) -> tuple[LlmFinding, list[LlmCitation]]:
+    if finding.status not in {"gap", "partial"}:
+        return finding, citations
+    if memo["visibility"] == "not_assessable":
+        return (
+            LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note="Not assessable from excerpt: legal trigger is conditional or evidence is incomplete.",
+                remediation_note="Obtain the complete privacy notice section to complete legal qualification.",
+                citations=[],
+            ),
+            [],
+        )
+    if not citations:
+        return finding, citations
+
+    available_articles = {
+        _article_int(c.article_number) for c in citations if _article_int(c.article_number) is not None
+    }
+    selected: list[LlmCitation] = []
+    used_articles: set[int] = set()
+    for claim in sorted(claim_types):
+        best = _most_specific_article_for_claim(claim, available_articles)
+        if best is None or best in used_articles:
+            continue
+        chosen = next((c for c in citations if _article_int(c.article_number) == best), None)
+        if chosen:
+            selected.append(chosen)
+            used_articles.add(best)
+    if selected:
+        citations = selected[:3]
+    return finding, citations
+
+
+def _has_claim_citation_contradiction(claim_types: set[str], citations: list[LlmCitation]) -> bool:
+    issue_ids = _claim_issue_ids(claim_types)
+    articles = {_article_int(c.article_number) for c in citations}
+    for issue in issue_ids:
+        rules = CLAIM_ARTICLE_RULES.get(issue)
+        if not rules:
+            continue
+        disallowed = rules.get("disallowed", set())
+        if any(a in disallowed for a in articles if a is not None):
+            return True
+        allowed = rules.get("primary", set()) | rules.get("support", set())
+        if allowed and not any(a in allowed for a in articles if a is not None):
+            return True
+    return False
+
+
+def _citation_diagnostic_reason(section: SectionData, claim_types: set[str], source_mode: str) -> str:
+    if not claim_types:
+        return "No claim type could be inferred from the finding text."
+    if source_mode == "unknown":
+        return "Collection source mode is ambiguous; Article 13 vs 14 applicability could not be confirmed."
+    missing = ", ".join(sorted(claim_types))
+    return f"Validated citations did not satisfy primary legal anchors for claims: {missing}."
+
+
+def _fallback_claim_types_from_section(section: SectionData) -> set[str]:
+    topic = _norm(_infer_topic(section))
+    inferred: set[str] = set()
+    if "retention" in topic:
+        inferred.add("retention")
+    if "rights" in topic or "data subject" in topic:
+        inferred.add("rights")
+    if "transfer" in topic or "international" in topic:
+        inferred.add("transfer")
+    if "consent" in topic or "lawful basis" in topic:
+        inferred.add("legal_basis")
+    section_ctx = _section_context_signals(section)
+    if _contains_any(section_ctx, {"controller", "contact", "dpo"}):
+        inferred.add("controller_contact")
+    return inferred
+
+
+def _finding_mentions_internal_control_only(text: str) -> bool:
+    norm = _norm(text)
+    internal_signals = {
+        "personal data breach",
+        "breach notification authority",
+        "incident response",
+        "undue delay",
+        "article 33",
+        "article 34",
+        "article 70",
+    }
+    return any(s in norm for s in internal_signals)
+
+
+def _is_legally_relevant_citation(citation: LlmCitation, section: SectionData, document_mode: str) -> bool:
+    article = _article_int(citation.article_number)
+    if article is None:
+        return False
+    section_ctx = _section_context_signals(section)
+    if document_mode == "privacy_notice":
+        if article not in PRIVACY_NOTICE_SCOPE_PRIMARY:
+            return False
+        if article in {24, 25, 33, 34, 70, 18}:
+            return False
+        if article == 88 and not _contains_any(section_ctx, EMPLOYMENT_SIGNALS):
+            return False
+        if article == 30 and not _contains_any(section_ctx, ROPA_SIGNALS):
+            return False
+        if article in {44, 45, 46, 47, 49} and not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+            return False
+    preferred = _preferred_articles_for_section(section, document_mode)
+    if article in preferred:
+        return True
+    if document_mode == "internal_policy":
+        return True
+    return article in {1, 2, 3, 4}
+
+
+def _validate_citations(
+    citations: list[LlmCitation],
+    retrieved: list[RetrievalChunk],
+    section: SectionData,
+    document_mode: str,
+    claim_text: str = "",
+) -> list[LlmCitation]:
+    by_chunk = {c.chunk_id: c for c in retrieved}
+    claim_types = _claim_types_from_text(claim_text)
+    if not claim_types:
+        claim_types = _fallback_claim_types_from_section(section)
+    valid: list[LlmCitation] = []
+    source_mode = _collection_mode(section)
+    for cit in citations:
+        chunk = by_chunk.get(cit.chunk_id)
+        if not chunk:
+            citation_validation_failure_total.inc()
+            continue
+        cit_article = _article_int(cit.article_number)
+        chunk_article = _article_int(chunk.article_number)
+        if cit_article is not None and chunk_article is not None:
+            if cit_article != chunk_article:
+                citation_validation_failure_total.inc()
+                continue
+        elif str(cit.article_number).strip() != str(chunk.article_number).strip():
+            citation_validation_failure_total.inc()
+            continue
+        if not _paragraph_ref_compatible(cit.paragraph_ref, chunk.paragraph_ref):
+            citation_validation_failure_total.inc()
+            continue
+        if not cit.chunk_id:
+            citation_validation_failure_total.inc()
+            continue
+        if not _is_legally_relevant_citation(cit, section, document_mode):
+            citation_validation_failure_total.inc()
+            continue
+        if document_mode == "privacy_notice" and not _citation_claim_compatible(cit, chunk, claim_types):
+            citation_validation_failure_total.inc()
+            continue
+        if document_mode == "privacy_notice":
+            article = _article_int(cit.article_number)
+            if (
+                source_mode == "direct"
+                and article == 14
+                and claim_types
+                & {
+                    "controller_contact",
+                    "legal_basis",
+                    "retention",
+                    "rights",
+                    "complaint",
+                }
+            ):
+                citation_validation_failure_total.inc()
+                continue
+            if (
+                source_mode == "indirect"
+                and article == 13
+                and claim_types
+                & {
+                    "controller_contact",
+                    "legal_basis",
+                    "retention",
+                    "rights",
+                    "complaint",
+                }
+            ):
+                citation_validation_failure_total.inc()
+                continue
+
+        # Citation excerpt must be GDPR rule text — not a finding conclusion or policy document text.
+        # Replace if empty OR if LLM wrote a conclusion/policy-text string instead of rule text.
+        if not cit.excerpt or _is_citation_conclusion(cit.excerpt):
+            cit.excerpt = chunk.content[:200]
+        if not cit.article_title:
+            cit.article_title = chunk.article_title
+        valid.append(cit)
+
+    if valid and document_mode == "privacy_notice" and not _claim_has_primary_anchor(claim_types, valid):
+        return []
+    if valid and _has_claim_citation_contradiction(claim_types, valid):
+        return []
+    return valid
+
+
+def _citation_priority_for_notice(section: SectionData, chunk: RetrievalChunk) -> float:
+    article = _article_int(chunk.article_number)
+    if article is None:
+        return -1.0
+    section_ctx = _section_context_signals(section)
+    paragraph = _norm(chunk.paragraph_ref or "")
+    score = 0.0
+    source_mode = _collection_mode(section)
+    if article in {13, 14}:
+        score += 3.0
+        if paragraph in {"1", "2", "1-2", "1(a)-(c)", "2(a)-(e)"}:
+            score += 1.8
+        if paragraph.startswith("3") or paragraph.startswith("4") or paragraph.startswith("5"):
+            score -= 3.0
+        if source_mode == "direct" and article == 13:
+            score += 1.0
+        if source_mode == "indirect" and article == 14:
+            score += 1.0
+        if source_mode == "direct" and article == 14:
+            score -= 0.7
+        if source_mode == "indirect" and article == 13:
+            score -= 0.7
+    if article == 12:
+        score += 2.0
+    if article == 5:
+        score += 1.4
+    if article in {44, 45, 46, 49} and _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        score += 1.2
+    if article == 44 and not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        score -= 1.2
+    return score
+
+
+def _fallback_notice_citations(section: SectionData, chunks: list[RetrievalChunk]) -> list[LlmCitation]:
+    candidates: list[tuple[float, RetrievalChunk]] = []
+    for ch in chunks:
+        article = _article_int(ch.article_number)
+        if article not in {5, 12, 13, 14, 44, 45, 46, 49}:
+            continue
+        priority = _citation_priority_for_notice(section, ch)
+        if priority <= 0:
+            continue
+        candidates.append((priority, ch))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    fallback: list[LlmCitation] = []
+    for _priority, ch in candidates:
+        fallback.append(
+            LlmCitation(
+                chunk_id=ch.chunk_id,
+                article_number=ch.article_number,
+                paragraph_ref=ch.paragraph_ref,
+                article_title=ch.article_title,
+                excerpt=ch.content[:180],
+            )
+        )
+        if len(fallback) >= 3:
+            break
+    return fallback
+
+
+def _missing_notice_requirements(section: SectionData) -> list[str]:
+    text = _section_context_signals(section)
+    if not _is_notice_disclosure_section(section):
+        return []
+    missing: list[str] = []
+    for req, signals in NOTICE_REQUIREMENT_SIGNALS.items():
+        if not _contains_any(text, signals):
+            missing.append(req)
+    return missing
+
+
+def _is_notice_disclosure_section(section: SectionData) -> bool:
+    title = _norm(section.section_title)
+    text = _section_context_signals(section)
+    title_hits = sum(1 for signal in NOTICE_SECTION_TITLE_SIGNALS if signal in title)
+    content_hits = sum(1 for signal in NOTICE_SECTION_CONTENT_SIGNALS if signal in text)
+    if title_hits >= 1:
+        return True
+    if content_hits >= 2:
+        return True
+    return "we collect" in text and ("you" in text or "personal data" in text)
+
+
+def _collection_mode(section: SectionData) -> str:
+    ctx = _section_context_signals(section)
+    direct_score = sum(1 for signal in DIRECT_COLLECTION_SIGNALS if signal in ctx)
+    direct_score += sum(1 for hint in DIRECT_COLLECTION_HINTS if hint in ctx)
+    indirect_score = sum(1 for signal in INDIRECT_COLLECTION_SIGNALS if signal in ctx)
+    indirect_score += sum(1 for hint in INDIRECT_COLLECTION_HINTS if hint in ctx)
+
+    has_direct = direct_score > 0
+    has_indirect = indirect_score > 0
+    if has_direct and has_indirect:
+        return "mixed"
+    if has_indirect:
+        return "indirect"
+    if has_direct:
+        return "direct"
+    if "we collect" in ctx and "personal data" in ctx:
+        return "direct"
+    if "we collect" in ctx and "you" in ctx:
+        return "direct"
+    if ("we receive" in ctx or "we obtain" in ctx) and "from" in ctx:
+        return "indirect"
+    return "unknown"
+
+
+def _targeted_notice_query(section: SectionData) -> str:
+    mode = _collection_mode(section)
+    if mode == "direct":
+        focus = "GDPR Article 13(1)(a)-(f) and 13(2)(a)-(e) mandatory privacy notice disclosures"
+    elif mode == "indirect":
+        focus = "GDPR Article 14(1)(a)-(f) and 14(2)(a)-(e) mandatory privacy notice disclosures"
+    else:
+        focus = "GDPR Articles 13 and 14 mandatory privacy notice disclosures for direct or indirect collection"
+    return f"{focus}. Section context: {section.section_title}. {section.content[:600]}"
+
+
+def _claim_template_query(section: SectionData, claim_types: set[str]) -> str:
+    if "transfer" in claim_types:
+        return (
+            f"GDPR privacy notice transfer disclosure requirements: Articles 13(1)(f), 14(1)(f), 44-49; "
+            f"include adequacy, SCC/BCR safeguards, and how data subjects can obtain safeguard copies. "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "profiling" in claim_types:
+        return (
+            f"GDPR profiling notice obligations: Articles 13(2)(f), 14(2)(g), and Article 22 threshold test "
+            f"(logic, significance, consequences). Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "retention" in claim_types:
+        return (
+            f"GDPR retention notice obligations: Articles 13(2)(a), 14(2)(a), Article 5(1)(e). "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "complaint" in claim_types:
+        return (
+            f"GDPR complaint-right notice obligations: Articles 13(2)(d), 14(2)(e), and Article 77. "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    if "legal_basis" in claim_types:
+        return (
+            f"GDPR legal basis notice obligations: Article 6, Articles 13(1)(c), 14(1)(c), purposes and lawful basis mapping. "
+            f"Section: {section.section_title}. {section.content[:650]}"
+        )
+    return _targeted_notice_query(section)
+
+
+def _tailored_notice_gap_note(section: SectionData, missing: list[str]) -> str:
+    labels = [NOTICE_REQUIREMENT_LABELS.get(item, item) for item in missing]
+    missing_text = ", ".join(labels)
+    mode = _collection_mode(section)
+    if mode == "indirect":
+        basis = "Articles 14(1)-(2)"
+    elif mode == "direct":
+        basis = "Articles 13(1)-(2)"
+    else:
+        basis = "Articles 13(1)-(2) and 14(1)-(2)"
+    return (
+        f"The section appears to omit mandatory privacy-notice disclosures: {missing_text}. "
+        f"Based on the excerpt, this indicates incomplete transparency duties under {basis}."
+    )
+
+
+def _tailored_notice_remediation(section: SectionData, missing: list[str]) -> str:
+    items: list[str] = []
+    if "controller_contact" in missing:
+        items.append("identify the specific controller entity and add contact details")
+    if "legal_basis" in missing:
+        items.append("state legal basis per purpose")
+    if "rights" in missing:
+        items.append("add a full data-subject-rights section")
+    if "retention" in missing:
+        items.append("provide retention period or criteria")
+    if "complaint" in missing:
+        items.append("include supervisory-authority complaint-right information")
+    text = "; ".join(items) if items else "add missing transparency disclosures"
+    return f"Update the notice to {text}, with article-level mapping in Articles 13/14."
+
+
+def _build_mandatory_notice_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
+    missing = _missing_notice_requirements(section)
+    if len(missing) < 2:
+        return None
+    citations = _fallback_notice_citations(section, chunks)
+    if not citations:
+        return None
+    return LlmFinding(
+        status="gap",
+        severity="high" if len(missing) >= 3 else "medium",
+        gap_note=_tailored_notice_gap_note(section, missing),
+        remediation_note=_tailored_notice_remediation(section, missing),
+        citations=citations,
+    )
+
+
+def _build_transfer_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
+    section_ctx = _section_context_signals(section)
+    if not _contains_any(section_ctx, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        return None
+
+    transfer_chunks = [ch for ch in chunks if _article_int(ch.article_number) in {44, 45, 46, 47, 49, 13, 14}]
+    if not transfer_chunks:
+        return None
+
+    transfer_chunks.sort(
+        key=lambda ch: (0 if _article_int(ch.article_number) in {44, 45, 46, 47, 49} else 1, -ch.score)
+    )
+
+    citations: list[LlmCitation] = []
+    for ch in transfer_chunks[:3]:
+        citations.append(
+            LlmCitation(
+                chunk_id=ch.chunk_id,
+                article_number=ch.article_number,
+                paragraph_ref=ch.paragraph_ref,
+                article_title=ch.article_title,
+                excerpt=ch.content[:180],
+            )
+        )
+
+    return LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note=(
+            "The section indicates international or third-country transfers but does not clearly disclose "
+            "transfer mechanism details (adequacy decision or safeguards), as required for transparent disclosures."
+        ),
+        remediation_note=(
+            "Disclose whether transfers rely on adequacy decisions (Article 45) or safeguards such as SCCs (Article 46), "
+            "and specify relevant third-country transfer information in the notice."
+        ),
+        citations=citations,
+    )
+
+
+def _build_retention_gap(section: SectionData, chunks: list[RetrievalChunk]) -> LlmFinding | None:
+    candidates = [ch for ch in chunks if _article_int(ch.article_number) in {5, 13, 14}]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda ch: (0 if _article_int(ch.article_number) in {13, 14} else 1, -ch.score))
+    citations = [
+        LlmCitation(
+            chunk_id=ch.chunk_id,
+            article_number=ch.article_number,
+            paragraph_ref=ch.paragraph_ref,
+            article_title=ch.article_title,
+            excerpt=ch.content[:180],
+        )
+        for ch in candidates[:2]
+    ]
+    return LlmFinding(
+        status="gap",
+        severity="medium",
+        gap_note=(
+            "The section does not clearly disclose the retention period or the criteria used to determine retention duration, "
+            "which is required for privacy-notice transparency."
+        ),
+        remediation_note=(
+            "Add retention period or objective retention criteria for each relevant data category, mapped to Articles 13(2)(a) and 14(2)(a), "
+            "and align storage-limitation language with Article 5(1)(e)."
+        ),
+        citations=citations,
+    )
+
+
+def _salvage_citations_from_retrieved(
+    chunks: list[RetrievalChunk],
+    section: SectionData,
+    document_mode: str,
+    claim_text: str,
+) -> list[LlmCitation]:
+    claim_types = _claim_types_from_text(claim_text)
+    candidates: list[LlmCitation] = []
+    for ch in chunks:
+        cit = LlmCitation(
+            chunk_id=ch.chunk_id,
+            article_number=ch.article_number,
+            paragraph_ref=ch.paragraph_ref,
+            article_title=ch.article_title,
+            excerpt=ch.content[:180],
+        )
+        if not _is_legally_relevant_citation(cit, section, document_mode):
+            continue
+        if document_mode == "privacy_notice" and not _citation_claim_compatible(cit, ch, claim_types):
+            continue
+        candidates.append(cit)
+        if len(candidates) >= 3:
+            break
+    return candidates
+
+
+def _sanitize_legal_reference_text(text: str | None) -> str | None:
+    if not text:
+        return text
+    fixed = text
+    fixed = re.sub(r"Article\s*14\(1\)\(f\)", "Article 14(1)(c)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*14\(a\)", "Article 14(1)(a)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*14\(c\)", "Article 14(1)(c)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*13\(a\)", "Article 13(1)(a)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*13\(b\)", "Article 13(1)(b)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*13\(c\)", "Article 13(1)(c)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(r"Article\s*14\(b\)", "Article 14(1)(b)", fixed, flags=re.IGNORECASE)
+    fixed = re.sub(
+        r"Article\s*13\(1\)\(f\)\s+as\s+the\s+legal\s+basis",
+        "Article 6(1) as the legal basis (and Article 13(1)(f) only for transfer disclosures)",
+        fixed,
+        flags=re.IGNORECASE,
+    )
+    return fixed
+
+
+def _clean_remediation_legal_mismatches(remediation: str | None, claim_types: set[str]) -> str | None:
+    if not remediation:
+        return remediation
+    cleaned = remediation
+    if "legal_basis" in claim_types and re.search(
+        r"article\s*13\(1\)\(f\).{0,30}legal basis", cleaned, flags=re.IGNORECASE
+    ):
+        cleaned = re.sub(
+            r"Article\s*13\(1\)\(f\)",
+            "Article 6(1) and Article 13(1)(c)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    return cleaned
+
+
+def _specialized_legal_review(section: SectionData, claim_types: set[str]) -> SpecializedReview:
+    text = _section_context_signals(section)
+    profiling = None
+    if any(t in text for t in {"profil", "score", "ranking", "segmentation", "predictive", "automated decision"}):
+        has_effect = any(t in text for t in {"legal effect", "similarly significant", "automated decision"})
+        if has_effect:
+            profiling = "Profiling appears present; Article 22 threshold may be triggered in addition to Articles 13(2)(f)/14(2)(g)."
+        else:
+            profiling = (
+                "Profiling indicators found; anchor first in Articles 13(2)(f)/14(2)(g), with Article 21 secondary."
+            )
+
+    transfer = None
+    if "transfer" in claim_types or _contains_any(text, THIRD_COUNTRY_TRANSFER_SIGNALS):
+        has_mechanism = any(
+            t in text
+            for t in {
+                "adequacy",
+                "standard contractual clauses",
+                "scc",
+                "binding corporate rules",
+                "article 46",
+                "article 49",
+            }
+        )
+        transfer = (
+            "Transfer context detected; notice disclosure and mechanism disclosure both appear."
+            if has_mechanism
+            else "Transfer context detected; likely notice gap on safeguards/mechanism disclosure."
+        )
+
+    special_category = None
+    if any(t in text for t in {"health", "biometric", "religious", "political", "ethnic", "genetic"}):
+        has_art9 = any(t in text for t in {"article 9", "explicit consent", "substantial public interest"})
+        special_category = (
+            "Special-category indicators present with Article 9 condition reference."
+            if has_art9
+            else "Special-category indicators present without clear Article 9 condition."
+        )
+
+    role_allocation = None
+    if any(t in text for t in {"controller", "processor", "on behalf of", "customer instructions"}):
+        has_both_roles = "controller" in text and "processor" in text
+        role_allocation = (
+            "Controller/processor role boundary appears mixed; verify role-allocation clarity."
+            if has_both_roles
+            else "Single role stated; verify if role-switch scenarios are disclosed."
+        )
+
+    return SpecializedReview(
+        profiling=profiling,
+        transfer=transfer,
+        special_category=special_category,
+        role_allocation=role_allocation,
+    )
+
+
+def _apply_applicability_gate_to_citations(
+    citations: list[LlmCitation], decision: ApplicabilityDecision, claim_types: set[str]
+) -> list[LlmCitation]:
+    if not citations:
+        return citations
+    if not decision["allowed_notice_articles"]:
+        restricted_claims = {"controller_contact", "legal_basis", "retention", "rights", "complaint"}
+        if claim_types & restricted_claims:
+            return []
+        return citations
+    allowed_articles = set(decision["allowed_notice_articles"]) | {5, 6, 9, 12, 21, 22, 44, 45, 46, 47, 49, 77}
+    gated = [c for c in citations if (_article_int(c.article_number) or -1) in allowed_articles]
+    return gated
+
+
+def _violates_forbidden_article_matrix(claim_types: set[str], citations: list[LlmCitation]) -> bool:
+    articles = {_article_int(c.article_number) for c in citations if _article_int(c.article_number) is not None}
+    if "complaint" in claim_types and 21 in articles:
+        return True
+    if "transfer" in claim_types and 15 in articles:
+        return True
+    if "legal_basis" in claim_types and ({13, 14} & articles) and ("transfer" not in claim_types):
+        bad_paragraph = any(
+            (_article_int(c.article_number) in {13, 14}) and _norm(c.paragraph_ref or "").startswith("1(f)")
+            for c in citations
+        )
+        if bad_paragraph:
+            return True
+    if "profiling" in claim_types and 22 in articles:
+        # Article 22 must be support unless significant-effects signal is present elsewhere.
+        primary_22_only = len(articles) == 1
+        if primary_22_only:
+            return True
+    return False
+
+
+def _coerce_finding(f: LlmFinding | None) -> LlmFinding:
+    if f is None:
+        return LlmFinding(
+            status="needs review", severity=None, gap_note="LLM parse failure", remediation_note=None, citations=[]
+        )
+
+    if f.status in {"gap", "partial"}:
+        if not f.severity:
+            f.severity = "medium"
+        if not f.gap_note:
+            f.gap_note = "Insufficient policy coverage against retrieved GDPR obligations."
+        if not f.remediation_note:
+            f.remediation_note = "Add explicit policy language to address the cited GDPR obligations."
+    else:
+        f.severity = None
+        if f.status in {"compliant", "needs review"} and f.status != "needs review":
+            f.gap_note = None
+            f.remediation_note = None
+    return f
+
+
+def _enforce_substantive_citation_gate(f: LlmFinding, valid_citations: list[LlmCitation]) -> LlmFinding:
+    if f.status in {"gap", "partial"} and not valid_citations:
+        f.gap_note = (
+            f"{f.gap_note or ''} Evidence note: no validated GDPR citation chain was attached; "
+            "classification retained using text-grounded legal signals."
+        ).strip()
+        return f
+    return f
+
+
+def _normalize_severity(status: str, severity: str | None, claim_types: set[str]) -> str | None:
+    if status not in {"gap", "partial"}:
+        return None
+
+    high_claims = {
+        "controller_identity",
+        "controller_contact",
+        "controller_identity_contact",
+        "legal_basis",
+        "rights",
+        "complaint",
+        "retention",
+    }
+    medium_claims = {"recipients", "purpose_mapping", "role_ambiguity"}
+    conditional_high_claims = {"transfer", "profiling"}
+
+    if claim_types & high_claims:
+        return "high"
+    if claim_types & medium_claims:
+        return "medium"
+    if claim_types & conditional_high_claims:
+        text = _norm((severity or "") + " " + " ".join(sorted(claim_types)))
+        return "high" if "transfer" in text or "profiling" in text else "medium"
+    if severity in {"high", "medium", "low"}:
+        return severity
+    return "medium"
+
+
+def _finding_signature(f: LlmFinding, citations: list[LlmCitation]) -> str:
+    gap = _norm(f.gap_note or "")
+    assessment_idx = gap.find("assessment:")
+    gap_key = gap[assessment_idx : assessment_idx + 220] if assessment_idx >= 0 else gap[:220]
+    article_key = ",".join(sorted({str(_article_int(c.article_number) or c.article_number) for c in citations}))
+    return f"{f.status}|{f.severity}|{gap_key}|{article_key}"
+
+
+def _ensure_reasoning_chain(
+    f: LlmFinding, section: SectionData, citations: list[LlmCitation], claim_types: set[str]
+) -> LlmFinding:
+    if f.status not in {"gap", "partial"}:
+        return f
+    # Check if FLBC reasoning chain is already present (in gap_reasoning or gap_note)
+    existing_text = f.gap_reasoning or f.gap_note or ""
+    if all(token in existing_text for token in {"Fact:", "Law:", "Breach:", "Conclusion:"}):
+        return f
+    evidence = _norm(section.content)[:220]
+    requirement_articles = (
+        ", ".join(sorted({c.article_number for c in citations})) or "validated GDPR disclosure obligations"
+    )
+    claim_text = ", ".join(sorted(claim_types)) if claim_types else "identified transparency obligations"
+    breach = f.gap_note or "Policy language appears incomplete against cited obligations."
+    # Write the structured FLBC chain into gap_reasoning (internal field used by the
+    # publication validator); keep gap_note as the clean, user-visible finding description.
+    f.gap_reasoning = (
+        f"Fact: {evidence}. "
+        f"Law: {requirement_articles} ({claim_text}). "
+        f"Breach: {breach}. "
+        "Conclusion: the notice must be remediated to satisfy the applicable GDPR disclosure duty."
+    )
+    # gap_note keeps the plain breach description; set a fallback only when it is empty.
+    if not f.gap_note:
+        f.gap_note = breach
+    return f
+
+
+def _classify_finding_quality(
+    f: LlmFinding,
+    citations: list[LlmCitation],
+    claim_types: set[str],
+    source_mode: str,
+) -> tuple[str | None, float | None]:
+    presumptively_assessable_claims = CORE_NOTICE_CLAIMS | {
+        "profiling",
+        "transfer",
+        "recipients",
+        "sensitive_data",
+        "controller_identity",
+        "controller_contact",
+        "role_ambiguity",
+        "purpose_mapping",
+    }
+    fragmentary_markers = {"fragmentary", "truncated", "insufficient excerpt", "unseen section", "outside notice"}
+    gap_text = _norm(f.gap_note or "")
+    is_fragmentary = any(m in gap_text for m in fragmentary_markers)
+    visible_violation_markers = {
+        "inferred consent",
+        "implied consent",
+        "continued use",
+        "continued usage",
+        "indefinite retention",
+        "retained indefinitely",
+        "no fixed retention",
+        "retain for extended",
+        "without human intervention",
+        "without human review",
+        "automated decision-making affecting",
+        "service availability may be affected",
+        "profiling affects",
+        "risk score",
+        "credit score",
+        "data aggregators",
+        "data broker",
+        "marketing list",
+        "demographic segment",
+        "external datasets",
+        "partner data",
+        "ad sharing",
+        "risk scoring",
+        "third-party enrichment",
+        "third country transfer",
+        "outside the eea",
+        "where practical safeguards",
+        "protection may vary",
+        "fingerprinting",
+        "cross-device tracking",
+        "tracking pixel",
+        "advertising sdk",
+        "behavioural advertising",
+        "behavioral advertising",
+        "interest-based advertising",
+        "advertising partners",
+        "advertising ecosystem",
+    }
+    has_visible_violation = any(marker in gap_text for marker in visible_violation_markers)
+
+    if f.status == "needs review":
+        if has_visible_violation and not is_fragmentary:
+            return "probable_gap", 0.6
+        if claim_types & presumptively_assessable_claims and not is_fragmentary:
+            return "probable_gap", 0.55
+        return "not_assessable", 0.2
+    if f.status not in {"gap", "partial"}:
+        return None, None
+    if not citations:
+        if has_visible_violation and not is_fragmentary:
+            return "probable_gap", 0.62
+        if claim_types & presumptively_assessable_claims and not is_fragmentary:
+            return "probable_gap", 0.58
+        return "not_assessable", 0.2
+    has_primary = _claim_has_primary_anchor(claim_types, citations)
+    if not has_primary:
+        if claim_types:
+            return "probable_gap", 0.52
+        return "not_assessable", 0.25
+    contradiction_penalty = 0.2 if _has_claim_citation_contradiction(claim_types, citations) else 0.0
+    source_bonus = 0.1 if source_mode in {"direct", "indirect"} else 0.0
+    evidence_conf = min(0.35, 0.12 * len(citations))
+    applicability_conf = 0.30 if source_mode in {"direct", "indirect", "mixed"} else 0.15
+    qualification_conf = 0.25 if has_primary else 0.12
+    base_confidence = max(
+        0.2,
+        min(
+            0.95,
+            evidence_conf + applicability_conf + qualification_conf + source_bonus - contradiction_penalty,
+        ),
+    )
+    if source_mode == "unknown" and any(
+        claim in {"controller_contact", "legal_basis", "retention", "rights", "complaint"} for claim in claim_types
+    ):
+        return "probable_gap", round(base_confidence - 0.1, 2)
+    if f.status == "gap":
+        return "clear_non_compliance", round(base_confidence + 0.15, 2)
+    return "probable_gap", round(base_confidence, 2)
+
+
+def _runtime_budget_exceeded(started_monotonic: float, now_monotonic: float, budget_seconds: int) -> bool:
+    return (now_monotonic - started_monotonic) > budget_seconds
+
+
+def _has_positive_controller_contradiction(text: str) -> bool:
+    norm = _norm(text)
+    has_entity = any(t in norm for t in {"controller", "legal entity", "company", "we are"})
+    has_contact = any(t in norm for t in {"privacy@", "contact us", "email", "postal address", "webform", "dpo@"})
+    return has_entity and has_contact
+
+
+def _effective_llm_budget(section_count: int, configured_cap: int) -> int:
+    if section_count <= 0:
+        return configured_cap
+    if section_count <= configured_cap:
+        return configured_cap
+    scaled_budget = max(12, round(section_count * 0.85))
+    return min(configured_cap, scaled_budget)
+
+
+# Deterministic GDPR obligation text keyed by the full anchor string used throughout the pipeline.
+# These are the verbatim or near-verbatim obligations each article imposes on the controller.
+# Used as citation excerpts when no real knowledge-corpus chunk is available.
+_GDPR_ARTICLE_LEGAL_TEXT: dict[str, str] = {
+    "GDPR Art. 5(1)(e)": (
+        "Personal data shall be kept in a form which permits identification of data subjects for no longer than "
+        "is necessary for the purposes for which the personal data are processed ('storage limitation')."
+    ),
+    "GDPR Art. 6(1)(a)": (
+        "Processing shall be lawful only if the data subject has given consent to the processing of his or her "
+        "personal data for one or more specific purposes."
+    ),
+    "GDPR Art. 6(1)(b)": (
+        "Processing is necessary for the performance of a contract to which the data subject is party or in order "
+        "to take steps at the request of the data subject prior to entering into a contract."
+    ),
+    "GDPR Art. 6(1)(c)": "Processing is necessary for compliance with a legal obligation to which the controller is subject.",
+    "GDPR Art. 6(1)(d)": "Processing is necessary in order to protect the vital interests of the data subject or of another natural person.",
+    "GDPR Art. 6(1)(e)": (
+        "Processing is necessary for the performance of a task carried out in the public interest or in the exercise "
+        "of official authority vested in the controller."
+    ),
+    "GDPR Art. 6(1)(f)": (
+        "Processing is necessary for the purposes of the legitimate interests pursued by the controller or by a third "
+        "party, except where such interests are overridden by the interests or fundamental rights and freedoms of the data subject."
+    ),
+    "GDPR Art. 7(1)": (
+        "Where processing is based on consent, the controller shall be able to demonstrate that the data subject has "
+        "consented to processing of his or her personal data."
+    ),
+    "GDPR Art. 7(3)": (
+        "The data subject shall have the right to withdraw his or her consent at any time, without affecting the "
+        "lawfulness of processing based on consent before its withdrawal."
+    ),
+    "GDPR Art. 13(1)(a)": (
+        "The controller shall provide the data subject with the identity and contact details of the controller and, "
+        "where applicable, of the controller's representative."
+    ),
+    "GDPR Art. 13(1)(b)": "The controller shall provide the contact details of the data protection officer, where applicable.",
+    "GDPR Art. 13(1)(c)": (
+        "The controller shall provide the purposes of the processing for which the personal data are intended and "
+        "the legal basis for the processing."
+    ),
+    "GDPR Art. 13(1)(d)": (
+        "Where the processing is based on point (f) of Article 6(1), the legitimate interests pursued by the controller "
+        "or by a third party."
+    ),
+    "GDPR Art. 13(1)(e)": "The controller shall provide any recipients or categories of recipients of the personal data, if any.",
+    "GDPR Art. 13(1)(f)": (
+        "Where applicable, the controller shall inform the data subject of any intended transfer of personal data to a "
+        "third country or international organisation, and of the existence or absence of an adequacy decision, or reference "
+        "to the appropriate safeguards pursuant to Article 46."
+    ),
+    "GDPR Art. 13(2)(a)": (
+        "The controller shall provide the period for which the personal data will be stored, or if that is not possible, "
+        "the criteria used to determine that period."
+    ),
+    "GDPR Art. 13(2)(b)": (
+        "The controller shall inform the data subject of the right to request access to, rectification or erasure of, "
+        "personal data or restriction of processing, and the right to data portability."
+    ),
+    "GDPR Art. 13(2)(b)-(d)": (
+        "The controller shall inform the data subject of the right to request access, rectification, erasure, or "
+        "restriction; the right to object; the right to data portability; and, where applicable, the right to withdraw consent."
+    ),
+    "GDPR Art. 13(2)(c)": (
+        "Where the processing is based on consent, the right to withdraw consent at any time, without affecting "
+        "the lawfulness of processing based on consent before its withdrawal."
+    ),
+    "GDPR Art. 13(2)(d)": "The controller shall inform the data subject of the right to lodge a complaint with a supervisory authority.",
+    "GDPR Art. 13(2)(f)": (
+        "Where automated decision-making including profiling takes place, the controller shall provide meaningful "
+        "information about the logic involved, the significance, and the envisaged consequences of such processing "
+        "for the data subject."
+    ),
+    "GDPR Art. 14(1)(a)": "The controller shall provide the identity and contact details of the controller and, where applicable, of the controller's representative.",
+    "GDPR Art. 14(1)(b)": "The controller shall provide the contact details of the data protection officer, where applicable.",
+    "GDPR Art. 14(1)(c)": (
+        "The controller shall provide the purposes of the processing for which the personal data are intended and "
+        "the legal basis for the processing."
+    ),
+    "GDPR Art. 14(1)(d)": "The controller shall provide the categories of personal data concerned.",
+    "GDPR Art. 14(1)(e)": "The controller shall provide any recipients or categories of recipients of the personal data, if any.",
+    "GDPR Art. 14(1)(f)": (
+        "Where applicable, the controller shall provide the fact that the controller intends to transfer personal data to "
+        "a third country or international organisation, and the existence or absence of an adequacy decision, or reference "
+        "to the appropriate safeguards pursuant to Article 46."
+    ),
+    "GDPR Art. 14(2)(a)": (
+        "The controller shall provide the period for which the personal data will be stored, or if that is not possible, "
+        "the criteria used to determine that period."
+    ),
+    "GDPR Art. 14(2)(b)": (
+        "Where the processing is based on point (f) of Article 6(1), the legitimate interests pursued by the controller "
+        "or by a third party."
+    ),
+    "GDPR Art. 14(2)(c)": (
+        "The controller shall inform the data subject of the right to request access to, rectification or erasure of, "
+        "personal data or restriction of processing, and the right to data portability."
+    ),
+    "GDPR Art. 14(2)(c)-(e)": (
+        "The controller shall inform the data subject of the right to request access, rectification, erasure, or "
+        "restriction; the right to object; the right to data portability; and the right to lodge a complaint with a "
+        "supervisory authority."
+    ),
+    "GDPR Art. 14(2)(d)": (
+        "Where the processing is based on consent, the right to withdraw consent at any time, without affecting "
+        "the lawfulness of processing based on consent before its withdrawal."
+    ),
+    "GDPR Art. 14(2)(e)": "The controller shall inform the data subject of the right to lodge a complaint with a supervisory authority.",
+    "GDPR Art. 14(2)(g)": (
+        "Where automated decision-making including profiling takes place, the controller shall provide meaningful "
+        "information about the logic involved, the significance, and the envisaged consequences of such processing "
+        "for the data subject."
+    ),
+    "GDPR Art. 22": (
+        "The data subject shall have the right not to be subject to a decision based solely on automated processing, "
+        "including profiling, which produces legal effects concerning him or her or similarly significantly affects him or her."
+    ),
+    "GDPR Art. 44": (
+        "Any transfer of personal data to a third country shall take place only if the conditions laid down in Chapter V "
+        "of the GDPR are complied with by the controller and processor."
+    ),
+    "GDPR Art. 45": (
+        "A transfer may take place where the Commission has decided that the third country, a territory, or one or more "
+        "specified sectors within that third country, ensures an adequate level of protection."
+    ),
+    "GDPR Art. 46": (
+        "In the absence of an adequacy decision, a controller may transfer personal data only if appropriate safeguards "
+        "have been provided and on condition that enforceable data subject rights and effective legal remedies are available."
+    ),
+    "GDPR Art. 77": (
+        "Without prejudice to any other administrative or judicial remedy, every data subject shall have the right to "
+        "lodge a complaint with a supervisory authority if the data subject considers that the processing of personal data "
+        "relating to him or her infringes this Regulation."
+    ),
+}
+
+_CITATION_CONCLUSION_PREFIXES = (
+    "the notice does not",
+    "the privacy notice does not",
+    "the policy does not",
+    "this notice does not",
+    "this notice fails",
+    "the data controller does not",
+    "the document does not",
+    "this section does not",
+    "the controller has not",
+    "no disclosure",
+    "there is no",
+    "it does not",
+)
+
+
+def _is_citation_conclusion(text: str) -> bool:
+    """Return True when a citation excerpt contains finding conclusions rather than GDPR rule text.
+    Citations must describe the legal duty, not repeat the gap finding.
+    """
+    norm = text.strip().lower()
+    return (
+        any(norm.startswith(p) for p in _CITATION_CONCLUSION_PREFIXES)
+        or norm.startswith("[")  # policy section text leaked in (e.g. "[Section Title] ...")
+    )
+
+
+def _gdpr_legal_text(art_str: str) -> str:
+    """Return deterministic GDPR obligation text for a given anchor string."""
+    exact = _GDPR_ARTICLE_LEGAL_TEXT.get(art_str)
+    if exact:
+        return exact
+    # Normalise and try a case-insensitive match
+    norm = art_str.strip()
+    for key, val in _GDPR_ARTICLE_LEGAL_TEXT.items():
+        if key.lower() == norm.lower():
+            return val
+    return f"{art_str}: required transparency disclosure under GDPR."
+
+
+def _anchor_to_chunk_id(art_str: str) -> str:
+    """Convert a full anchor string like 'GDPR Art. 13(1)(c)' to a stable unique chunk_id.
+    Ensures different sub-paragraphs (e.g. 13(1)(a) vs 13(1)(c)) get distinct IDs.
+    """
+    key = art_str.lower().replace("gdpr art. ", "art-").replace("gdpr art.", "art-")
+    key = re.sub(r"[^a-z0-9-]", "-", key)
+    key = re.sub(r"-+", "-", key).strip("-")
+    return f"gdpr-{key}"
+
+
+def _add_systemic_finding_citations(
+    db: Session,
+    finding_id: str,
+    issue_id: str,
+    sections: list[SectionData] | None = None,
+) -> None:
+    """Create FindingCitation records for a systemic finding using GDPR article anchors.
+    Uses OBLIGATION_TAXONOMY as the primary source; falls back to SYSTEMIC_ANCHOR_MAP.
+    excerpt = verbatim GDPR obligation text from _GDPR_ARTICLE_LEGAL_TEXT (the legal duty).
+    Policy document excerpts belong in policy_evidence_excerpt, NOT in citation excerpts.
+    The `sections` parameter is accepted for API compatibility but is no longer used here.
+    """
+    anchors = _obligation_anchors(issue_id) or SYSTEMIC_ANCHOR_MAP.get(issue_id, {})
+    primary_anchors = anchors.get("primary", [])
+    for art_str in primary_anchors[:2]:
+        # Parse article number and paragraph_ref for the citation record fields.
+        m = re.match(r"GDPR Art\.\s*(\d+[a-z]?)\(([^)]+)\)", art_str)
+        if m:
+            art_num = m.group(1)
+            para_ref = m.group(2)
+        else:
+            art_num = re.sub(r"[^0-9a-z]", "", art_str.lower().replace("gdpr art.", "").strip())
+            para_ref = None
+        # Use a unique, stable chunk_id per anchor (includes sub-paragraph to avoid collisions).
+        chunk_id = _anchor_to_chunk_id(art_str)
+        # Citation excerpt = GDPR rule text, never policy document text or conclusion strings.
+        excerpt_text = _gdpr_legal_text(art_str)
+        db.add(
+            FindingCitation(
+                finding_id=finding_id,
+                chunk_id=chunk_id,
+                article_number=art_num,
+                paragraph_ref=para_ref,
+                article_title=art_str,
+                excerpt=excerpt_text[:500],
+            )
+        )
+
+
+def _add_notice_level_synthesis(
+    db: Session, audit_id: str, obligation_map: dict[str, bool], duty_validation: dict[str, str] | None = None
+) -> None:
+    # Core mandatory notice obligations — always required for privacy_notice documents.
+    # Severity and gap_note come from OBLIGATION_TAXONOMY (single source of truth).
+    mandatory_issues = [
+        "missing_legal_basis",
+        "missing_retention_period",
+        "missing_rights_notice",
+        "missing_complaint_right",
+        "missing_controller_identity",
+    ]
+    to_add: list[str] = []
+    for issue_id in mandatory_issues:
+        obl_key = _obligation_key(issue_id) or ""
+        duty_key = _obligation_duty_key(issue_id)
+        duty_status = (duty_validation or {}).get(duty_key or "") if duty_validation else None
+        # Suppress systemic finding only when obligation_map says it is present AND
+        # duty_validation confirms the obligation as satisfied (compliant or not flagged).
+        # If duty_validation explicitly says non_compliant, generate the finding even when
+        # obligation keywords are present — keyword presence alone is not a compliant disclosure.
+        if obligation_map.get(obl_key) is True and duty_status != "non_compliant":
+            # For partially_compliant: only create systemic finding if there is no
+            # positive core evidence (compliant section findings) contradicting the gap.
+            # Compliant docs have positive evidence from early-pruned compliant sections;
+            # non-compliant docs lacking proper disclosure have no such positive evidence.
+            if duty_status != "partially_compliant":
+                continue
+            # Check for positive evidence (compliant findings) for this obligation
+            core_obligation_key = _obligation_family(issue_id) or ""
+            existing_rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+            if core_obligation_key and _has_positive_core_evidence(existing_rows, core_obligation_key):
+                # Positive compliant evidence present — suppress systemic gap (compliant doc case)
+                continue
+            # No positive evidence — create systemic finding as the disclosure is genuinely absent
+        to_add.append(issue_id)
+    for issue_id in to_add:
+        # Use OBLIGATION_TAXONOMY for severity and gap_note; fall back to legacy maps
+        severity = _obligation_severity(issue_id)
+        gap_note_text = (
+            _obligation_gap_note(issue_id)
+            or SYSTEMIC_GAP_NOTE_MAP.get(issue_id)
+            or "The notice omits a mandatory transparency element required under Articles 13/14."
+        )
+        finding = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue_id}",
+            status="gap",
+            severity=severity,
+            classification="systemic_violation",
+            confidence=0.85,
+            confidence_evidence=0.8,
+            confidence_applicability=0.9,
+            confidence_article_fit=0.9,
+            confidence_synthesis=0.9,
+            confidence_overall=0.85,
+            finding_type="systemic",
+            publish_flag="yes",
+            missing_from_section="yes",
+            missing_from_document="yes",
+            not_visible_in_excerpt="no",
+            gap_note=gap_note_text,
+            remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
+        )
+        db.add(finding)
+        findings_by_status_total.labels(status="gap").inc()
+        systemic_findings_published_total.inc()
+        db.flush()
+        _add_systemic_finding_citations(db, finding.id, issue_id)
+    if to_add:
+        db.commit()
+
+
+def _add_systemic_issue_synthesis(db: Session, audit_id: str, obligation_map: dict[str, bool]) -> None:
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    by_issue: dict[str, list[Finding]] = {}
+    for finding in rows:
+        if finding.status not in {"gap", "partial"}:
+            continue
+        note = _norm(finding.gap_note or "")
+        issue_id = "general_transparency_gap"
+        for candidate in CLAIM_ARTICLE_RULES:
+            if candidate.replace("_", " ") in note:
+                issue_id = candidate
+                break
+        by_issue.setdefault(issue_id, []).append(finding)
+
+    # Systemic rows already created by _add_notice_level_synthesis (which runs first).
+    # Skip any issue that already has a systemic row to prevent publishing duplicate findings.
+    existing_systemic_ids = {r.section_id for r in rows if r.section_id.startswith("systemic:")}
+
+    for issue_id, group in by_issue.items():
+        if issue_id == "general_transparency_gap":
+            continue
+        if f"systemic:{issue_id}" in existing_systemic_ids:
+            continue  # already created by _add_notice_level_synthesis; skip to avoid duplicates
+        if (
+            issue_id in {"missing_controller_identity", "missing_controller_contact"}
+            and obligation_map.get("controller_identity_present") is True
+        ):
+            continue
+        if len(group) < 2:
+            continue
+        supporting_sections = ", ".join(sorted({g.section_id for g in group})[:6])
+        synt_finding = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue_id}",
+            status="gap",
+            severity=_obligation_severity(issue_id),  # canonical severity from OBLIGATION_TAXONOMY
+            classification="systemic_violation",
+            confidence=0.88 if len(group) >= 3 else 0.8,
+            confidence_evidence=0.82,
+            confidence_applicability=0.86,
+            confidence_article_fit=0.84,
+            confidence_synthesis=0.9,
+            confidence_overall=0.88 if len(group) >= 3 else 0.8,
+            finding_type="systemic",
+            publish_flag="yes",
+            missing_from_section="yes",
+            missing_from_document="yes",
+            not_visible_in_excerpt="no",
+            gap_note=(
+                _obligation_gap_note(issue_id)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_id)
+                or f"The notice shows a repeated '{issue_id.replace('_', ' ')}' transparency defect across sections "
+                f"[{supporting_sections}], indicating a document-level compliance gap."
+            ),
+            remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
+        )
+        db.add(synt_finding)
+        findings_by_status_total.labels(status="gap").inc()
+        systemic_findings_published_total.inc()
+        db.flush()
+        _add_systemic_finding_citations(db, synt_finding.id, issue_id)
+    db.commit()
+
+
+def _add_corpus_driven_specialist_gaps(
+    db: Session,
+    audit_id: str,
+    sections: list[SectionData],
+) -> None:
+    """Create systemic findings for specialist families whose gaps are detected via corpus
+    signals rather than via aggregated local findings. Runs after _add_systemic_issue_synthesis
+    so that the systemic deduplication guard in that function still works.
+
+    Currently handles: invalid_consent, cookies_tracking, article14_source_extended.
+    Only creates a row when the trigger fires AND the gap condition holds AND no systemic row
+    already exists for the issue key.
+    """
+    existing = {
+        r.section_id
+        for r in db.query(Finding).filter(Finding.audit_id == audit_id).all()
+        if r.section_id.startswith("systemic:")
+    }
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+
+    _corpus_specialist_configs: list[tuple[str, set[str], set[str], bool]] = [
+        # (issue_key, trigger_signals, gap_signals, gap_requires_absence_of_controls)
+        (
+            "invalid_consent_or_legal_basis",
+            {
+                "consent inferred",
+                "inferred consent",
+                "implied consent",
+                "consent is implied",
+                "continued usage",
+                "continuing to use",
+                "use of the service constitutes",
+                "use of this service constitutes",
+                "use constitutes your consent",
+                "by using you agree",
+                "consent inferred from use",
+            },
+            {
+                "consent inferred",
+                "inferred consent",
+                "implied consent",
+                "consent is implied",
+                "continued usage",
+                "continuing to use",
+                "use of the service constitutes",
+                "use of this service constitutes",
+                "use constitutes your consent",
+                "by using you agree",
+            },
+            True,
+        ),
+        (
+            "cookies_tracking_consent_gap",
+            {
+                "cookie",
+                "tracking",
+                "fingerprint",
+                "cross-device",
+                "advertising sdk",
+                "ad network",
+                "retargeting",
+                "remarketing",
+                "tracking pixel",
+                "behavioural advertising",
+                "behavioral advertising",
+                "interest-based advertising",
+                "analytics cookie",
+                "advertising cookie",
+                "non-essential cookie",
+            },
+            {
+                "consent for cookies",
+                "cookie consent",
+                "opt out of cookies",
+                "opt-out of tracking",
+                "manage cookies",
+                "cookie settings",
+                "cookie preferences",
+                "tracking opt-out",
+                "cookie banner",
+                "we obtain your consent",
+                "consent before",
+                "prior to placing",
+                "lawful basis for cookies",
+                "lawful basis for tracking",
+            },
+            False,  # gap = has_trigger AND NOT has_gap_signals (absence of controls)
+        ),
+        (
+            "article14_source_transparency_gap",
+            {
+                "marketing list",
+                "data broker",
+                "data aggregator",
+                "demographic segment",
+                "public records",
+                "third-party data provider",
+                "purchased list",
+                "purchased data",
+                "lead list",
+                "compiled from public",
+                "data enrichment",
+                "sourced from third parties",
+            },
+            {
+                "categories of sources",
+                "source categories",
+                "sources of personal data",
+                "obtained from",
+                "source of the personal data",
+                "where we obtained",
+            },
+            False,  # gap = has_trigger AND NOT has_gap_signals (absence of source disclosure)
+        ),
+    ]
+
+    to_add: list[str] = []
+    for issue_key, trigger_signals, gap_signals, gap_requires_controls in _corpus_specialist_configs:
+        if f"systemic:{issue_key}" in existing:
+            continue
+        triggered = _contains_any(corpus, trigger_signals)
+        if not triggered:
+            continue
+        has_gap_signal = _contains_any(corpus, gap_signals)
+        if gap_requires_controls:
+            # For invalid_consent: gap = trigger is present AND there are NO valid consent controls
+            valid_controls = {
+                "freely given",
+                "specific consent",
+                "informed consent",
+                "unambiguous indication",
+                "withdraw consent",
+                "withdraw your consent",
+                "right to withdraw",
+                "opt-in",
+                "opt in",
+                "explicit consent",
+                "affirmative action",
+            }
+            gap_confirmed = triggered and not _contains_any(corpus, valid_controls)
+        else:
+            # For cookies_tracking and article14_source_extended: gap = trigger but no disclosure
+            gap_confirmed = triggered and not has_gap_signal
+        if not gap_confirmed:
+            continue
+        to_add.append(issue_key)
+
+    for issue_id in to_add:
+        gap_note_text = (
+            _obligation_gap_note(issue_id)
+            or SYSTEMIC_GAP_NOTE_MAP.get(issue_id)
+            or f"The notice has a document-level compliance gap for '{issue_id.replace('_', ' ')}'."
+        )
+        row = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue_id}",
+            status="gap",
+            severity=_obligation_severity(issue_id),
+            classification="systemic_violation",
+            confidence=0.82,
+            confidence_evidence=0.78,
+            confidence_applicability=0.85,
+            confidence_article_fit=0.82,
+            confidence_synthesis=0.88,
+            confidence_overall=0.82,
+            finding_type="systemic",
+            publish_flag="yes",
+            missing_from_section="yes",
+            missing_from_document="yes",
+            not_visible_in_excerpt="no",
+            gap_note=gap_note_text,
+            remediation_note=_issue_specific_remediation(issue_id, "privacy_notice", systemic=True),
+        )
+        db.add(row)
+        findings_by_status_total.labels(status="gap").inc()
+        systemic_findings_published_total.inc()
+        db.flush()
+        _add_systemic_finding_citations(db, row.id, issue_id, sections=sections)
+    if to_add:
+        db.commit()
+
+
+def _finding_issue_id(row: Finding) -> str | None:
+    if row.section_id.startswith("systemic:"):
+        return row.section_id.split("systemic:", 1)[1]
+    # 1. Parse "for issue <name>" from legal_requirement (set by local finding creation path)
+    lr = (row.legal_requirement or "").lower()
+    m = re.search(r"for issue\s+([a-z0-9_]+)", lr)
+    if m:
+        candidate = m.group(1).rstrip("_")
+        _all_known_issues = set(CLAIM_ARTICLE_RULES) | set(_ISSUE_TO_OBLIGATION_KEY) | set(SPECIALIST_TRIGGER_RULES)
+        if candidate in _all_known_issues:
+            return candidate
+    # 2. Map obligation_under_review to canonical issue
+    obl = (row.obligation_under_review or "").strip().lower()
+    _obl_to_issue: dict[str, str] = {
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights": "missing_rights_notice",
+        "complaint": "missing_complaint_right",
+        "complaint_right": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "controller_contact": "missing_controller_contact",
+        "controller_identity": "missing_controller_identity",
+        "profiling": "profiling_disclosure_gap",
+        "recipients": "recipients_disclosure_gap",
+        "purpose_mapping": "purpose_specificity_gap",
+        "article14_source": "article_14_indirect_collection_gap",
+        "dpo_contact": "dpo_contact_gap",
+        "special_category": "special_category_basis_unclear",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+    }
+    if obl in _obl_to_issue:
+        return _obl_to_issue[obl]
+    # 3. Full-text search in gap/remediation notes
+    text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''} {obl}")
+    for issue in CLAIM_ARTICLE_RULES:
+        if issue.replace("_", " ") in text:
+            return issue
+    if "recipient" in text or "third party" in text or "vendor" in text:
+        return "recipients_disclosure_gap"
+    if "transfer" in text or "third country" in text or "outside the eea" in text:
+        return "missing_transfer_notice"
+    if "profil" in text or "automated decision" in text:
+        return "profiling_disclosure_gap"
+    if "controller" in text and "processor" in text:
+        return "controller_processor_role_ambiguity"
+    if "purpose" in text and "category" in text:
+        return "purpose_specificity_gap"
+    if "special category" in text or "article 9" in text or "sensitive data" in text:
+        return "special_category_basis_unclear"
+    if "controller" in text and "contact" in text:
+        return "missing_controller_contact"
+    # 4. Resolve from primary_legal_anchor GDPR paragraph references — covers cases where
+    #    legal_requirement / obligation_under_review / text patterns all fail to match.
+    anchor_list = _decode_json_list(row.primary_legal_anchor)
+    for anchor in anchor_list:
+        m = re.search(
+            r"art(?:icle)?\.?\s*(\d+)(?:\s*\((\d+[a-z]?)\)(?:\s*\(([a-z])\))?)?",
+            anchor,
+            re.IGNORECASE,
+        )
+        if not m:
+            continue
+        art_num = m.group(1)
+        para_main = m.group(2)
+        para_sub = m.group(3)
+        if para_main and para_sub:
+            para_key = f"{art_num}({para_main})({para_sub})"
+        elif para_main:
+            para_key = f"{art_num}({para_main})"
+        else:
+            para_key = art_num
+        issue = _GDPR_PARAGRAPH_TO_ISSUE.get(para_key)
+        if issue:
+            return issue
+    return None
+
+
+def _has_flbc_reasoning(text: str | None) -> bool:
+    normalized = _norm(text or "")
+    return all(token in normalized for token in ("fact:", "law:", "breach:", "conclusion:"))
+
+
+def _citation_articles_fit_issue(db: Session, finding_id: str, issue_key: str | None) -> bool:
+    if not issue_key or issue_key not in CLAIM_ARTICLE_RULES:
+        return True
+    rows = db.query(FindingCitation.article_number).filter(FindingCitation.finding_id == finding_id).all()
+    article_numbers = {_article_int(article) for (article,) in rows if _article_int(article) is not None}
+    if not article_numbers:
+        return False
+    rule = CLAIM_ARTICLE_RULES[issue_key]
+    has_primary_or_support = bool(article_numbers & (rule["primary"] | rule["support"]))
+    has_disallowed = bool(article_numbers & rule["disallowed"])
+    return has_primary_or_support and not has_disallowed
+
+
+def _has_positive_contradictory_disclosure(db: Session, row: Finding, issue_key: str | None) -> bool:
+    contradiction_signals = {"contradict", "conflict", "inconsistent", "already disclosed", "actually disclosed"}
+    rationale = _norm(f"{row.gap_reasoning or ''} {row.gap_note or ''}")
+    if not any(token in rationale for token in contradiction_signals):
+        return False
+    issue_terms = {
+        "missing_legal_basis": {"legal basis", "article 6", "lawful basis"},
+        "missing_transfer_notice": {"transfer", "third country", "safeguard", "adequacy", "scc"},
+        "missing_controller_contact": {"contact", "email", "address", "webform"},
+        "missing_controller_identity": {"controller", "company", "entity"},
+        "missing_retention_period": {"retention", "retain", "storage period"},
+        "missing_rights_notice": {"right", "access", "erasure", "rectification", "restriction"},
+        "missing_complaint_right": {"complaint", "supervisory authority"},
+    }.get(issue_key or "", set())
+    citation_rows = db.query(FindingCitation.excerpt).filter(FindingCitation.finding_id == row.id).all()
+    positive_disclosure_markers = {
+        "we provide",
+        "we disclose",
+        "you can contact",
+        "you may contact",
+        "we retain",
+        "you have the right",
+    }
+    for (excerpt,) in citation_rows:
+        text = _norm(excerpt or "")
+        if not text:
+            continue
+        if issue_terms and not any(term in text for term in issue_terms):
+            continue
+        if any(marker in text for marker in positive_disclosure_markers):
+            return True
+    return False
+
+
+def _section_ref(section: SectionData) -> str:
+    short_title = section.section_title.strip() if section.section_title.strip() else f"Section {section.section_order}"
+    return f"section:{section.id}:{short_title}"
+
+
+def _serialize_json_list(values: list[str]) -> str:
+    unique = list(dict.fromkeys(v for v in values if v))
+    return json.dumps(unique, ensure_ascii=False)
+
+
+def _analysis_anchor_templates(issue: str | None) -> list[str]:
+    templates = {
+        "missing_controller_contact": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
+        "missing_controller_identity": ["GDPR Article 13(1)(a)", "GDPR Article 14(1)(a)"],
+        "missing_transfer_notice": [
+            "GDPR Article 13(1)(f)",
+            "GDPR Article 14(1)(f)",
+            "GDPR Article 44",
+            "GDPR Article 46",
+        ],
+        "profiling_disclosure_gap": ["GDPR Article 13(2)(f)", "GDPR Article 14(2)(g)", "GDPR Article 22"],
+        "recipients_disclosure_gap": ["GDPR Article 13(1)(e)", "GDPR Article 14(1)(e)"],
+        "purpose_specificity_gap": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)", "GDPR Article 5(1)(b)"],
+        "missing_legal_basis": ["GDPR Article 13(1)(c)", "GDPR Article 14(1)(c)"],
+        "missing_retention_period": ["GDPR Article 13(2)(a)", "GDPR Article 14(2)(a)"],
+        "missing_rights_notice": [
+            "GDPR Article 13(2)(b)",
+            "GDPR Article 13(2)(c)",
+            "GDPR Article 13(2)(d)",
+            "GDPR Article 14(2)(c)",
+            "GDPR Article 14(2)(d)",
+            "GDPR Article 14(2)(e)",
+        ],
+        "missing_complaint_right": ["GDPR Article 13(2)(d)", "GDPR Article 14(2)(e)", "GDPR Article 77"],
+    }
+    return templates.get(issue or "", [])
+
+
+# Reverse map: "article(para)(sub)" → canonical issue key, built from OBLIGATION_TAXONOMY
+# anchors.  Used by _finding_issue_id when other resolution paths (legal_requirement,
+# obligation_under_review, text patterns) all fail.  Where multiple issues share a paragraph
+# reference (e.g. 13(1)(a) for both identity and contact) the primary/most-specific issue wins.
+_GDPR_PARAGRAPH_TO_ISSUE: dict[str, str] = {
+    # Art. 13 — direct collection
+    "13(1)(a)": "missing_controller_identity",
+    "13(1)(b)": "dpo_contact_gap",
+    "13(1)(c)": "missing_legal_basis",
+    "13(1)(e)": "recipients_disclosure_gap",
+    "13(1)(f)": "missing_transfer_notice",
+    "13(2)(a)": "missing_retention_period",
+    "13(2)(b)": "missing_rights_notice",
+    "13(2)(c)": "missing_rights_notice",
+    "13(2)(d)": "missing_complaint_right",
+    "13(2)(f)": "profiling_disclosure_gap",
+    # Art. 14 — indirect collection
+    "14(1)(a)": "missing_controller_identity",
+    "14(1)(b)": "dpo_contact_gap",
+    "14(1)(c)": "missing_legal_basis",
+    "14(1)(e)": "recipients_disclosure_gap",
+    "14(1)(f)": "missing_transfer_notice",
+    "14(1)(g)": "missing_transfer_notice",
+    "14(2)(a)": "missing_retention_period",
+    "14(2)(c)": "missing_rights_notice",
+    "14(2)(d)": "missing_rights_notice",
+    "14(2)(e)": "missing_complaint_right",
+    "14(2)(f)": "article_14_indirect_collection_gap",
+    "14(2)(g)": "profiling_disclosure_gap",
+    "14(3)": "article_14_indirect_collection_gap",
+    # Art. 9 — special categories
+    "9(2)": "special_category_basis_unclear",
+    # Art. 6 — lawful basis
+    "6(1)": "missing_legal_basis",
+    # Art. 77 — complaint right (standalone article)
+    "77": "missing_complaint_right",
+    # New specialist issues added for explicit-risk detection
+    "6(1)(a)": "cookies_tracking_consent_gap",
+}
+
+
+def _normalize_analysis_anchors(issue: str | None, raw_anchors: str | None) -> str | None:
+    preferred = _analysis_anchor_templates(issue)
+    if not preferred:
+        return raw_anchors
+    parsed = _decode_json_list(raw_anchors)
+    if not parsed:
+        return _serialize_json_list(preferred)
+    norm = " ".join(a.lower() for a in parsed)
+    matched = [a for a in preferred if a.lower() in norm]
+    return _serialize_json_list(matched or preferred)
+
+
+def _decode_json_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return [str(v) for v in parsed]
+    return []
+
+
+def _upsert_evidence_records(db: Session, audit_id: str) -> None:
+    existing = {
+        row[0] for row in db.query(EvidenceRecord.evidence_id).filter(EvidenceRecord.audit_id == audit_id).all()
+    }
+    pending: set[str] = set()
+
+    def _enqueue(record: EvidenceRecord) -> None:
+        if record.evidence_id in existing or record.evidence_id in pending:
+            return
+        pending.add(record.evidence_id)
+        db.merge(record)
+
+    findings = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    for row in findings:
+        policy_evidence_id = f"evi:policy:{row.section_id}"
+        _enqueue(
+            EvidenceRecord(
+                evidence_id=policy_evidence_id,
+                audit_id=audit_id,
+                evidence_type="policy_section",
+                source_ref=row.section_id,
+                text_excerpt=(row.policy_evidence_excerpt or row.gap_note or "")[:1000],
+                article_number=(
+                    _decode_json_list(row.primary_legal_anchor)[0][:32]
+                    if _decode_json_list(row.primary_legal_anchor)
+                    else None
+                ),
+            )
+        )
+        derived_ids = [f"evi:ref:{ref}" for ref in _decode_json_list(row.document_evidence_refs)]
+        if row.section_id.startswith("systemic:"):
+            systemic_id = f"evi:derived:{row.section_id}:{row.id}"
+            _enqueue(
+                EvidenceRecord(
+                    evidence_id=systemic_id,
+                    audit_id=audit_id,
+                    evidence_type="derived_systemic_evidence",
+                    source_ref=row.section_id,
+                    text_excerpt=(row.gap_reasoning or row.gap_note or "")[:1000],
+                    derived_from_evidence_ids=_serialize_json_list(derived_ids),
+                    article_number=(
+                        _decode_json_list(row.primary_legal_anchor)[0][:32]
+                        if _decode_json_list(row.primary_legal_anchor)
+                        else None
+                    ),
+                )
+            )
+        for cit in row.citations:
+            chunk_evidence_id = f"evi:chunk:{cit.chunk_id}"
+            _enqueue(
+                EvidenceRecord(
+                    evidence_id=chunk_evidence_id,
+                    audit_id=audit_id,
+                    evidence_type="retrieval_chunk",
+                    source_ref=cit.chunk_id,
+                    text_excerpt=(cit.excerpt or "")[:1000],
+                    derived_from_evidence_ids=_serialize_json_list([policy_evidence_id]),
+                    article_number=cit.article_number,
+                    paragraph_ref=cit.paragraph_ref,
+                )
+            )
+
+
+def _systemic_evidence_refs(
+    issue_id: str, sections: list[SectionData], obligation_map: dict[str, bool]
+) -> tuple[list[str], bool]:
+    section_signals = SYSTEMIC_SECTION_SIGNALS.get(issue_id, {"process", "collect", "personal data"})
+    ranked_sections = sorted(
+        sections,
+        key=lambda s: (
+            0
+            if _section_auditability_type(s) == "auditable_primary"
+            else 1
+            if _section_auditability_type(s) == "auditable_secondary"
+            else 2,
+            s.section_order,
+        ),
+    )
+    matched_sections: list[str] = []
+    for section in ranked_sections:
+        haystack = _section_context_signals(section)
+        if _section_auditability_type(section) in {"administrative_section", "meta_section", "definition_section"}:
+            continue
+        if any(signal in haystack for signal in section_signals):
+            matched_sections.append(_section_ref(section))
+        if len(matched_sections) >= 3:
+            break
+    obligation_key = SYSTEMIC_REQUIRED_OBLIGATION_KEYS.get(issue_id)
+    omission_basis = False
+    if obligation_key and obligation_map.get(obligation_key) is False:
+        omission_basis = True
+    return list(dict.fromkeys(matched_sections)), omission_basis
+
+
+def _section_ref_display(ref: str) -> str:
+    """Return human-readable title from a section:UUID:title ref."""
+    if ref.startswith("section:"):
+        parts = ref.split(":", 2)
+        if len(parts) == 3 and parts[2].strip():
+            return parts[2].strip()
+    return ref
+
+
+def _extract_section_evidence(sections: list[SectionData], refs: list[str], max_chars: int = 600) -> str:
+    """Return actual policy text excerpts from the sections identified by refs.
+    Returns a string of the form "[Section Title] <first N chars of content> | …"
+    This is DOCUMENT EVIDENCE — real text from the notice — not a legal conclusion.
+    Returns empty string if no suitable excerpt can be assembled.
+    """
+    section_by_id: dict[str, SectionData] = {s.id: s for s in sections}
+    parts: list[str] = []
+    for ref in refs[:3]:
+        if not ref.startswith("section:"):
+            continue
+        ref_parts = ref.split(":", 2)
+        if len(ref_parts) < 2:
+            continue
+        section_id = ref_parts[1]
+        section = section_by_id.get(section_id)
+        if not section:
+            continue
+        title = section.section_title.strip() or f"Section {section.section_order}"
+        content = section.content.strip()
+        if not content:
+            continue
+        snippet = content[:220].rstrip()
+        if len(content) > 220:
+            snippet += "…"
+        parts.append(f"[{title}] {snippet}")
+    result = " | ".join(parts)
+    return result[:max_chars]
+
+
+def _systemic_summary_text(issue_id: str, refs: list[str], omission_basis: bool) -> str:
+    """Return an analysis summary for citation_summary_text.
+    Describes WHAT was reviewed and WHAT was absent — not used as document evidence.
+    """
+    obligation_label = {
+        "missing_controller_identity": "controller identity and contact details",
+        "missing_legal_basis": "lawful basis for processing",
+        "missing_retention_period": "retention periods or objective criteria",
+        "missing_rights_notice": "data subject rights disclosure",
+        "missing_complaint_right": "right to lodge a complaint",
+        "missing_transfer_notice": "third-country transfer mechanism",
+        "profiling_disclosure_gap": "profiling transparency details (logic, significance, envisaged consequences)",
+        "recipients_disclosure_gap": "categories of recipients",
+        "purpose_specificity_gap": "category-to-purpose mapping",
+        "invalid_consent_or_legal_basis": "valid consent mechanism and lawful basis",
+        "cookies_tracking_consent_gap": "lawful basis and consent controls for tracking technologies",
+        "article14_source_transparency_gap": "source categories for indirectly obtained personal data",
+    }.get(issue_id, issue_id.replace("_", " "))
+    if refs:
+        display_refs = [_section_ref_display(r) for r in refs[:3]]
+        reviewed = ", ".join(display_refs)
+        return f"Sections reviewed: {reviewed}. None of these sections disclosed {obligation_label} as required."
+    if omission_basis:
+        return f"The reviewed notice text does not disclose {obligation_label} as required by GDPR."
+    return f"The reviewed notice does not adequately disclose {obligation_label}."
+
+
+_CONCLUSION_EVIDENCE_PREFIXES = (
+    "no explicit",
+    "no right to",
+    "no complete",
+    "no clear",
+    "no actionable",
+    "no third-country",
+    "no profiling",
+    "no categories of",
+    "no explicit disclosure was found",
+    "processing purposes are described but not",
+)
+
+
+def _is_conclusion_evidence(text: str) -> bool:
+    """Return True when text is a legal conclusion, not real document evidence.
+    Conclusion strings must NOT appear in policy_evidence_excerpt or citations.
+    They belong in gap_note / gap_reasoning / omission_statement only.
+    """
+    norm = text.strip().lower()
+    return any(norm.startswith(p) for p in _CONCLUSION_EVIDENCE_PREFIXES)
+
+
+def _coverage_to_support_valid(
+    issue_id: str,
+    refs: list[str],
+    obligation_map: dict[str, bool],
+    anchors: list[str],
+    duty_validation: dict[str, str] | None = None,
+) -> bool:
+    if not anchors or not refs:
+        return False
+    has_processing_evidence = any(r.startswith("section:") for r in refs)
+    if not has_processing_evidence:
+        return False
+    required_key = SYSTEMIC_REQUIRED_OBLIGATION_KEYS.get(issue_id)
+    if issue_id == "missing_controller_identity":
+        identity_missing = obligation_map.get("controller_identity_present") is False
+        contact_missing = obligation_map.get("controller_contact_present") is False
+        if not (identity_missing or contact_missing):
+            # Also check duty_validation — if duty confirmed non/partially compliant, treat as absent
+            duty_status = (duty_validation or {}).get("controller_identity_contact")
+            if duty_status not in {"non_compliant", "partially_compliant"}:
+                return False
+    elif required_key:
+        duty_key = _duty_registry_key_for_issue(issue_id)
+        duty_status = (duty_validation or {}).get(duty_key or "") if duty_validation else None
+        # Obligation is absent if obligation_map confirms False OR duty_validation flags a gap
+        obligation_absent = obligation_map.get(required_key) is False or duty_status in {
+            "non_compliant",
+            "partially_compliant",
+        }
+        if not obligation_absent:
+            return False
+    return True
+
+
+def _copy_supporting_citations(db: Session, audit_id: str, systemic_row: Finding, issue_id: str) -> int:
+    supporting_rows = (
+        db.query(Finding).filter(Finding.audit_id == audit_id).filter(Finding.section_id.notlike("systemic:%")).all()
+    )
+    copied = 0
+    for row in supporting_rows:
+        if row.id == systemic_row.id:
+            continue
+        if _finding_issue_id(row) != issue_id:
+            continue
+        citations = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).limit(3 - copied).all()
+        for citation in citations:
+            # Sanitise the excerpt — never propagate conclusions or policy text to systemic citations.
+            excerpt = (citation.excerpt or "").strip()
+            if _is_citation_conclusion(excerpt):
+                excerpt = _gdpr_legal_text(citation.article_title or "")
+            db.add(
+                FindingCitation(
+                    finding_id=systemic_row.id,
+                    chunk_id=citation.chunk_id,
+                    article_number=citation.article_number,
+                    paragraph_ref=citation.paragraph_ref,
+                    article_title=citation.article_title,
+                    excerpt=excerpt[:500],
+                )
+            )
+            copied += 1
+            if copied >= 3:
+                return copied
+    return copied
+
+
+def _build_systemic_support(
+    db: Session,
+    audit_id: str,
+    sections: list[SectionData],
+    obligation_map: dict[str, bool],
+    source_scope: str,
+    source_scope_confidence: float,
+    unseen_sections: list[str],
+    cross_references: list[CrossReference],
+    duty_validation: dict[str, str] | None = None,
+) -> None:
+    systemic_rows = (
+        db.query(Finding).filter(Finding.audit_id == audit_id).filter(Finding.finding_type == "systemic").all()
+    )
+    if not systemic_rows:
+        return
+
+    for row in systemic_rows:
+        issue_id = _finding_issue_id(row)
+        if not issue_id:
+            row.publish_flag = "no"
+            row.support_complete = "false"
+            row.citation_summary_text = "Systemic support could not resolve issue type; downgraded to internal QA."
+            continue
+
+        anchors = _obligation_anchors(issue_id) or SYSTEMIC_ANCHOR_MAP.get(issue_id, {})
+        primary = anchors.get("primary", [])
+        secondary = anchors.get("secondary", [])
+        refs, omission_basis = _systemic_evidence_refs(issue_id, sections, obligation_map)
+        summary = _systemic_summary_text(issue_id, refs, omission_basis)
+        support_valid = _coverage_to_support_valid(issue_id, refs, obligation_map, primary, duty_validation)
+
+        row.primary_legal_anchor = _serialize_json_list(primary)
+        row.secondary_legal_anchors = _serialize_json_list(secondary)
+        row.document_evidence_refs = _serialize_json_list(refs)
+        row.citation_summary_text = summary
+        # Set policy_evidence_excerpt to REAL section text — not a legal conclusion.
+        # Only overwrite if the current value is absent or is a known conclusion string.
+        current_pee = (row.policy_evidence_excerpt or "").strip().lower()
+        is_conclusion = _is_conclusion_evidence(current_pee)
+        if not current_pee or is_conclusion:
+            real_evidence = _extract_section_evidence(sections, refs)
+            row.policy_evidence_excerpt = real_evidence if real_evidence else None
+        row.omission_basis = "true" if omission_basis else "false"
+        row.support_complete = "true" if support_valid else "false"
+        row.source_scope = source_scope
+        row.source_scope_confidence = source_scope_confidence
+        row.referenced_unseen_sections = _serialize_json_list(unseen_sections)
+
+        existing_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        if existing_count == 0:
+            copied = _copy_supporting_citations(db, audit_id, row, issue_id)
+            existing_count = copied
+
+        publishable = (
+            bool(primary) and bool(summary.strip()) and support_valid and (existing_count > 0 or omission_basis)
+        )
+        unseen_reference_for_issue = _issue_has_unseen_reference(issue_id, cross_references)
+        excerpt_limited = source_scope in {"partial_notice_excerpt", "uncertain_scope"}
+        # Cross-reference contradiction gate: unseen references block confirmed-document assertions.
+        if unseen_reference_for_issue:
+            row.classification = "referenced_but_unseen"
+            row.assertion_level = "referenced_but_unseen"
+            row.status = "partial"
+            row.confidence_overall = min(row.confidence_overall or 0.65, 0.65)
+            row.confidence_synthesis = min(row.confidence_synthesis or 0.65, 0.65)
+            row.confidence_level = "medium"
+            row.missing_from_document = "unknown"
+            row.not_visible_in_excerpt = "yes"
+            row.gap_note = "The reviewed excerpt refers to a later section for this topic, but that section was not included in the material reviewed."
+            row.citation_summary_text = "Excerpt-limited assessment: topic is cross-referenced to unseen section(s); full-document compliance cannot be confirmed."
+        elif excerpt_limited:
+            row.assertion_level = "excerpt_limited_gap"
+            row.confidence_overall = min(row.confidence_overall or 0.65, 0.65)
+            row.confidence_synthesis = min(row.confidence_synthesis or 0.65, 0.65)
+            row.confidence_level = "medium"
+            row.missing_from_document = "unknown"
+            row.not_visible_in_excerpt = "yes"
+            if row.gap_note:
+                row.gap_note = f"The reviewed excerpt does not show: {row.gap_note}"
+            if row.classification == "systemic_violation":
+                row.classification = "probable_gap"
+        else:
+            row.assertion_level = "confirmed_document_gap"
+            row.missing_from_document = "yes"
+            row.not_visible_in_excerpt = "no"
+
+        if not publishable:
+            row.publish_flag = "no"
+            row.finding_type = "supporting_evidence"
+            row.classification = "diagnostic_internal_only"
+            row.support_complete = "false"
+            row.gap_note = "Systemic finding withheld from publication pending complete legal/document support package."
+            contradiction_fail_total.inc()
+        else:
+            row.publish_flag = "yes"
+            row.finding_type = "systemic"
+            if row.classification not in {"referenced_but_unseen", "probable_gap"}:
+                row.classification = "systemic_violation"
+            row.support_complete = "true"
+    db.commit()
+
+
+def _record_suppression_ledger(
+    db: Session,
+    audit_id: str,
+    issue_type: str,
+    suppression_reason: str,
+    suppression_validator: str,
+    evidence: str,
+) -> None:
+    compact = hashlib.sha1(issue_type.encode("utf-8")).hexdigest()[:12]
+    db.add(
+        Finding(
+            audit_id=audit_id,
+            section_id=f"ledger:{compact}",
+            status="not applicable",
+            severity=None,
+            classification="diagnostic_internal_only",
+            finding_type="supporting_evidence",
+            publish_flag="no",
+            gap_note=f"Suppressed {issue_type}: {suppression_reason}",
+            remediation_note=None,
+            legal_requirement=f"suppression_validator={suppression_validator}",
+            gap_reasoning=evidence,
+        )
+    )
+
+
+def _has_issue_outcome(rows: list[Finding], issue_type: str) -> bool:
+    for row in rows:
+        issue = _finding_issue_id(row)
+        if issue != issue_type:
+            continue
+        if row.classification in {
+            "systemic_violation",
+            "diagnostic_internal_only",
+            "not_assessable",
+            "referenced_but_unseen",
+            "probable_gap",
+        }:
+            return True
+    return False
+
+
+def _enforce_core_and_specialist_completeness(
+    db: Session,
+    audit_id: str,
+    sections: list[SectionData],
+    obligation_map: dict[str, bool],
+) -> None:
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    valid_core_dispositions = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
+    duty_disposition: dict[str, str] = {}
+
+    for duty, issue_type in CORE_DUTY_TO_ISSUE.items():
+        obligation_key = CORE_DUTY_OBLIGATION_KEYS[duty]
+        present = obligation_map.get(obligation_key)
+        published_gap = any(
+            r.section_id.startswith("systemic:")
+            and _finding_issue_id(r) == issue_type
+            and r.publish_flag == "yes"
+            and r.classification in {"systemic_violation", "probable_gap", "referenced_but_unseen"}
+            for r in rows
+        )
+        referenced_unseen = any(
+            r.section_id.startswith("systemic:")
+            and _finding_issue_id(r) == issue_type
+            and r.publish_flag == "yes"
+            and r.classification == "referenced_but_unseen"
+            for r in rows
+        )
+        if published_gap:
+            duty_disposition[duty] = "referenced_but_unseen" if referenced_unseen else "gap"
+            continue
+        if present is True:
+            duty_disposition[duty] = "satisfied"
+            continue
+        if present is False:
+            reason = f"{obligation_key}=not_visible while no publishable systemic finding survived validators"
+            duty_disposition[duty] = "not_assessable"
+            _record_suppression_ledger(db, audit_id, issue_type, reason, "core_duty_completeness_gate", reason)
+            continue
+        duty_disposition[duty] = "not_assessable"
+        _record_suppression_ledger(
+            db,
+            audit_id,
+            issue_type,
+            "insufficient obligation-map signal",
+            "core_duty_completeness_gate",
+            "duty has no boolean presence signal",
+        )
+
+    unresolved = [duty for duty in CORE_DUTY_TO_ISSUE if duty_disposition.get(duty) not in valid_core_dispositions]
+    if unresolved:
+        for row in rows:
+            if row.section_id.startswith("systemic:"):
+                row.publish_flag = "no"
+                row.classification = "diagnostic_internal_only"
+                row.publication_state = "blocked"
+                row.artifact_role = "support_only"
+        _record_suppression_ledger(
+            db,
+            audit_id,
+            "core_duty_publication_block",
+            "one or more core duties had no final disposition",
+            "core_duty_completeness_gate",
+            ", ".join(unresolved),
+        )
+
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+    for issue_type, (signals, trigger_label) in SPECIALIST_TRIGGER_RULES.items():
+        triggered = any(signal in corpus for signal in signals)
+        if not triggered:
+            continue
+        if _has_issue_outcome(rows, issue_type):
+            continue
+        reason = f"{trigger_label} triggered but no final issue disposition recorded"
+        _record_suppression_ledger(
+            db,
+            audit_id,
+            issue_type,
+            reason,
+            "specialist_family_completeness_gate",
+            f"signals={sorted(list(signals))[:4]}",
+        )
+    db.commit()
+
+
+def _issue_to_family(issue: str | None) -> str | None:
+    """Return the obligation family for an issue, sourced from OBLIGATION_TAXONOMY."""
+    return _obligation_family(issue or "") if issue else None
+
+
+def _final_disposition_for_issue(rows: list[Finding], issue: str) -> tuple[str, str]:
+    matched = [r for r in rows if _finding_issue_id(r) == issue]
+    if any(
+        r.classification in {"systemic_violation", "clear_non_compliance", "probable_gap"} and r.publish_flag == "yes"
+        for r in matched
+    ):
+        return (
+            "gap",
+            "Fact: reviewed notice text indicates processing context. Law: GDPR transparency duties for this issue apply. Breach: required disclosure remains missing or unclear. Conclusion: publishable compliance gap.",
+        )
+    if any(r.classification == "referenced_but_unseen" for r in matched):
+        return (
+            "referenced_but_unseen",
+            "Fact: referenced sections are not visible in reviewed excerpts. Law: duty may apply but full verification needs cited sections. Breach: confirmation blocked by unseen material. Conclusion: referenced but unseen.",
+        )
+    if any(r.classification == "not_assessable" for r in matched):
+        return (
+            "not_assessable",
+            "Fact: available excerpt is fragmentary for this issue. Law: GDPR conclusion requires complete context. Breach: evidence scope is insufficient for legal confirmation. Conclusion: not assessable.",
+        )
+    return "satisfied", "no unresolved issue artifact survived gates"
+
+
+def _has_positive_core_evidence(rows: list[Finding], obligation_key: str) -> bool:
+    for row in rows:
+        if row.status != "compliant":
+            continue
+        requirement = _norm(row.legal_requirement or "")
+        under_review = _norm(row.obligation_under_review or "")
+        if obligation_key in requirement or obligation_key in under_review:
+            return True
+        # Also check gap_note for early-pruned compliant findings (Blocker 1/7)
+        gap_note = _norm(row.gap_note or "")
+        if obligation_key in gap_note and any(
+            t in gap_note
+            for t in {
+                "confirmed present",
+                "appears present",
+                "compliance posture",
+                "compliant",
+                "present at document level",
+                "analysis skipped",
+            }
+        ):
+            return True
+    return False
+
+
+def _build_final_disposition_map(
+    rows: list[Finding],
+    sections: list[SectionData],
+    obligation_map: dict[str, bool],
+    duty_validation: dict[str, str] | None = None,
+) -> dict[str, dict[str, str | bool]]:
+    duty_validation = duty_validation or {}
+
+    def _issue_evidence_ids(issue_id: str) -> tuple[list[str], list[str]]:
+        positive: set[str] = set()
+        negative: set[str] = set()
+        for r in rows:
+            if _finding_issue_id(r) != issue_id:
+                continue
+            refs = _decode_json_list(r.document_evidence_refs)
+            citation_refs = [f"evi:chunk:{c.chunk_id}" for c in (r.citations or []) if c.chunk_id]
+            policy_ref = (
+                [f"evi:policy:{r.section_id}"] if r.section_id and not r.section_id.startswith("systemic:") else []
+            )
+            refs = list(dict.fromkeys([*refs, *citation_refs, *policy_ref]))
+            if r.classification in {
+                "probable_gap",
+                "clear_non_compliance",
+                "systemic_violation",
+                "referenced_but_unseen",
+            }:
+                positive.update(refs)
+            if r.classification in {"not_assessable", "diagnostic_internal_only"}:
+                negative.update(refs)
+        return sorted(positive), sorted(negative)
+
+    families: dict[str, dict[str, str]] = {}
+    core_issue_by_family = {
+        "controller_identity_contact": "missing_controller_identity",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights_notice": "missing_rights_notice",
+        "complaint_right": "missing_complaint_right",
+    }
+    core_obligation_key_by_family = {
+        "controller_identity_contact": "controller_identity_contact",
+        "legal_basis": "legal_basis",
+        "retention": "retention",
+        "rights_notice": "rights",
+        "complaint_right": "complaint",
+    }
+    core_duty_by_family = {
+        "controller_identity_contact": "controller_identity_contact",
+        "legal_basis": "legal_basis_notice",
+        "retention": "retention_notice",
+        "rights_notice": "rights_notice",
+        "complaint_right": "complaint_right_notice",
+    }
+    for family, issue in core_issue_by_family.items():
+        status, reason = _final_disposition_for_issue(rows, issue)
+        obligation_key = core_obligation_key_by_family.get(family)
+        duty_key = core_duty_by_family.get(family)
+        duty_outcome = duty_validation.get(duty_key or "")
+        forced_by_duty = False
+        if duty_outcome == "compliant":
+            status, reason = "satisfied", f"duty validation confirmed {duty_key} is compliant"
+            forced_by_duty = True
+        elif duty_outcome == "partially_compliant" and status == "gap":
+            # Partial compliance is still a reportable gap when a gap finding already exists.
+            # Don't downgrade to not_assessable — keep gap so publication proceeds.
+            reason = f"duty validation marked {duty_key} as partially compliant; incomplete disclosure treated as gap"
+        elif duty_outcome == "non_compliant":
+            status, reason = "gap", f"duty validation marked {duty_key} as non-compliant"
+        if status == "satisfied" and not forced_by_duty:
+            if (
+                family != "controller_identity_contact"
+                and obligation_key
+                and obligation_map.get(f"{obligation_key}_present") is False
+            ):
+                status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
+            elif family == "controller_identity_contact":
+                identity_present = obligation_map.get("controller_identity_present")
+                contact_present = obligation_map.get("controller_contact_present")
+                if identity_present is False:
+                    status, reason = "gap", "controller legal identity disclosure is missing or unclear"
+                    issue = "missing_controller_identity"
+                elif contact_present is False:
+                    status, reason = "gap", "controller contact route disclosure is missing or unclear"
+                    issue = "missing_controller_contact"
+                elif identity_present is None or contact_present is None:
+                    status, reason = "gap", "controller identity/contact transparency is missing or not explicit"
+                    issue = "missing_controller_contact"
+            elif obligation_key and not _has_positive_core_evidence(rows, obligation_key):
+                # Only downgrade when obligation_map confirms the disclosure is not present
+                obligation_map_key = f"{obligation_key}_present"
+                if obligation_map.get(obligation_map_key) is not True:
+                    if family == "controller_identity_contact":
+                        status, reason = (
+                            "gap",
+                            "controller identity may be visible but controller contact disclosure is missing or unclear",
+                        )
+                        issue = "missing_controller_contact"
+                    else:
+                        status, reason = "gap", f"required {obligation_key} disclosure is missing or not explicit"
+        severity = "high" if family in {"controller_identity_contact", "legal_basis", "retention"} else "medium"
+        families[family] = {
+            "status": status,
+            "reasoning": reason,
+            "triggered": True,
+            "publication_recommendation": "publish" if status in {"gap", "referenced_but_unseen"} else "internal_only",
+            "source_scope_dependency": "high",
+            "positive_evidence_ids": _issue_evidence_ids(issue)[0],
+            "negative_evidence_ids": _issue_evidence_ids(issue)[1],
+            "severity": severity,
+            "issue_key": issue,
+        }
+
+    specialist_issue_by_family = {
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+        "article14_source": "article_14_indirect_collection_gap",
+        "recipients": "recipients_disclosure_gap",
+        "special_category": "special_category_basis_unclear",
+        "dpo_contact": "dpo_contact_gap",
+        "purpose_mapping": "purpose_specificity_gap",
+        "invalid_consent": "invalid_consent_or_legal_basis",
+        "cookies_tracking": "cookies_tracking_consent_gap",
+        "article14_source_extended": "article14_source_transparency_gap",
+    }
+    specialist_duty_by_family = {
+        "transfer": "transfers_notice",
+        "profiling": "profiling_notice",
+        "role_ambiguity": "role_allocation_notice",
+        "article14_source": "article14_source_notice",
+        "recipients": "recipients_notice",
+        "purpose_mapping": "purposes_notice",
+        "dpo_contact": "dpo_contact_notice",
+        "invalid_consent": "invalid_consent_notice",
+        "cookies_tracking": "cookies_consent_notice",
+        "article14_source_extended": "article14_source_notice",
+    }
+    corpus = " ".join(_section_context_signals(s) for s in sections)
+    for family, issue in specialist_issue_by_family.items():
+        triggered = any(signal in corpus for signal in SPECIALIST_TRIGGER_RULES.get(issue, ({family}, ""))[0])
+        status, reason = _final_disposition_for_issue(rows, issue)
+        duty_key = specialist_duty_by_family.get(family)
+        duty_outcome = duty_validation.get(duty_key or "")
+        if duty_outcome == "compliant":
+            status, reason = "satisfied", f"duty validation confirmed {duty_key} is compliant"
+        elif duty_outcome == "partially_compliant" and status in {"gap", "not_assessable"}:
+            status, reason = (
+                "not_assessable",
+                f"duty validation marked {duty_key} as partially compliant; unresolved fragments retained as non-publishable",
+            )
+        elif duty_outcome == "non_compliant":
+            status, reason = "gap", f"duty validation marked {duty_key} as non-compliant"
+        specialist_severity = "high" if family in {"transfer", "special_category"} else "medium"
+        if triggered:
+            if family == "transfer":
+                has_transfer_statement = _contains_any(corpus, THIRD_COUNTRY_TRANSFER_SIGNALS)
+                has_safeguards = _contains_any(
+                    corpus, {"scc", "standard contractual clauses", "binding corporate rules", "adequacy", "art 49"}
+                )
+                if has_transfer_statement and not has_safeguards:
+                    status, reason = (
+                        "gap",
+                        "transfer is explicitly described but safeguards/mechanisms are not disclosed",
+                    )
+            elif family == "profiling":
+                profiling_disclosure = {
+                    "logic involved",
+                    "significance",
+                    "envisaged consequences",
+                    "article 22",
+                    "right to obtain human intervention",
+                }
+                tier = _profiling_tier_from_corpus(corpus)
+                if tier and not _contains_any(corpus, profiling_disclosure):
+                    status = "gap"
+                    if tier == "high_impact_automated_decisioning":
+                        reason = (
+                            "high-impact automated decision-making signals are visible (legal/similarly significant effects) "
+                            "but required Article 22 transparency and safeguards are not disclosed"
+                        )
+                        specialist_severity = "high"
+                    elif tier == "automated_decisioning":
+                        reason = (
+                            "automated decision-making signals are visible but required transparency details "
+                            "(logic, significance, effects, safeguards) are not disclosed"
+                        )
+                        specialist_severity = "high"
+                    else:
+                        reason = "profiling indicators are visible but required profiling transparency elements are not disclosed"
+                        specialist_severity = "medium"
+            elif family == "role_ambiguity":
+                own_operations_signals = {
+                    "our own purposes",
+                    "independent business purposes",
+                    "we determine the purposes",
+                    "service improvement",
+                    "product development",
+                    "fraud prevention",
+                }
+                on_behalf_signals = {
+                    "on behalf of",
+                    "under customer instructions",
+                    "instructions from customers",
+                    "customer data",
+                }
+                mixed_roles = (
+                    (
+                        _contains_any(corpus, {"independent controller", "acts as controller", "controller"})
+                        and _contains_any(corpus, {"on behalf of", "acts as processor"})
+                    )
+                    or _contains_any(corpus, {"controller and processor", "both controller and processor"})
+                    or (_contains_any(corpus, own_operations_signals) and _contains_any(corpus, on_behalf_signals))
+                )
+                clear_allocation = _contains_any(
+                    corpus,
+                    {
+                        "when we act as controller",
+                        "when we act as processor",
+                        "where we act as controller",
+                        "where we act as processor",
+                        "we act as a controller",
+                        "we act as a processor",
+                        "we act as the controller",
+                        "we act as the processor",
+                        "we act as a data controller",
+                        "we act as a data processor",
+                        "acting as a data controller",
+                        "acting as a data processor",
+                        "acting as the data controller",
+                        "acting as the data processor",
+                        "acting as a controller",
+                        "acting as a processor",
+                        "as a data controller for",
+                        "as a data processor for",
+                        "processor on behalf of our",
+                        "controller for our own",
+                        "processor for our clients",
+                        "processor for our customers",
+                        "for our own purposes we act as controller",
+                        "for customer instructions we act as processor",
+                        "for customer data we act as processor",
+                        "for this processing we act as controller",
+                        "for this processing we act as processor",
+                        "role allocation",
+                        "in these contexts we are controller",
+                        "in these contexts we are processor",
+                        "controller when processing",
+                        "processor when processing",
+                    },
+                )
+                if mixed_roles and not clear_allocation:
+                    status, reason = (
+                        "gap",
+                        "mixed controller/processor role signals are present without clear allocation wording",
+                    )
+            elif family == "article14_source":
+                indirect_signals = _contains_any(
+                    corpus,
+                    {
+                        "partner",
+                        "partners",
+                        "data aggregator",
+                        "aggregator",
+                        "public records",
+                        "external datasets",
+                        "third-party source",
+                        "indirectly",
+                        "from other sources",
+                        "authorized integration",
+                        "connected service",
+                        "third-party integration",
+                        "customer-authorized",
+                        "indirect source",
+                        "obtained indirectly",
+                        "indirectly obtained",
+                        "integration partner",
+                        "from third parties",
+                        "received from",
+                    },
+                )
+                source_category_disclosed = _contains_any(
+                    corpus,
+                    {
+                        "categories of sources",
+                        "source categories",
+                        "sources of personal data",
+                        "obtained from",
+                        "received from",
+                        "receive data from",
+                        "receive personal data from",
+                        "authorized integration",
+                        "connected service",
+                        "data your",
+                        "where we obtained",
+                        "the source of",
+                    },
+                )
+                article14_timing_disclosed = _contains_any(
+                    corpus,
+                    {
+                        "within one month",
+                        "at the latest within one month",
+                        "at first communication",
+                        "before disclosure to another recipient",
+                        "article 14(3)",
+                    },
+                )
+                if indirect_signals and (not source_category_disclosed or not article14_timing_disclosed):
+                    status = "gap"
+                    if not source_category_disclosed and not article14_timing_disclosed:
+                        reason = "indirect collection is visible but source categories and Article 14 timing duties are not clearly disclosed"
+                    elif not source_category_disclosed:
+                        reason = "indirect collection is visible but source categories are not clearly disclosed"
+                    else:
+                        reason = "indirect collection is visible but Article 14 timing duties are not clearly disclosed"
+            elif family == "recipients":
+                third_party_mentions = _contains_any(
+                    corpus,
+                    {
+                        "third party",
+                        "third-party",
+                        "vendor",
+                        "partner",
+                        "reseller",
+                        "marketplace",
+                        "payment provider",
+                        "cloud provider",
+                    },
+                )
+                formal_category_phrases = _contains_any(
+                    corpus,
+                    {
+                        "categories of recipients",
+                        "recipient categories",
+                        "we disclose to the following categories",
+                        "types of recipients",
+                        "recipients of personal data",
+                    },
+                )
+                named_categories_present = _contains_any(corpus, _RECIPIENT_NAMED_CATEGORY_SIGNALS)
+                structured_recipients_disclosure = formal_category_phrases or named_categories_present
+                if third_party_mentions and not structured_recipients_disclosure:
+                    status, reason = (
+                        "gap",
+                        "third-party sharing is mentioned but no recipient categories are identified",
+                    )
+            elif family == "purpose_mapping":
+                category_sections = [
+                    s
+                    for s in sections
+                    if re.search(r"\b2\.[1-7]\b", _norm(s.section_title))
+                    or any(t in _norm(s.section_title) for t in {"data we collect", "personal data"})
+                ]
+                category_tokens = {
+                    "identifier",
+                    "contact",
+                    "usage",
+                    "behavioral",
+                    "device",
+                    "location",
+                    "payment",
+                    "profile",
+                    "special category",
+                }
+                purpose_tokens = {
+                    "purpose",
+                    "we use",
+                    "to provide",
+                    "to improve",
+                    "to personalize",
+                    "to communicate",
+                    "to comply",
+                }
+                catch_all_tokens = {
+                    "for business purposes",
+                    "as necessary",
+                    "including but not limited to",
+                    "for legitimate interests",
+                    "for operational purposes",
+                }
+                category_coverage = 0
+                mapped_coverage = 0
+                broad_only_sections = 0
+                for sec in category_sections:
+                    text = _norm(f"{sec.section_title} {sec.content}")
+                    has_category = any(t in text for t in category_tokens)
+                    has_purpose = any(t in text for t in purpose_tokens)
+                    has_only_broad = (
+                        has_purpose
+                        and any(t in text for t in catch_all_tokens)
+                        and not _contains_any(
+                            text,
+                            {
+                                "specific",
+                                "for fraud prevention",
+                                "for account security",
+                                "for payment processing",
+                                "for support requests",
+                            },
+                        )
+                    )
+                    if has_category:
+                        category_coverage += 1
+                    if has_category and has_purpose and not has_only_broad:
+                        mapped_coverage += 1
+                    if has_category and (not has_purpose or has_only_broad):
+                        broad_only_sections += 1
+                # Also check dedicated purpose sections for cross-section category-to-purpose mapping
+                if category_coverage > 0 and mapped_coverage == 0:
+                    purpose_specific_sections = [
+                        s
+                        for s in sections
+                        if any(
+                            t in _norm(s.section_title)
+                            for t in {"purpose", "why we process", "how we use", "use of", "we collect"}
+                        )
+                        and s not in category_sections
+                    ]
+                    for sec in purpose_specific_sections:
+                        text = _norm(f"{sec.section_title} {sec.content}")
+                        has_category_ref = any(
+                            t in text for t in {*category_tokens, "categories of", "personal data", "data we collect"}
+                        )
+                        has_purpose_p = any(t in text for t in purpose_tokens)
+                        has_specific_purpose = _contains_any(
+                            text,
+                            {
+                                "for fraud prevention",
+                                "for account security",
+                                "for payment processing",
+                                "for support requests",
+                                "for service provision",
+                                "to enable",
+                                "to deliver",
+                                "service delivery",
+                                "to authenticate",
+                                "to manage",
+                                "to generate insights",
+                                "to detect",
+                                "to prevent",
+                                "for these activities",
+                                "for this purpose",
+                            },
+                        )
+                        if has_category_ref and has_purpose_p and has_specific_purpose:
+                            mapped_coverage += 1
+                            break
+                if category_coverage > 0 and mapped_coverage == 0:
+                    status, reason = (
+                        "gap",
+                        "data categories are listed but category-specific purposes are not clearly mapped",
+                    )
+                elif category_coverage > 0 and broad_only_sections > 0 and mapped_coverage == 0:
+                    status, reason = (
+                        "gap",
+                        "some category sections use broad/catch-all purposes without clear category-to-purpose mapping",
+                    )
+                elif category_coverage == 0 and _contains_any(corpus, {"data category", "categories of personal data"}):
+                    status, reason = (
+                        "referenced_but_unseen",
+                        "purpose mapping signals are present, but category-level mapping text appears outside reviewed excerpts",
+                    )
+                elif category_coverage > 0 and mapped_coverage > 0:
+                    # Adequate purpose-to-category mapping confirmed; override any pre-existing gap
+                    # artifact created by _add_systemic_issue_synthesis before this analysis ran.
+                    status, reason = (
+                        "satisfied",
+                        "purpose-to-category mapping is adequately addressed in reviewed sections",
+                    )
+            elif family == "special_category":
+                text = corpus
+                true_art9_indicators = {
+                    "health data",
+                    "biometric data",
+                    "genetic data",
+                    "racial or ethnic origin",
+                    "political opinions",
+                    "religious beliefs",
+                    "trade union membership",
+                    "sexual orientation",
+                    "article 9",
+                    "special category",
+                }
+                ambiguous_sensitive_only = {
+                    "sensitive under applicable law",
+                    "sensitive information",
+                    "sensitive data",
+                    "where considered sensitive",
+                }
+                avoid_or_incidental = {
+                    "we do not routinely collect",
+                    "we avoid collecting",
+                    "not intended to collect",
+                    "incidental collection",
+                    "if unintentionally provided",
+                }
+                controller_context = _contains_any(
+                    text,
+                    {
+                        "we determine the purposes",
+                        "as controller",
+                        "independent controller",
+                        "we collect and use",
+                    },
+                )
+                has_true_art9 = _contains_any(text, true_art9_indicators)
+                has_ambiguous_sensitive = _contains_any(text, ambiguous_sensitive_only)
+                has_avoid_wording = _contains_any(text, avoid_or_incidental)
+                has_art9_condition = _contains_any(
+                    text,
+                    {
+                        "article 9(2)",
+                        "explicit consent",
+                        "substantial public interest",
+                        "employment law obligations",
+                        "vital interests",
+                        "legal claims",
+                        "public health",
+                    },
+                )
+                has_safeguards = _contains_any(
+                    text,
+                    {
+                        "appropriate safeguards",
+                        "data minimisation",
+                        "access controls",
+                        "retention limits",
+                        "privacy by design",
+                    },
+                )
+                if has_true_art9 and controller_context and not (has_art9_condition and has_safeguards):
+                    status, reason = (
+                        "gap",
+                        "true Article 9-category processing appears contemplated in controller context without clear Art 9 condition/safeguards",
+                    )
+                    specialist_severity = "high"
+                elif has_avoid_wording and not has_true_art9:
+                    status, reason = (
+                        "satisfied",
+                        "policy states no routine special-category collection (incidental/avoidance posture)",
+                    )
+                    specialist_severity = "low"
+                elif has_ambiguous_sensitive and not has_true_art9:
+                    status, reason = (
+                        "referenced_but_unseen",
+                        "ambiguous sensitive-language suggests possible special-category context, but reviewed excerpts do not confirm Article 9 processing",
+                    )
+                    specialist_severity = "medium"
+            elif family == "invalid_consent":
+                invalid_consent_signals = {
+                    "consent inferred",
+                    "inferred consent",
+                    "implied consent",
+                    "consent is implied",
+                    "continued usage",
+                    "continuing to use",
+                    "consent via browsing",
+                    "use of the service constitutes",
+                    "use of this service constitutes",
+                    "use constitutes your consent",
+                    "by using you agree",
+                    "consent inferred from use",
+                    "consent inferred from continued",
+                }
+                valid_consent_signals = {
+                    "freely given",
+                    "specific consent",
+                    "informed consent",
+                    "unambiguous indication",
+                    "withdraw consent",
+                    "withdraw your consent",
+                    "right to withdraw",
+                    "opt-in",
+                    "opt in",
+                    "tick box",
+                    "checkmark",
+                    "explicit consent",
+                    "consent form",
+                    "affirmative action",
+                }
+                has_invalid = _contains_any(corpus, invalid_consent_signals)
+                has_valid_indicators = _contains_any(corpus, valid_consent_signals)
+                if has_invalid and not has_valid_indicators:
+                    status, reason = (
+                        "gap",
+                        "invalid consent mechanism signals are present (inferred/implied/continued-use consent) without valid GDPR Art. 7 consent indicators",
+                    )
+                    specialist_severity = "high"
+            elif family == "cookies_tracking":
+                tracking_tech_signals = {
+                    "cookie",
+                    "tracking",
+                    "fingerprint",
+                    "cross-device",
+                    "advertising sdk",
+                    "ad network",
+                    "retargeting",
+                    "remarketing",
+                    "tracking pixel",
+                    "behavioural advertising",
+                    "behavioral advertising",
+                    "interest-based advertising",
+                    "analytics cookie",
+                    "advertising cookie",
+                    "non-essential cookie",
+                }
+                consent_controls_signals = {
+                    "consent for cookies",
+                    "cookie consent",
+                    "opt out of cookies",
+                    "opt-out of tracking",
+                    "manage cookies",
+                    "cookie settings",
+                    "cookie preferences",
+                    "tracking opt-out",
+                    "cookie banner",
+                    "we obtain your consent",
+                    "consent before",
+                    "prior to placing",
+                    "lawful basis for cookies",
+                    "lawful basis for tracking",
+                }
+                has_tracking = _contains_any(corpus, tracking_tech_signals)
+                has_controls = _contains_any(corpus, consent_controls_signals)
+                if has_tracking and not has_controls:
+                    status, reason = (
+                        "gap",
+                        "tracking technology indicators are present but lawful basis and consent controls for tracking are not disclosed",
+                    )
+                    specialist_severity = "high"
+            elif family == "article14_source_extended":
+                third_party_source_signals = {
+                    "marketing list",
+                    "data broker",
+                    "data aggregator",
+                    "demographic segment",
+                    "public records",
+                    "third-party data provider",
+                    "purchased list",
+                    "purchased data",
+                    "lead list",
+                    "compiled from public",
+                    "data enrichment",
+                    "sourced from third parties",
+                }
+                source_category_disclosure = {
+                    "categories of sources",
+                    "source categories",
+                    "sources of personal data",
+                    "obtained from",
+                    "source of the personal data",
+                    "where we obtained",
+                }
+                has_tp_source = _contains_any(corpus, third_party_source_signals)
+                has_source_disclosure = _contains_any(corpus, source_category_disclosure)
+                if has_tp_source and not has_source_disclosure:
+                    status, reason = (
+                        "gap",
+                        "third-party data source indicators are present but Article 14(2)(f) source-category disclosure is absent",
+                    )
+                    specialist_severity = "high"
+            elif family == "dpo_contact":
+                dpo_not_required_signals = {
+                    "dpo is not required",
+                    "not required to appoint",
+                    "not obliged to appoint",
+                    "no dpo is required",
+                    "no obligation to appoint a dpo",
+                    "we do not have a dpo",
+                    "we have not appointed a dpo",
+                }
+                dpo_present_signals = {
+                    "data protection officer",
+                    "dpo",
+                    "dpo@",
+                    "dpo contact",
+                    "privacy officer",
+                    "article 37",
+                }
+                contact_present_signals = {
+                    "dpo@",
+                    "dpo contact",
+                    "privacy officer email",
+                    "contact our dpo",
+                    "contact the dpo",
+                    "dpo can be contacted",
+                    "dpo email",
+                }
+                has_dpo_not_required = _contains_any(corpus, dpo_not_required_signals)
+                has_dpo_present = _contains_any(corpus, dpo_present_signals)
+                has_dpo_contact = _contains_any(corpus, contact_present_signals) or (
+                    has_dpo_present and bool(re.search(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", corpus))
+                )
+                if has_dpo_not_required and not has_dpo_present:
+                    status, reason = (
+                        "satisfied",
+                        "policy explicitly states DPO is not required or not appointed; obligation does not apply",
+                    )
+                elif has_dpo_present and has_dpo_contact:
+                    status, reason = "satisfied", "DPO is identified and contact details are disclosed"
+                elif has_dpo_present and not has_dpo_contact:
+                    status, reason = "gap", "DPO is mentioned but no contact route is disclosed"
+        families[family] = {
+            "status": status,
+            "reasoning": reason,
+            "triggered": triggered,
+            "publication_recommendation": "publish" if status in {"gap", "referenced_but_unseen"} else "internal_only",
+            "source_scope_dependency": "high" if triggered else "low",
+            "positive_evidence_ids": _issue_evidence_ids(issue)[0],
+            "negative_evidence_ids": _issue_evidence_ids(issue)[1],
+            "severity": specialist_severity,
+            "issue_key": issue,
+        }
+    core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
+    specialist_families = [
+        "transfer",
+        "profiling",
+        "role_ambiguity",
+        "article14_source",
+        "recipients",
+        "special_category",
+        "dpo_contact",
+    ]
+    specialist_families.append("purpose_mapping")
+    specialist_families.extend(["invalid_consent", "cookies_tracking", "article14_source_extended"])
+    unresolved_core = [
+        f for f in core_families if families.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}
+    ]
+    unresolved_specialist = [
+        f
+        for f in specialist_families
+        if families.get(f, {}).get("triggered")
+        and families.get(f, {}).get("status") not in {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
+    ]
+    publishable_recommendations = [
+        f
+        for f in specialist_families + core_families
+        if families.get(f, {}).get("publication_recommendation") == "publish"
+    ]
+    families["_controls"] = {
+        "audit_status": "review_required" if unresolved_core else "complete",
+        "publication_allowed": not unresolved_core,
+        "publication_blockers": unresolved_core,
+        "scope_confidence_cap": 0.75 if unresolved_core or unresolved_specialist else 1.0,
+        "review_required_reasons": unresolved_core + unresolved_specialist,
+    }
+    families["_coverage_matrix"] = {
+        "core_resolved": len(unresolved_core) == 0,
+        "specialist_resolved": len(unresolved_specialist) == 0,
+        "publish_recommendation_count": len(publishable_recommendations),
+    }
+    return families
+
+
+def _readable_evidence(issue: str) -> str:
+    """Return a clean, publication-ready absence statement for use as policy_evidence_excerpt
+    on systemic findings where no specific section excerpt is available.
+    Returns a scoped absence statement confirming the disclosure was not found.
+    Does NOT use the obligation gap_note (which is a legal conclusion, not document evidence).
+    """
+    _absence_map: dict[str, str] = {
+        "missing_legal_basis": "No explicit lawful basis is disclosed for the processing activities described in this notice.",
+        "missing_retention_period": "No explicit retention period or objective retention criteria is disclosed for the processing activities described in this notice.",
+        "missing_rights_notice": "No complete data subject rights disclosure is present in this notice.",
+        "missing_complaint_right": "No right to lodge a complaint with a supervisory authority is disclosed in this notice.",
+        "missing_controller_identity": "No clear controller legal entity identity is disclosed in this notice.",
+        "missing_controller_contact": "No actionable privacy contact route is disclosed in this notice.",
+        "missing_transfer_notice": "No third-country transfer mechanism or safeguard is disclosed in this notice.",
+        "profiling_disclosure_gap": "No profiling logic, significance, or envisaged consequences are disclosed in this notice.",
+        "recipients_disclosure_gap": "No categories of recipients or data-sharing contexts are disclosed in this notice.",
+        "purpose_specificity_gap": "Processing purposes are described but not clearly mapped to specific data categories in this notice.",
+    }
+    return (
+        _absence_map.get(issue)
+        or f"No explicit disclosure was found in the reviewed notice for the {issue.replace('_', ' ')} obligation."
+    )
+
+
+def _derive_issue_key_for_publication(row: Finding) -> str | None:
+    obligation = _norm(row.obligation_under_review or "")
+    if obligation in CLAIM_ARTICLE_RULES:
+        return obligation
+    if row.section_id.startswith("systemic:"):
+        return row.section_id.split("systemic:", 1)[1]
+    legal_requirement = _norm(row.legal_requirement or "")
+    issue_match = re.search(r"\bissue\s+([a-z0-9_]+)\b", legal_requirement)
+    if issue_match:
+        candidate = issue_match.group(1).strip()
+        if candidate in CLAIM_ARTICLE_RULES:
+            return candidate
+    return _finding_issue_id(row)
+
+
+def _ensure_publishable_issue_key(row: Finding) -> str | None:
+    issue_key = _derive_issue_key_for_publication(row)
+    if issue_key:
+        return issue_key
+    row.publish_flag = "no"
+    row.publication_state = "internal_only"
+    row.artifact_role = "support_only"
+    row.finding_level = "none"
+    return None
+
+
+def _enforce_review_publish_invariant(
+    db: Session,
+    audit_id: str,
+    final_disposition_map: dict[str, dict[str, str | bool]],
+    sections: list[SectionData] | None = None,
+) -> None:
+    family_to_issue = {
+        "controller_identity_contact": "missing_controller_contact",
+        "legal_basis": "missing_legal_basis",
+        "retention": "missing_retention_period",
+        "rights_notice": "missing_rights_notice",
+        "complaint_right": "missing_complaint_right",
+        "transfer": "missing_transfer_notice",
+        "profiling": "profiling_disclosure_gap",
+        "role_ambiguity": "controller_processor_role_ambiguity",
+        "article14_source": "article_14_indirect_collection_gap",
+        "recipients": "recipients_disclosure_gap",
+        "special_category": "special_category_basis_unclear",
+        "dpo_contact": "dpo_contact_gap",
+        "purpose_mapping": "purpose_specificity_gap",
+    }
+    required_issues = {
+        family_to_issue.get(family, str(item.get("issue_key") or ""))
+        for family, item in final_disposition_map.items()
+        if str(item.get("status") or "") == "gap" and str(item.get("publication_recommendation") or "") == "publish"
+    }
+    # Filter to only known obligation issues — prevents unknown/malformed entries from
+    # creating spurious published findings (e.g., false positives on compliant documents).
+    required_issues = {issue for issue in required_issues if issue and issue in OBLIGATION_TAXONOMY}
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    for row in rows:
+        # Never promote ledger diagnostic rows — they are internal audit records and
+        # must not become publishable findings even if their text mentions an issue key.
+        if row.section_id.startswith("ledger:") or row.classification == "diagnostic_internal_only":
+            continue
+        issue = _ensure_publishable_issue_key(row)
+        if issue not in required_issues:
+            continue
+        row.publish_flag = "yes"
+        row.publication_state = "publishable"
+        row.artifact_role = "publishable_finding"
+        row.finding_type = "systemic" if row.section_id.startswith("systemic:") else "local"
+        row.finding_level = "systemic" if row.section_id.startswith("systemic:") else "local"
+        if row.classification == "not_assessable":
+            row.classification = "probable_gap"
+            row.status = "gap" if row.status == "gap" else "partial"
+            row.gap_note = row.gap_note or (
+                _obligation_gap_note(issue)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue)
+                or "Required transparency disclosure is missing or insufficient for this obligation."
+            )
+        # Use OBLIGATION_TAXONOMY for canonical anchors
+        _tax_anchors = _obligation_anchors(issue)
+        default_anchors = _tax_anchors.get("primary") or SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])
+        if not row.primary_legal_anchor and default_anchors:
+            row.primary_legal_anchor = _serialize_json_list(default_anchors)
+        if not row.legal_requirement:
+            row.legal_requirement = (default_anchors or [f"GDPR duty for {issue.replace('_', ' ')}"])[0]
+        # Do NOT fill policy_evidence_excerpt with _readable_evidence() (a legal conclusion).
+        # _build_systemic_support already set real section text or left it None.
+        # If sections are available and the field is still empty, attempt extraction now.
+        if not (row.policy_evidence_excerpt or "").strip() and sections:
+            try:
+                _refs = json.loads(row.document_evidence_refs or "[]")
+            except Exception:
+                _refs = []
+            if _refs:
+                real_pee = _extract_section_evidence(sections, _refs)
+                row.policy_evidence_excerpt = real_pee if real_pee else None
+        # Blocker 6: normalize confidence_overall and confidence_level for updated rows
+        if row.confidence_overall is None:
+            row.confidence_overall = row.confidence or 0.7
+        if not row.confidence_level:
+            row.confidence_level = _confidence_level_for(row.confidence_overall)
+        # Blocker 1: ensure promoted findings have at least synthetic citations
+        existing_cit_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        if existing_cit_count == 0:
+            db.flush()
+            _add_systemic_finding_citations(db, row.id, issue, sections=sections)
+    existing_issues = {_finding_issue_id(r) for r in rows if r.publication_state == "publishable"}
+    for issue in sorted(required_issues - existing_issues):
+        inv_finding = Finding(
+            audit_id=audit_id,
+            section_id=f"systemic:{issue}",
+            status="gap",
+            severity=_obligation_severity(issue),  # canonical severity from OBLIGATION_TAXONOMY
+            classification="systemic_violation",
+            confidence=0.85,
+            confidence_evidence=0.8,
+            confidence_applicability=0.9,
+            confidence_article_fit=0.9,
+            confidence_synthesis=0.9,
+            confidence_overall=0.85,
+            confidence_level=_confidence_level_for(0.85),
+            finding_type="systemic",
+            publish_flag="yes",
+            artifact_role="publishable_finding",
+            finding_level="systemic",
+            publication_state="publishable",
+            gap_note=(
+                _obligation_gap_note(issue)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue)
+                or "Required transparency disclosure is missing or insufficient for this obligation."
+            ),
+            policy_evidence_excerpt=None,  # filled below from real section text (never a conclusion string)
+            primary_legal_anchor=_serialize_json_list(
+                _obligation_anchors(issue).get("primary") or SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary", [])
+            ),
+            legal_requirement=(
+                (
+                    _obligation_anchors(issue).get("primary")
+                    or SYSTEMIC_ANCHOR_MAP.get(issue, {}).get("primary")
+                    or [f"GDPR duty for {issue.replace('_', ' ')}"]
+                )[0]
+            ),
+            remediation_note=_issue_specific_remediation(issue, "privacy_notice", systemic=True),
+        )
+        if sections:
+            _inv_refs, _ = _systemic_evidence_refs(issue, sections, {})
+            _inv_pee = _extract_section_evidence(sections, _inv_refs)
+            inv_finding.policy_evidence_excerpt = _inv_pee if _inv_pee else None
+        db.add(inv_finding)
+        db.flush()
+        _add_systemic_finding_citations(db, inv_finding.id, issue, sections=sections)
+    db.commit()
+
+
+def _state_invariant_validator(rows: list[Finding]) -> list[str]:
+    errors: list[str] = []
+    for row in rows:
+        violation = None
+        if (
+            row.artifact_role == "publishable_finding"
+            and row.publication_state == "publishable"
+            and _derive_issue_key_for_publication(row) is None
+        ):
+            violation = "publishable_without_issue_key"
+        if row.classification == "diagnostic_internal_only" and row.publication_state == "publishable":
+            violation = "diagnostic_internal_only_publishable"
+        elif row.classification == "diagnostic_internal_only" and row.artifact_role in {
+            "publishable_candidate",
+            "publishable_finding",
+        }:
+            violation = "diagnostic_internal_only_publishable_role"
+        elif row.artifact_role == "support_only" and row.publication_state == "publishable":
+            violation = "support_only_publishable"
+        elif row.publication_state == "blocked" and row.publish_flag == "yes":
+            violation = "blocked_publish_yes"
+        elif row.finding_level == "none" and row.artifact_role == "publishable_finding":
+            violation = "none_level_publishable_finding"
+        elif row.status == "gap" and row.classification == "diagnostic_internal_only":
+            violation = "diagnostic_internal_only_gap"
+        if not violation:
+            continue
+        row.publish_flag = "no"
+        row.publication_state = "blocked"
+        row.artifact_role = "support_only"
+        row.finding_level = "none"
+        if row.classification == "diagnostic_internal_only":
+            row.status = "not applicable"
+            row.severity = None
+        errors.append(f"state_invariant_violation:{violation}:{row.id}")
+    return errors
+
+
+def _final_publication_validator(
+    db: Session,
+    audit_id: str,
+    disposition_map: dict[str, dict[str, str | bool]],
+    source_scope: str,
+) -> None:
+    audit = db.get(Audit, audit_id)
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    valid_final = {"satisfied", "gap", "referenced_but_unseen", "not_assessable"}
+    core_families = ["controller_identity_contact", "legal_basis", "retention", "rights_notice", "complaint_right"]
+    specialist_families = [
+        "transfer",
+        "profiling",
+        "role_ambiguity",
+        "article14_source",
+        "recipients",
+        "special_category",
+        "dpo_contact",
+    ]
+    specialist_families.append("purpose_mapping")
+    specialist_families.extend(["invalid_consent", "cookies_tracking", "article14_source_extended"])
+    unresolved_core = [f for f in core_families if disposition_map.get(f, {}).get("status") not in valid_final]
+    hard_block_core = [
+        f for f in core_families if disposition_map.get(f, {}).get("status") in {"unresolved_internal_error", "blocked"}
+    ]
+    unresolved_specialist = [
+        f for f in specialist_families if disposition_map.get(f, {}).get("status") not in valid_final
+    ]
+    if unresolved_core or unresolved_specialist:
+        for family in unresolved_core:
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"core_duty_unresolved:{family}",
+                "core duty is unresolved/blocked/suppressed",
+                "core_duty_publication_gate",
+                disposition_map.get(family, {}).get("reasoning", "missing family disposition"),
+            )
+        for family in unresolved_specialist:
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"specialist_family_unresolved:{family}",
+                "triggered specialist family has no final disposition",
+                "specialist_family_resolution_gate",
+                disposition_map.get(family, {}).get("reasoning", "missing family disposition"),
+            )
+    core_ok = not unresolved_core and not unresolved_specialist and not hard_block_core
+    if hard_block_core and audit is not None:
+        audit.status = "review_required"
+        db.add(audit)
+        for family in hard_block_core:
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"publication_blocker=unresolved_core_duty:{family}",
+                "publication hard-stopped by unresolved core duty",
+                "core_duty_publication_gate",
+                disposition_map.get(family, {}).get("reasoning", "unresolved core duty"),
+            )
+    for row in rows:
+        issue = _finding_issue_id(row)
+        family = _issue_to_family(issue)
+        family_status = disposition_map.get(family or "", {}).get("status")
+        contradiction_pass = row.classification != "diagnostic_internal_only"
+        scope_supports_assertion = source_scope == "full_notice" and row.assertion_level == "confirmed_document_gap"
+        if source_scope != "full_notice" or (
+            row.referenced_unseen_sections and row.referenced_unseen_sections not in {"[]", ""}
+        ):
+            if row.assertion_level == "confirmed_document_gap" or row.missing_from_document == "yes":
+                row.assertion_level = (
+                    "excerpt_limited_gap" if row.classification != "referenced_but_unseen" else "referenced_but_unseen"
+                )
+                row.missing_from_document = "unknown"
+                scope_supports_assertion = False
+        if hard_block_core or family_status == "not_assessable":
+            row.source_scope_confidence = min(row.source_scope_confidence or 0.75, 0.75)
+            if row.assertion_level == "confirmed_document_gap":
+                row.assertion_level = "probable_document_gap"
+        citation_count = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).count()
+        row_text = f"{row.gap_note or ''} {row.policy_evidence_excerpt or ''} {row.remediation_note or ''}"
+        explicit_violation_visible = bool(_explicit_violation_hits(row_text))
+        omission_mode_row = str(row.omission_basis or "").lower() == "true"
+        allow_no_citation_chain = explicit_violation_visible or omission_mode_row
+        missing_requirements: list[str] = []
+        # Gate: policy_evidence_excerpt must be real document text, not a legal conclusion.
+        _pee_raw = (row.policy_evidence_excerpt or "").strip()
+        if _pee_raw and _is_conclusion_evidence(_pee_raw.lower()):
+            missing_requirements.append("policy_evidence_excerpt.is_conclusion")
+        if not row.primary_legal_anchor:
+            missing_requirements.append("primary_legal_anchor")
+        if not (row.citation_summary_text or "").strip():
+            missing_requirements.append("citation_summary_text")
+        if not row.source_scope:
+            missing_requirements.append("source_scope")
+        if not row.assertion_level:
+            missing_requirements.append("assertion_level")
+        if row.confidence_overall is None:
+            missing_requirements.append("confidence_overall")
+        if not row.remediation_note:
+            missing_requirements.append("remediation_note")
+        if citation_count == 0 and not allow_no_citation_chain:
+            missing_requirements.append("citations")
+        if not row.document_evidence_refs and not allow_no_citation_chain:
+            missing_requirements.append("document_evidence_refs")
+        issue_key = _finding_issue_id(row)
+        if not _citation_articles_fit_issue(db, row.id, issue_key):
+            missing_requirements.append("citations.article_matrix")
+        if _has_positive_contradictory_disclosure(db, row, issue_key):
+            missing_requirements.append("contradictory_text_present")
+
+        should_publish = (
+            row.publish_flag == "yes"
+            and core_ok
+            and family_status in {"gap", "referenced_but_unseen", "not_assessable", None}
+            and contradiction_pass
+            and (
+                scope_supports_assertion
+                or row.assertion_level in {"referenced_but_unseen", "excerpt_limited_gap", "not_assessable"}
+            )
+            and bool(row.remediation_note)
+            and not missing_requirements
+        )
+        if should_publish and (row.confidence_overall or 0.0) < 0.55:
+            # Hard confidence gate: publication requires confidence_overall >= 0.55.
+            # No rationale exception — low-confidence findings must not be published.
+            missing_requirements.append("confidence_below_minimum")
+            should_publish = False
+        if should_publish and not _has_flbc_reasoning(row.gap_reasoning):
+            missing_requirements.append("gap_reasoning.flbc")
+            should_publish = False
+        requires_strong_hydration = issue_key in {
+            "missing_legal_basis",
+            "missing_retention_period",
+            "missing_rights_notice",
+            "missing_complaint_right",
+            "missing_transfer_notice",
+            "profiling_disclosure_gap",
+        }
+        if requires_strong_hydration and (row.omission_basis is None or row.support_complete is None):
+            if row.omission_basis is None:
+                missing_requirements.append("omission_basis")
+            if row.support_complete is None:
+                missing_requirements.append("support_complete")
+            should_publish = False
+        if not should_publish:
+            row.publish_flag = "no"
+            row.publication_state = "blocked"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            # Do NOT append internal debug suffixes to gap_note — they may leak into
+            # client-visible output and are already recorded in the suppression ledger.
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                f"hydration_incomplete:{issue_key}",
+                "published finding hydration incomplete",
+                "published_hydration_validator",
+                (
+                    f"finding_id={row.id}; issue_key={issue_key}; "
+                    f"missing_fields={','.join(sorted(set(missing_requirements))) or 'unknown'}; "
+                    f"failure_type="
+                    f"{'evidence_linkage' if any(k in missing_requirements for k in ['document_evidence_refs', 'source_scope']) else 'citation_projection' if 'citations' in missing_requirements else 'source_ref'}"
+                ),
+            )
+    for message in _state_invariant_validator(rows):
+        _record_suppression_ledger(db, audit_id, message, "invariant violation", "state_invariant_validator", message)
+    if audit is not None and audit.status != "review_required":
+        family_issue = {
+            "controller_identity_contact": {"missing_controller_identity", "missing_controller_contact"},
+            "transfer": {"missing_transfer_notice"},
+            "profiling": {"profiling_disclosure_gap"},
+            "role_ambiguity": {"controller_processor_role_ambiguity"},
+            "recipients": {"recipients_disclosure_gap"},
+            "purpose_mapping": {"purpose_specificity_gap"},
+        }
+        missing_publishable: list[str] = []
+        for family, issues in family_issue.items():
+            item = disposition_map.get(family, {}) if isinstance(disposition_map.get(family, {}), dict) else {}
+            if str(item.get("status") or "") not in {"gap", "referenced_but_unseen"}:
+                continue
+            if str(item.get("publication_recommendation") or "") != "publish":
+                continue
+            has_publishable = any(
+                _finding_issue_id(r) in issues
+                and r.publish_flag == "yes"
+                and r.publication_state == "publishable"
+                and r.classification
+                in {"systemic_violation", "clear_non_compliance", "probable_gap", "referenced_but_unseen"}
+                for r in rows
+            )
+            if not has_publishable:
+                missing_publishable.append(family)
+        if missing_publishable:
+            audit.status = "audit_incomplete"
+            db.add(audit)
+            _record_suppression_ledger(
+                db,
+                audit_id,
+                "audit_incomplete_missing_publishable_families",
+                "final publication completeness gate failed",
+                "final_publication_completeness_gate",
+                ",".join(sorted(missing_publishable)),
+            )
+    db.commit()
+
+
+def _partner_review_pass(db: Session, audit_id: str, duty_validation: dict[str, str] | None = None) -> None:
+    reviewer_pass_total.inc()
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    corpus_text = " ".join(
+        _norm(f"{r.policy_evidence_excerpt or ''} {r.gap_note or ''} {r.remediation_note or ''}") for r in rows
+    )
+    controller_identity_present_doc = any(
+        t in corpus_text for t in {"inc.", "llc", "corporation", "registered office", "registered address"}
+    ) or bool(re.search(r"\b[a-z0-9&,\.\s]{2,}\b(?:inc\.|llc|ltd\.?|limited|corporation|corp\.)\b", corpus_text))
+    systemic_issue_keys = {
+        row.section_id.split("systemic:", 1)[1] for row in rows if row.section_id.startswith("systemic:")
+    }
+    # publishable_systemic: issues that already have a publishable systemic row (post-invariant).
+    # Used to suppress local findings for core issues covered by a publishable systemic finding.
+    publishable_systemic = {
+        r.section_id.split("systemic:", 1)[1]
+        for r in rows
+        if r.section_id.startswith("systemic:") and r.publication_state == "publishable"
+    }
+    seen_root_keys: dict[str, str] = {}
+    seen_supporting_pairs: set[tuple[str, str]] = set()
+    fallback_by_issue = {
+        "missing_controller_identity": (
+            "Controller identity/contact details are not clearly visible in the reviewed material. Provide controller identity and privacy contact wording.",
+            "Add controller legal-entity identity and a direct privacy contact channel for data-subject requests.",
+        ),
+        "missing_controller_contact": (
+            "Controller contact route is not clearly visible in the reviewed material.",
+            "Provide an explicit privacy contact route (email/webform/postal) for rights requests.",
+        ),
+        "missing_transfer_notice": (
+            "Transfer-related language is visible, but the reviewed material does not show whether safeguards or mechanisms are disclosed. Provide the transfer/safeguards section.",
+            "State whether third-country transfers occur, what mechanism is relied upon, and how data subjects can obtain information on safeguards.",
+        ),
+        "profiling_disclosure_gap": (
+            "Behavioral/profiling indicators are visible, but the reviewed material does not show whether profiling logic, significance, or effects are disclosed. Provide profiling or automated-decision wording.",
+            "Explain whether profiling occurs and, if so, describe logic, significance, and envisaged consequences where required.",
+        ),
+        "controller_processor_role_ambiguity": (
+            "Customer-supplied data/service allocation language is visible, but the reviewed material does not clearly allocate controller/processor roles. Provide role-allocation or DPA wording.",
+            "Clarify when the company acts as controller, joint controller, or processor, especially for customer-supplied datasets and hosted service operations.",
+        ),
+        "missing_rights_notice": (
+            "The reviewed material does not show the full rights section. Provide the rights section or confirm whether it is included elsewhere in the notice.",
+            "Add or link a complete rights section covering access, rectification, erasure, restriction, objection, and portability.",
+        ),
+        "article_14_indirect_collection_gap": (
+            "Customer/partner-supplied data indicators are visible, but source-category wording for indirect collection is not fully shown. Provide Article 14 source wording.",
+            "Identify source categories for indirectly obtained data and provide required Article 14 information.",
+        ),
+        "recipients_disclosure_gap": (
+            "Third-party sharing indicators are visible, but categories-of-recipients wording is not clearly shown. Provide recipients disclosure wording.",
+            "List recipient categories and disclosure contexts (processors/partners/payment/cloud providers) in notice language.",
+        ),
+        "purpose_specificity_gap": (
+            "Data-category wording is visible, but category-to-purpose mapping remains too broad in the reviewed material.",
+            "Map each major category of personal data to concrete processing purposes and legal-basis context where relevant.",
+        ),
+        "special_category_basis_unclear": (
+            "Special-category/sensitive-data indicators are visible, but Article 9 condition and safeguards are not clearly shown.",
+            "Clarify whether true Article 9 categories are processed and identify the Article 9(2) condition with safeguards.",
+        ),
+        "cookies_tracking_consent_gap": (
+            "Tracking technology indicators (cookies, SDKs, fingerprinting, cross-device) are visible, but lawful basis and consent controls are not clearly disclosed.",
+            "Disclose the lawful basis for each tracking technology category and provide opt-in/opt-out consent controls.",
+        ),
+        "article14_source_transparency_gap": (
+            "Third-party data source indicators (marketing lists, aggregators, public records, demographic providers) are visible, but Article 14 source-category disclosure is absent.",
+            "Identify source categories for indirectly obtained data per Article 14(2)(f) and comply with Article 14(3) timing requirements.",
+        ),
+    }
+    duty_validation = duty_validation or {}
+    issue_to_duty = {
+        "missing_controller_identity": "controller_identity_contact",
+        "missing_controller_contact": "controller_identity_contact",
+        "missing_legal_basis": "legal_basis_notice",
+        "missing_retention_period": "retention_notice",
+        "missing_rights_notice": "rights_notice",
+        "missing_complaint_right": "complaint_right_notice",
+        "missing_transfer_notice": "transfers_notice",
+        "profiling_disclosure_gap": "profiling_notice",
+        "recipients_disclosure_gap": "recipients_notice",
+        "purpose_specificity_gap": "purposes_notice",
+    }
+    for row in rows:
+        issue_id = _finding_issue_id(row)
+        duty_id = issue_to_duty.get(issue_id or "")
+        duty_outcome = duty_validation.get(duty_id or "")
+        if duty_outcome == "compliant" and issue_id:
+            row.status = "compliant"
+            row.classification = "no_issue"
+            row.severity = None
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            row.gap_note = f"Duty-level reconciliation marked {duty_id} as compliant; issue suppressed."
+            row.remediation_note = None
+            row.confidence = max(row.confidence or 0.8, 0.8)
+            continue
+        if duty_outcome == "non_compliant" and row.classification in {
+            "not_assessable",
+            "section_support",
+            "evidence_support",
+            "gap_support",
+        }:
+            row.status = "gap"
+            row.classification = "clear_non_compliance"
+            row.severity = row.severity or "high"
+            row.finding_type = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publish_flag = "yes"
+            row.artifact_role = "publishable_finding"
+            row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publication_state = "publishable"
+            row.gap_note = (
+                _obligation_gap_note(issue_id or "")
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_id or "")
+                or row.gap_note
+                or "The document does not adequately disclose this transparency obligation."
+            )
+            row.confidence = max(row.confidence or 0.62, 0.62)
+        elif duty_outcome == "partially_compliant" and row.classification in {
+            "not_assessable",
+            "section_support",
+            "evidence_support",
+        }:
+            row.status = "partial"
+            row.classification = "probable_gap"
+            row.severity = row.severity or "medium"
+            row.finding_type = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publish_flag = "yes"
+            row.artifact_role = "publishable_finding"
+            row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publication_state = "publishable"
+            row.gap_note = (
+                _obligation_gap_note(issue_id or "")
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_id or "")
+                or row.gap_note
+                or "The document provides only partial disclosure for this transparency obligation."
+            )
+            row.confidence = max(row.confidence or 0.58, 0.58)
+        if (
+            issue_id in {"missing_controller_identity", "missing_controller_contact"}
+            and controller_identity_present_doc
+        ):
+            row.status = "not applicable"
+            row.classification = "no_issue"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            row.gap_note = "Controller identity is disclosed in the provided document; controller-missing issue suppressed by binding reconciliation."
+            row.remediation_note = None
+            row.confidence = max(row.confidence or 0.8, 0.8)
+            continue
+        if row.finding_type is None:
+            row.finding_type = "local"
+        if row.finding_type == "supporting_evidence":
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+        if row.publish_flag is None:
+            row.publish_flag = "no" if row.status in {"not applicable", "needs review"} else "yes"
+        if row.confidence_level is None:
+            row.confidence_level = _confidence_level_for(row.confidence)
+        if row.assessment_type is None:
+            row.assessment_type = "not_assessable" if row.classification == "not_assessable" else "probable"
+        if row.severity_rationale is None:
+            llm_status = row.status if row.status in {"compliant", "partial", "gap", "needs review"} else "needs review"
+            row.severity_rationale = _severity_rationale(
+                LlmFinding(
+                    status=llm_status,
+                    severity=row.severity,
+                    gap_note=row.gap_note,
+                    remediation_note=row.remediation_note,
+                    citations=[],
+                ),
+                _claim_types_from_text(f"{row.gap_note or ''} {row.remediation_note or ''}"),
+            )
+        text = _norm(f"{row.gap_note or ''} {row.remediation_note or ''}")
+        if row.status == "needs review":
+            issue_id = _finding_issue_id(row)
+            fallback_gap, fallback_remediation = fallback_by_issue.get(
+                issue_id or "",
+                (
+                    "Not assessable from provided excerpt; additional documentary context is required.",
+                    "Provide complete notice excerpts and rerun legal qualification.",
+                ),
+            )
+            support_classification = "not_assessable"
+            support_status = "partial"
+            context_text = _norm(
+                f"{row.policy_evidence_excerpt or ''} {row.gap_note or ''} {row.remediation_note or ''}"
+            )
+            explicit_context = any(
+                t in context_text
+                for t in {"we collect", "we process", "we share", "we transfer", "profil", "controller", "processor"}
+            )
+            clear_obligation_trigger = issue_id in {
+                "missing_controller_contact",
+                "missing_transfer_notice",
+                "profiling_disclosure_gap",
+                "controller_processor_role_ambiguity",
+                "recipients_disclosure_gap",
+                "purpose_specificity_gap",
+                "special_category_basis_unclear",
+                "missing_legal_basis",
+                "missing_retention_period",
+                "missing_rights_notice",
+                "missing_complaint_right",
+                "cookies_tracking_consent_gap",
+                "article14_source_transparency_gap",
+                "article_14_indirect_collection_gap",
+            }
+            visible_omission = any(
+                t in context_text for t in {"missing", "not disclosed", "not clearly", "without", "does not"}
+            )
+            visible_problematic_fact = any(
+                t in context_text
+                for t in {
+                    "inferred consent",
+                    "implied consent",
+                    "continued use",
+                    "continued usage",
+                    "indefinite",
+                    "indefinitely",
+                    "no fixed retention",
+                    "outside the eea",
+                    "third country",
+                    "protection may vary",
+                    "safeguards where practical",
+                    "where practical safeguards",
+                    "no transfer mechanism",
+                    "no safeguard mechanism",
+                    "transfers to countries that may not",
+                    "we cannot guarantee the same level of protection",
+                    "data aggregators",
+                    "data broker",
+                    "marketing list",
+                    "demographic segment",
+                    "partners",
+                    "risk scoring",
+                    "risk score",
+                    "credit score",
+                    "automated decision",
+                    "without human intervention",
+                    "without human review",
+                    "service availability",
+                    "profiling affects",
+                    "fingerprinting",
+                    "cross-device",
+                    "tracking pixel",
+                    "advertising sdk",
+                    "behavioural advertising",
+                    "behavioral advertising",
+                    "interest-based advertising",
+                    "advertising partners",
+                    "advertising ecosystem",
+                }
+            )
+            if (
+                explicit_context
+                and clear_obligation_trigger
+                and visible_omission
+                or explicit_context
+                and clear_obligation_trigger
+                and visible_problematic_fact
+            ):
+                support_classification = "gap_support"
+                support_status = "gap"
+            elif explicit_context and clear_obligation_trigger:
+                support_classification = "section_support"
+            elif clear_obligation_trigger:
+                support_classification = "evidence_support"
+            row.status = support_status
+            row.classification = support_classification
+            hard_violation_visible = any(
+                t in context_text
+                for t in {
+                    "inferred consent",
+                    "implied consent",
+                    "consent inferred",
+                    "continued use",
+                    "continued usage",
+                    "indefinite",
+                    "indefinitely",
+                    "without human intervention",
+                    "without human review",
+                    "service availability may be affected",
+                    "service availability determined",
+                    "fingerprinting",
+                    "cross-device tracking",
+                    "tracking pixel",
+                    "advertising sdk",
+                    "behavioural advertising",
+                    "behavioral advertising",
+                    "interest-based advertising",
+                    "advertising ecosystem",
+                    "data broker",
+                    "marketing list",
+                    "data aggregator",
+                    "demographic segment",
+                    "protection may vary",
+                    "safeguards where practical",
+                }
+            )
+            promotable_issue = support_status == "gap" and (
+                support_classification == "gap_support" or hard_violation_visible
+            )
+            if promotable_issue:
+                row.classification = "clear_non_compliance" if hard_violation_visible else "probable_gap"
+                row.finding_type = "local"
+                row.publish_flag = "yes"
+                row.artifact_role = "publishable_finding"
+                row.finding_level = "local"
+                row.publication_state = "publishable"
+                row.severity = row.severity or ("high" if hard_violation_visible else "medium")
+                row.gap_note = (
+                    _obligation_gap_note(issue_id or "") or SYSTEMIC_GAP_NOTE_MAP.get(issue_id or "") or fallback_gap
+                )
+                row.confidence = max(row.confidence or 0.62, 0.62)
+            else:
+                row.finding_type = "supporting_evidence"
+                row.publish_flag = "no"
+                row.artifact_role = "support_only"
+                row.finding_level = "none"
+                row.publication_state = "internal_only"
+                row.gap_note = fallback_gap
+            row.remediation_note = fallback_remediation
+            row.confidence = (
+                min(row.confidence or 0.45, 0.45)
+                if row.classification == "not_assessable"
+                else max(row.confidence or 0.6, 0.6)
+            )
+            continue
+        if row.classification == "out_of_scope":
+            row.publish_flag = "no"
+            row.finding_type = "supporting_evidence"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            continue
+        row_text = _norm(f"{row.policy_evidence_excerpt or ''} {row.gap_note or ''} {row.remediation_note or ''}")
+        explicit_hits = _explicit_violation_hits(row_text)
+        if (
+            row.status in {"partial", "gap"}
+            and row.classification in {"not_assessable", "section_support", "evidence_support", "gap_support"}
+            and explicit_hits
+        ):
+            row.status = "gap"
+            row.classification = "clear_non_compliance"
+            row.finding_type = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publish_flag = "yes"
+            row.artifact_role = "publishable_finding"
+            row.finding_level = "local" if not row.section_id.startswith("systemic:") else "systemic"
+            row.publication_state = "publishable"
+            row.severity = "high"
+            _ev_hit_key = explicit_hits[0][0]
+            _ev_issue = str(explicit_hits[0][1].get("issue") or "")
+            _canonical_gap = (
+                _obligation_gap_note(_ev_issue)
+                or SYSTEMIC_GAP_NOTE_MAP.get(_ev_issue)
+                or "Required GDPR disclosure is deficient or missing."
+            )
+            row.gap_note = _canonical_gap
+            # Rewrite gap_reasoning to remove internal debug tokens (Breach clause may have old debug text)
+            _fact = (row.policy_evidence_excerpt or "").strip()[:300]
+            _law = (_obligation_anchors(_ev_issue).get("primary") or [f"GDPR duty for {_ev_issue}"])[0]
+            row.gap_reasoning = (
+                f"Fact: {_fact} "
+                f"Law: {_law}. "
+                f"Breach: {_canonical_gap} "
+                "Conclusion: the notice must be remediated to satisfy the applicable GDPR disclosure duty."
+            )
+            row.confidence = max(row.confidence or 0.62, 0.62)
+        if row.status not in {"gap", "partial"}:
+            continue
+        # Canonical issue identification — use structured fields first (obligation_under_review,
+        # section_id, legal_requirement) via _finding_issue_id; only fall back to gap_note
+        # text-matching when the canonical lookup returns None. This is robust even when
+        # gap_note no longer contains FLBC-style issue-name keywords.
+        _canonical_key = _finding_issue_id(row)
+        _all_known = set(CLAIM_ARTICLE_RULES) | set(SPECIALIST_TRIGGER_RULES) | set(OBLIGATION_TAXONOMY)
+        if _canonical_key and _canonical_key in _all_known:
+            key = _canonical_key
+        else:
+            key = "general"
+            for issue in CLAIM_ARTICLE_RULES:
+                if issue.replace("_", " ") in text:
+                    key = issue
+                    break
+        if key in CLAIM_ARTICLE_RULES and row.primary_legal_anchor:
+            anchors = _decode_json_list(row.primary_legal_anchor)
+            anchor_articles = {_article_int(a) for a in anchors if _article_int(a) is not None}
+            rule = CLAIM_ARTICLE_RULES[key]
+            if anchor_articles:
+                has_primary_or_support = bool(anchor_articles & (rule["primary"] | rule["support"]))
+                has_disallowed = bool(anchor_articles & rule["disallowed"])
+                if not has_primary_or_support or has_disallowed:
+                    row.status = "not applicable"
+                    row.classification = "diagnostic_internal_only"
+                    row.finding_type = "supporting_evidence"
+                    row.publish_flag = "no"
+                    row.artifact_role = "support_only"
+                    row.finding_level = "none"
+                    row.publication_state = "internal_only"
+                    row.gap_note = (
+                        f"Issue/article family mismatch rejected for issue '{key}'. "
+                        f"Anchors={sorted(anchor_articles)}; expected primary/support={sorted(rule['primary'] | rule['support'])}."
+                    )
+                    row.remediation_note = "Re-map fact pattern to the correct GDPR article family before publication."
+                    row.confidence = min(row.confidence or 0.4, 0.4)
+                    continue
+        if (
+            key in seen_root_keys
+            and not row.section_id.startswith("systemic:")
+            and row.classification not in {"clear_non_compliance", "probable_gap"}
+        ):
+            row.status = "not applicable"
+            row.classification = "supporting_evidence"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            row.severity = None
+            row.confidence = 0.7
+            row.gap_note = f"Supporting evidence for systemic issue in section {seen_root_keys[key]}."
+            row.remediation_note = None
+            pair = (row.section_id, key)
+            if pair in seen_supporting_pairs:
+                db.delete(row)
+                continue
+            seen_supporting_pairs.add(pair)
+        else:
+            if row.section_id.startswith("systemic:"):
+                row.finding_type = "systemic"
+                issue_id = _finding_issue_id(row)
+                substantive_systemic_issue = issue_id in {
+                    "missing_legal_basis",
+                    "missing_retention_period",
+                    "missing_transfer_notice",
+                    "profiling_disclosure_gap",
+                    "recipients_disclosure_gap",
+                    "purpose_specificity_gap",
+                }
+                support_ready = (
+                    row.support_complete == "true"
+                    and bool(row.primary_legal_anchor)
+                    and bool(row.document_evidence_refs)
+                    and bool((row.citation_summary_text or "").strip())
+                )
+                if substantive_systemic_issue and row.status in {"gap", "partial"}:
+                    support_ready = support_ready or bool(row.primary_legal_anchor)
+                row.publish_flag = "yes" if support_ready else "no"
+                if not support_ready:
+                    if substantive_systemic_issue and row.status in {"gap", "partial"}:
+                        row.classification = (
+                            "probable_gap"
+                            if row.classification in {"diagnostic_internal_only", "not_assessable"}
+                            else row.classification
+                        )
+                        row.artifact_role = "publishable_finding"
+                        row.finding_level = "systemic"
+                    else:
+                        row.classification = "diagnostic_internal_only"
+                        row.artifact_role = "support_only"
+                        row.finding_level = "none"
+                    row.publication_state = "blocked"
+                else:
+                    row.artifact_role = "publishable_finding"
+                    row.finding_level = "systemic"
+                    row.publication_state = "publishable"
+            else:
+                row.finding_type = "local"
+                row.publish_flag = "yes"
+                row.artifact_role = "publishable_finding"
+                row.finding_level = "local"
+                row.publication_state = "publishable"
+            seen_root_keys[key] = row.section_id
+        if key in publishable_systemic and not row.section_id.startswith("systemic:"):
+            # A publishable systemic finding covers this issue (core or specialist).
+            # Suppress the local row — the systemic document-level finding is authoritative.
+            row.status = "not applicable"
+            row.classification = "supporting_evidence"
+            row.finding_type = "supporting_evidence"
+            row.publish_flag = "no"
+            row.artifact_role = "support_only"
+            row.finding_level = "none"
+            row.publication_state = "internal_only"
+            row.severity = None
+            row.confidence = max(row.confidence or 0.7, 0.7)
+            row.gap_note = f"Supporting evidence for systemic notice-level issue '{key}'."
+            row.remediation_note = None
+            pair = (row.section_id, key)
+            if pair in seen_supporting_pairs:
+                db.delete(row)
+                continue
+            seen_supporting_pairs.add(pair)
+
+    # ── Stale-publishable-systemic correction pass ───────────────────────────
+    # publishable_systemic was built before the main loop. If a systemic row
+    # that was publishable at the start was subsequently blocked during the loop
+    # (e.g. support_ready=False), local rows that were suppressed based on that
+    # stale state must be restored so the post-loop dedup can evaluate them.
+    _post_loop_systemic_pub: set[str] = {
+        r.section_id.split("systemic:", 1)[1]
+        for r in rows
+        if r.section_id.startswith("systemic:") and r.publication_state == "publishable"
+    }
+    _specialist_conditional_keys: set[str] = {
+        k for k, v in OBLIGATION_TAXONOMY.items() if v.get("category") in {"specialist", "conditional"}
+    }
+    _deleted_rows: frozenset = frozenset(db.deleted)
+    for _row in rows:
+        if _row in _deleted_rows:
+            continue
+        if (
+            _row.publication_state != "internal_only"
+            or _row.section_id.startswith("systemic:")
+            or _row.status != "not applicable"
+        ):
+            continue
+        if "supporting evidence for systemic notice-level issue" not in (_row.gap_note or "").lower():
+            continue
+        _key = _finding_issue_id(_row)
+        if not _key or _key in _post_loop_systemic_pub:
+            continue
+        if _key not in _specialist_conditional_keys:
+            continue
+        # Restore: the systemic row for this issue is now blocked, so this local
+        # row should be re-evaluated (post-loop dedup will apply Gate 1/2 after).
+        _row.status = "gap"
+        _row.classification = "probable_gap"
+        _row.finding_type = "local"
+        _row.publish_flag = "yes"
+        _row.artifact_role = "publishable_finding"
+        _row.finding_level = "local"
+        _row.publication_state = "publishable"
+        _row.severity = _row.severity or "medium"
+        _row.confidence = max(_row.confidence or 0.62, 0.62)
+        _row.gap_note = (
+            _obligation_gap_note(_key)
+            or f"The notice does not adequately disclose the {_key.replace('_', ' ')} obligation."
+        )
+
+    # ── Post-loop deduplication and local-row gates ──────────────────────────
+    # After all promotion/suppression logic, enforce three invariants:
+    # 1. Only one publishable row per obligation issue key (prefer systemic).
+    # 2. Local (non-systemic) rows with no primary_legal_anchor are demoted —
+    #    the API cannot resolve them to a publishable issue key, so they would
+    #    appear as published_finding in analysis but be downgraded at API time,
+    #    creating a misleading discrepancy in the analysis snapshot.
+    # 3. Conditional issues may only be published locally when duty_validation
+    #    explicitly confirms non_compliant or partially_compliant status.
+    _pub_rows = [
+        r
+        for r in rows
+        if r.publication_state == "publishable"
+        and r.publish_flag == "yes"
+        and r.artifact_role == "publishable_finding"
+        and r not in _deleted_rows
+    ]
+    _by_issue: dict[str, list[Finding]] = {}
+    for _row in _pub_rows:
+        _ik = _finding_issue_id(_row)
+        if _ik:
+            _by_issue.setdefault(_ik, []).append(_row)
+    for _ik, _group in _by_issue.items():
+        if len(_group) <= 1:
+            continue
+        _systemic = [r for r in _group if r.section_id.startswith("systemic:")]
+        _with_anchor = [r for r in _group if _decode_json_list(r.primary_legal_anchor)]
+        _preferred = _systemic[0] if _systemic else (_with_anchor[0] if _with_anchor else _group[0])
+        for _row in _group:
+            if _row is _preferred:
+                continue
+            _row.publish_flag = "no"
+            _row.publication_state = "internal_only"
+            _row.artifact_role = "support_only"
+            _row.finding_level = "none"
+            _row.gap_note = f"Deduplicated: superseded by systemic finding for '{_ik}'."
+            _row.remediation_note = None
+
+    # Gate 1: No anchor → demote; Gate 2: Conditional issue not confirmed → demote
+    _conditional_issues = {k for k, v in OBLIGATION_TAXONOMY.items() if v.get("category") == "conditional"}
+    for _row in _pub_rows:
+        if _row.publication_state != "publishable":
+            continue
+        if _row.section_id.startswith("systemic:"):
+            continue
+        # Gate 1: local row has no primary_legal_anchor — cannot confirm canonical issue family
+        if not _decode_json_list(_row.primary_legal_anchor):
+            _row.publish_flag = "no"
+            _row.publication_state = "internal_only"
+            _row.artifact_role = "support_only"
+            _row.finding_level = "none"
+            _row.gap_note = (
+                "This section-level finding was excluded: no GDPR legal anchor was determinable for this section."
+            )
+            _row.remediation_note = None
+            continue
+        # Gate 2: conditional issue — only publish when duty_validation confirms non-compliance
+        _ik = _finding_issue_id(_row)
+        if _ik in _conditional_issues and duty_validation:
+            _duty_k = OBLIGATION_TAXONOMY.get(_ik, {}).get("duty_key")
+            _duty_out = duty_validation.get(_duty_k or "")
+            if _duty_out not in {"non_compliant", "partially_compliant"}:
+                _row.publish_flag = "no"
+                _row.publication_state = "internal_only"
+                _row.artifact_role = "support_only"
+                _row.finding_level = "none"
+                _row.gap_note = (
+                    "This section-level finding was not confirmed by the full-document compliance assessment."
+                )
+                _row.remediation_note = None
+
+    db.commit()
+
+
+def _snapshot_analysis_items(db: Session, audit_id: str) -> None:
+    db.query(AnalysisCitation).filter(
+        AnalysisCitation.analysis_item_id.in_(
+            db.query(AuditAnalysisItem.id).filter(AuditAnalysisItem.audit_id == audit_id)
+        )
+    ).delete(synchronize_session=False)
+    db.query(AuditAnalysisItem).filter(AuditAnalysisItem.audit_id == audit_id).delete(synchronize_session=False)
+
+    rows = db.query(Finding).filter(Finding.audit_id == audit_id).all()
+    for row in rows:
+        publishable = row.publication_state == "publishable" if row.publication_state else row.publish_flag == "yes"
+        issue_type = _finding_issue_id(row)
+        # Ensure every analysis item has a non-null issue_type — use semantic sentinels
+        # for items that do not map to a named obligation (e.g. out-of-scope sections).
+        if issue_type is None:
+            if row.classification in {"out_of_scope"} or (
+                row.status == "not applicable" and not row.section_id.startswith("systemic:")
+            ):
+                issue_type = "out_of_scope"
+            elif row.finding_type == "supporting_evidence":
+                issue_type = "supporting_evidence"
+            else:
+                # No resolvable canonical issue — mark as internal diagnostic.
+                # Must NOT become candidate_gap: a gap without a canonical issue is meaningless.
+                issue_type = "diagnostic_internal_only"
+
+        # Rows that cannot be mapped to a canonical obligation, or that are supporting
+        # evidence for another finding, must never appear as candidate gaps in any output.
+        _is_unresolvable = issue_type in {"diagnostic_internal_only", "supporting_evidence"}
+
+        # Derive clean analysis_outcome from publication state, publish flag, AND artifact_role.
+        # All three must agree to qualify as a published_finding — matches final_exported_findings() filter.
+        if (
+            row.publication_state == "publishable"
+            and row.publish_flag == "yes"
+            and row.artifact_role == "publishable_finding"
+        ):
+            _analysis_outcome = "published_finding"
+        elif row.classification in {"out_of_scope", "diagnostic_internal_only"} or _is_unresolvable:
+            _analysis_outcome = "filtered_out"
+        elif row.status in {"gap", "partial"}:
+            _analysis_outcome = "candidate_gap"
+        elif row.status == "compliant":
+            _analysis_outcome = "candidate_compliant"
+        else:
+            _analysis_outcome = "internal_analysis"
+        analysis = AuditAnalysisItem(
+            audit_id=audit_id,
+            section_id=row.section_id,
+            analysis_stage="post_reviewer_snapshot",
+            analysis_type=(
+                "support_evidence"
+                if row.finding_type == "supporting_evidence"
+                else "excerpt_scope_fact"
+                if row.classification == "referenced_but_unseen"
+                else "provisional_local"
+                if row.finding_type == "local"
+                else "candidate_issue"
+            ),
+            issue_type=issue_type,
+            status_candidate=(
+                "not_applicable"
+                if _is_unresolvable or row.status == "not applicable"
+                else "needs_review"
+                if row.status == "needs review"
+                else "candidate_partial"
+                if row.status == "partial"
+                else "candidate_gap"
+                if row.status == "gap"
+                else "candidate_compliant"
+            ),
+            classification_candidate=row.classification,
+            artifact_role=(
+                "support_only"
+                if _is_unresolvable or row.artifact_role == "support_only"
+                else "publishable_candidate"
+                if publishable
+                else "suppressed_local"
+            ),
+            finding_level_candidate=row.finding_level,
+            publication_state_candidate=row.publication_state,
+            analysis_outcome=_analysis_outcome,
+            candidate_issue=issue_type,
+            policy_evidence_excerpt=row.policy_evidence_excerpt,
+            legal_requirement_candidate=row.legal_requirement,
+            article_candidates=_normalize_analysis_anchors(issue_type, row.primary_legal_anchor),
+            retrieval_summary=row.citation_summary_text,
+            qualification_summary=row.legal_requirement,
+            evidence_sufficiency="weak" if row.status == "needs review" else "sufficient",
+            applicability=row.applicability_status,
+            citation_fit_status="pass"
+            if row.confidence_article_fit and row.confidence_article_fit >= 0.5
+            else "uncertain",
+            applicability_status=row.applicability_status,
+            contradiction_status="failed" if row.classification == "diagnostic_internal_only" else "passed",
+            citation_fit="pass" if row.confidence_article_fit and row.confidence_article_fit >= 0.5 else "uncertain",
+            support_role=row.finding_type,
+            source_scope=row.source_scope,
+            excerpt_scope_facts=row.referenced_unseen_sections,
+            referenced_unseen_sections=row.referenced_unseen_sections,
+            suppression_reason=row.gap_note if not publishable else None,
+            publishability_candidate="yes" if publishable else "no",
+            confidence=row.confidence,
+            confidence_evidence=row.confidence_evidence,
+            confidence_applicability=row.confidence_applicability,
+            confidence_article_fit=row.confidence_article_fit,
+            confidence_overall=row.confidence_overall,
+            finding_status=row.status,
+            finding_classification=row.classification,
+            finding_severity=row.severity,
+            gap_note=row.gap_note,
+            remediation_note=row.remediation_note,
+        )
+        db.add(analysis)
+        db.flush()
+        citations = db.query(FindingCitation).filter(FindingCitation.finding_id == row.id).all()
+        for citation in citations:
+            db.add(
+                AnalysisCitation(
+                    analysis_item_id=analysis.id,
+                    chunk_id=citation.chunk_id,
+                    article_number=citation.article_number,
+                    paragraph_ref=citation.paragraph_ref,
+                    article_title=citation.article_title,
+                    excerpt=citation.excerpt,
+                )
+            )
+    db.commit()
+
+
+def run_audit(db: Session, audit: Audit) -> Audit:
+    ingestion = IngestionClient(settings.ingestion_service_url)
+    knowledge = KnowledgeClient(settings.knowledge_service_url)
+
+    audit.status = "running"
+    audit.model_provider = settings.model_provider
+    audit.model_name = settings.model_name
+    audit.model_temperature = settings.model_temperature
+    audit.prompt_template_version = settings.prompt_template_version
+    audit.embedding_model = settings.embedding_model
+    audit.corpus_version = settings.corpus_version
+    db.commit()
+
+    sections = ingestion.get_sections(audit.document_id)
+    audit_sections_total.inc(len(sections))
+    cross_references = _extract_notice_cross_references(sections)
+    source_scope, source_scope_confidence, unseen_sections = _source_scope_qualification(sections, cross_references)
+    source_scope, source_scope_confidence = _source_scope_proof_gate(
+        sections,
+        source_scope,
+        source_scope_confidence,
+        unseen_sections,
+    )
+    document_mode = _infer_document_mode(sections)
+    posture = _document_posture_agent(sections, document_mode)
+    duty_validation = _document_wide_duty_validation(sections, posture["document_type"])
+    obligation_map = _build_document_obligation_map(sections)
+    llm_budget_cap = _effective_llm_budget(len(sections), settings.max_llm_calls_per_audit)
+    llm_rate_limited = False
+    llm_calls_made = 0
+    audit_started = time.monotonic()
+    timeout_reached = False
+    seen_signatures: dict[str, str] = {}
+
+    for section in sorted(sections, key=lambda s: s.section_order):
+        if not timeout_reached and _runtime_budget_exceeded(
+            audit_started, time.monotonic(), settings.max_audit_runtime_seconds
+        ):
+            timeout_reached = True
+
+        if timeout_reached:
+            findings_by_status_total.labels(status="needs review").inc()
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="needs review",
+                    severity=None,
+                    finding_type="local",
+                    publish_flag="no",
+                    gap_note=f"Audit runtime budget exceeded ({settings.max_audit_runtime_seconds}s). Manual review required.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
+        if _is_not_applicable(section):
+            audit_sections_filtered_total.inc()
+            findings_by_status_total.labels(status="not applicable").inc()
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="not applicable",
+                    severity=None,
+                    classification="out_of_scope",
+                    confidence=1.0,
+                    confidence_evidence=0.95,
+                    confidence_applicability=0.95,
+                    confidence_article_fit=0.95,
+                    confidence_synthesis=0.7,
+                    confidence_overall=1.0,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
+                    gap_note=None,
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+        auditability = _section_auditability_type(section)
+        if auditability in {"definition_section", "administrative_section", "meta_section"}:
+            audit_sections_filtered_total.inc()
+            findings_by_status_total.labels(status="not applicable").inc()
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="not applicable",
+                    severity=None,
+                    classification="out_of_scope",
+                    confidence=0.95,
+                    confidence_evidence=0.9,
+                    confidence_applicability=0.9,
+                    confidence_article_fit=0.9,
+                    confidence_synthesis=0.7,
+                    confidence_overall=0.95,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
+                    gap_note=f"Section filtered by auditability gate ({auditability}).",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
+        audit_sections_auditable_total.inc()
+        collection_mode = _collection_mode(section)
+        issue_spotting_calls_total.inc()
+        candidate_issues = _spot_candidate_issues(section, collection_mode)
+
+        # Blocker 7: early compliance pruning — if all candidate postures indicate presence
+        # and no explicit violation is visible, skip expensive LLM analysis for this section.
+        explicit_violations_in_section = _explicit_violation_hits(f"{section.section_title}. {section.content}")
+        all_candidates_compliant = (
+            bool(candidate_issues)
+            and not explicit_violations_in_section
+            and all(
+                c.get("legal_posture")
+                not in {"missing_disclosure", "incomplete_disclosure", "potential_unlawful_practice"}
+                for c in candidate_issues
+            )
+        )
+        if all_candidates_compliant:
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="compliant",
+                    severity=None,
+                    classification="no_issue",
+                    confidence=0.8,
+                    confidence_evidence=0.75,
+                    confidence_applicability=0.85,
+                    confidence_article_fit=0.85,
+                    confidence_synthesis=0.8,
+                    confidence_overall=0.8,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
+                    gap_note="Compliance posture: all spotted obligations appear present and valid in this section.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
+        unmet_candidates = [
+            issue_name
+            for issue_name in [
+                "missing_controller_contact",
+                "purpose_specificity_gap",
+                "missing_legal_basis",
+                "recipients_disclosure_gap",
+                "missing_transfer_notice",
+                "missing_retention",
+                "missing_rights_information",
+                "missing_complaint_right",
+                "article_14_indirect_collection_gap",
+                "profiling_disclosure_gap",
+            ]
+            if duty_validation.get(_duty_registry_key_for_issue(issue_name) or "", "compliant")
+            in {"non_compliant", "partially_compliant"}
+        ]
+        unmet_duty_issue = None
+        if unmet_candidates:
+            ranked = sorted(
+                ((issue_name, _issue_relevance_score(issue_name, section)) for issue_name in unmet_candidates),
+                key=lambda pair: pair[1],
+                reverse=True,
+            )
+            if ranked and ranked[0][1] > 0:
+                unmet_duty_issue = ranked[0][0]
+        if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
+            controller_globally_present = obligation_map.get("controller_identity_present") is True
+            if (
+                unmet_duty_issue in {"missing_controller_identity", "missing_controller_contact"}
+                and controller_globally_present
+            ):
+                unmet_duty_issue = None
+        if unmet_duty_issue and not any(c["candidate_issue_type"] == unmet_duty_issue for c in candidate_issues):
+            candidate_issues.insert(
+                0,
+                CandidateIssue(
+                    candidate_issue_type=unmet_duty_issue,
+                    evidence_text=section.content[:200],
+                    evidence_strength=0.6,
+                    local_or_document_level="document",
+                    possible_collection_mode=collection_mode,
+                    is_visible_gap=True,
+                    legal_posture="missing_disclosure",
+                    legal_posture_reason="Injected from obligation-first document-wide duty validation.",
+                ),
+            )
+        primary_issue = (
+            candidate_issues[0]
+            if candidate_issues
+            else CandidateIssue(
+                candidate_issue_type="purpose_specificity_gap",
+                evidence_text=section.content[:180],
+                evidence_strength=0.35,
+                local_or_document_level="local",
+                possible_collection_mode=collection_mode,
+                is_visible_gap=False,
+                legal_posture="missing_disclosure",
+                legal_posture_reason="Fallback to non-controller placeholder when no issue candidates are spotted.",
+            )
+        )
+        controller_globally_present = obligation_map.get("controller_identity_present") is True
+        if (
+            primary_issue["candidate_issue_type"] in {"missing_controller_identity", "missing_controller_contact"}
+            and controller_globally_present
+        ):
+            replacement_issue = next(
+                (
+                    c
+                    for c in candidate_issues
+                    if c["candidate_issue_type"] not in {"missing_controller_identity", "missing_controller_contact"}
+                ),
+                None,
+            )
+            if replacement_issue is not None:
+                primary_issue = replacement_issue
+            else:
+                db.add(
+                    Finding(
+                        audit_id=audit.id,
+                        section_id=section.id,
+                        status="compliant",
+                        severity=None,
+                        classification="no_issue",
+                        confidence=0.8,
+                        confidence_evidence=0.7,
+                        confidence_applicability=0.8,
+                        confidence_article_fit=0.8,
+                        confidence_synthesis=0.75,
+                        confidence_overall=0.8,
+                        finding_type="local",
+                        publish_flag="no",
+                        artifact_role="support_only",
+                        finding_level="none",
+                        publication_state="internal_only",
+                        gap_note="Controller identity/contact is present at document level; controller-missing issue suppressed before generation.",
+                        remediation_note=None,
+                    )
+                )
+                db.commit()
+                continue
+        # Blocker 1: skip LLM analysis when obligation is confirmed present at document level
+        # and no explicit violation is visible — prevents noise in compliant documents.
+        _pri_issue_type = primary_issue["candidate_issue_type"]
+        _obl_key = _ISSUE_TO_OBLIGATION_KEY.get(_pri_issue_type)
+        if (
+            _obl_key
+            and obligation_map.get(_obl_key) is True
+            and not explicit_violations_in_section
+            and _pri_issue_type not in unmet_candidates
+        ):
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="compliant",
+                    severity=None,
+                    classification="no_issue",
+                    confidence=0.8,
+                    confidence_evidence=0.75,
+                    confidence_applicability=0.85,
+                    confidence_article_fit=0.85,
+                    confidence_synthesis=0.8,
+                    confidence_overall=0.8,
+                    finding_type="supporting_evidence",
+                    publish_flag="no",
+                    artifact_role="support_only",
+                    finding_level="none",
+                    publication_state="internal_only",
+                    missing_from_section="no",
+                    missing_from_document="no",
+                    not_visible_in_excerpt="no",
+                    obligation_under_review=_ISSUE_TO_OBLIGATION_KEY.get(_pri_issue_type, "").replace("_present", "")
+                    or None,
+                    gap_note=f"Obligation '{_pri_issue_type}' confirmed present at document level; analysis skipped.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
+        legal_facts = _extract_legal_facts(f"{section.section_title}. {section.content}")
+        qualification = _legal_qualification_for_issue(primary_issue, legal_facts)
+        legal_facts, legal_pipeline_note = _legal_reasoning_step(section, primary_issue, qualification, legal_facts)
+        legal_qualification_calls_total.inc()
+        topic = f"{_infer_topic(section)} qualified_issue:{qualification['issue_name']} primary_article:{qualification['primary_article']}"
+        query = _build_retrieval_query(section, topic, document_mode)
+        chunks = _rerank_chunks_for_mode(section, knowledge.search(query=query, k=8), document_mode)[:5]
+
+        if _retry_needed(chunks, topic):
+            retrieval_retry_total.inc()
+            query_retry = _build_retrieval_query(
+                section,
+                f"{qualification['issue_name']} {qualification['primary_article']} {', '.join(qualification['secondary_articles'])}",
+                document_mode,
+            )
+            chunks_retry = _rerank_chunks_for_mode(section, knowledge.search(query=query_retry, k=8), document_mode)[:5]
+            if chunks_retry:
+                chunks = chunks_retry
+
+        if not _evidence_sufficient(chunks):
+            evidence_gate_failure_total.inc()
+            fallback_issue = next(
+                (c for c in candidate_issues if c["candidate_issue_type"].startswith("missing_")), None
+            )
+            if document_mode == "privacy_notice" and fallback_issue is not None:
+                issue_name = fallback_issue["candidate_issue_type"]
+                issue_to_obligation = {
+                    "missing_controller_identity": "controller_contact",
+                    "missing_legal_basis": "legal_basis",
+                    "missing_retention": "retention",
+                    "missing_rights_information": "rights",
+                    "missing_complaint_right": "complaint",
+                    "missing_transfer_notice": "transfer",
+                }
+                obligation = issue_to_obligation.get(issue_name)
+                if obligation in CORE_NOTICE_CLAIMS:
+                    findings_by_status_total.labels(status="partial").inc()
+                    db.add(
+                        Finding(
+                            audit_id=audit.id,
+                            section_id=section.id,
+                            status="partial",
+                            severity="medium",
+                            classification="probable_gap",
+                            confidence=0.6,
+                            finding_type="local",
+                            publish_flag="yes",
+                            obligation_under_review=obligation,
+                            collection_mode=collection_mode,
+                            applicability_status="probable",
+                            visibility_status="inferred_from_silence",
+                            section_vs_document_scope="missing_from_document",
+                            missing_fact_if_unresolved="citation retrieval insufficient; probable silence-based notice omission",
+                            confidence_level="medium",
+                            assessment_type="probable",
+                            severity_rationale="Probable core-notice omission inferred from silence despite weak citation retrieval.",
+                            gap_note=(
+                                "Probable gap: required privacy-notice element is not visible in the provided excerpt. "
+                                "Classification kept substantive (not downgraded to not_assessable) for core notice duty."
+                            ),
+                            remediation_note=_issue_specific_remediation(
+                                issue_name, posture["document_type"], systemic=False
+                            ),
+                        )
+                    )
+                    db.commit()
+                    continue
+            findings_by_status_total.labels(status="needs review").inc()
+            db.add(
+                Finding(
+                    audit_id=audit.id,
+                    section_id=section.id,
+                    status="needs review",
+                    severity=None,
+                    finding_type="local",
+                    publish_flag="no",
+                    gap_note="Evidence sufficiency gate failed.",
+                    remediation_note=None,
+                )
+            )
+            db.commit()
+            continue
+
+        if llm_rate_limited or llm_calls_made >= llm_budget_cap:
+            gate_reason = (
+                "LLM rate limit reached earlier in this audit. Manual review required."
+                if llm_rate_limited
+                else f"LLM call budget reached ({llm_budget_cap}). Manual review required."
+            )
+            llm_finding = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note=gate_reason,
+                remediation_note=None,
+                citations=[],
+            )
+        else:
+            with llm_inference_latency_seconds.time():
+                llm_calls_made += 1
+                llm_finding, raw = run_llm_classification(
+                    section_title=section.section_title,
+                    section_content=section.content,
+                    chunks=chunks,
+                    guidance=_section_guidance(section, document_mode),
+                    model_provider=settings.model_provider,
+                    model_name=settings.model_name,
+                    temperature=settings.model_temperature,
+                    groq_api_key=settings.groq_api_key,
+                    gemini_api_key=settings.gemini_api_key,
+                    fallback_provider=settings.fallback_model_provider,
+                    fallback_model=settings.fallback_model_name,
+                )
+            if raw == "__rate_limited__":
+                llm_rate_limited = True
+
+        f = _coerce_finding(llm_finding)
+        f.gap_note = _sanitize_legal_reference_text(f.gap_note)
+        f.remediation_note = _sanitize_legal_reference_text(f.remediation_note)
+        if document_mode == "privacy_notice" and _finding_mentions_internal_control_only(
+            f"{f.gap_note or ''} {f.remediation_note or ''}"
+        ):
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note=(
+                    "The identified issue appears to concern internal controller operations (e.g., breach workflow) "
+                    "rather than mandatory external privacy-notice disclosures. Manual legal review required."
+                ),
+                remediation_note=None,
+                citations=[],
+            )
+        claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
+        claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
+        memo = _applicability_memo(section, claim_types, posture)
+        applicability_calls_total.inc()
+        applicability = _applicability_decision(section, memo, claim_types)
+        if any(t in claim_types for t in {"profiling_disclosure_gap", "article_22_threshold_unclear"}):
+            profiling_pass_total.inc()
+        if any(t in claim_types for t in {"transfer_notice", "transfer_safeguards"}):
+            transfer_pass_total.inc()
+        specialized_review = _specialized_legal_review(section, claim_types)
+        f.remediation_note = _clean_remediation_legal_mismatches(f.remediation_note, claim_types)
+        valid_citations = _validate_citations(f.citations, chunks, section, document_mode, claim_text=claim_text)
+        valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+        if _violates_forbidden_article_matrix(claim_types, valid_citations):
+            valid_citations = []
+        if f.status in {"gap", "partial"} and not valid_citations and document_mode == "privacy_notice":
+            salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
+            if salvaged:
+                valid_citations = salvaged
+            fallback = _build_mandatory_notice_gap(section, chunks)
+            if fallback is None and not valid_citations:
+                one_rescue_query = _claim_template_query(section, claim_types)
+                rescue_chunks = _rerank_chunks_for_mode(
+                    section, knowledge.search(query=one_rescue_query, k=8), document_mode
+                )
+                merged: list[RetrievalChunk] = []
+                seen_chunk_ids: set[str] = set()
+                for ch in [*chunks, *rescue_chunks]:
+                    if ch.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(ch.chunk_id)
+                    merged.append(ch)
+                chunks = merged[:8]
+                salvaged = _salvage_citations_from_retrieved(chunks, section, document_mode, claim_text=claim_text)
+                if salvaged:
+                    valid_citations = salvaged
+                valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+                if _violates_forbidden_article_matrix(claim_types, valid_citations):
+                    valid_citations = []
+                fallback = (
+                    _build_transfer_gap(section, chunks)
+                    if "transfer" in claim_types
+                    else _build_mandatory_notice_gap(section, chunks)
+                )
+            if fallback is not None:
+                f = fallback
+                claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
+                valid_citations = _validate_citations(
+                    f.citations, chunks, section, document_mode, claim_text=claim_text
+                )
+                valid_citations = _apply_applicability_gate_to_citations(valid_citations, applicability, claim_types)
+                if _violates_forbidden_article_matrix(claim_types, valid_citations):
+                    valid_citations = []
+        if f.status == "needs review" and document_mode == "privacy_notice":
+            review_text = _norm(f"{f.gap_note or ''} {section.section_title} {section.content[:500]}")
+            if "retention" in review_text or "storage period" in review_text:
+                retention_query = (
+                    f"GDPR retention transparency disclosures Articles 13(2)(a), 14(2)(a), and Article 5(1)(e). "
+                    f"Section context: {section.section_title}. {section.content[:600]}"
+                )
+                retention_chunks = _rerank_chunks_for_mode(
+                    section, knowledge.search(query=retention_query, k=8), document_mode
+                )
+                merged: list[RetrievalChunk] = []
+                seen_chunk_ids: set[str] = set()
+                for ch in [*chunks, *retention_chunks]:
+                    if ch.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(ch.chunk_id)
+                    merged.append(ch)
+                chunks = merged[:8]
+                retention_gap = _build_retention_gap(section, chunks)
+                if retention_gap is not None:
+                    f = retention_gap
+                    claim_text = f"{f.gap_note or ''} {f.remediation_note or ''}"
+                    claim_types = _claim_types_from_text(claim_text) or _fallback_claim_types_from_section(section)
+                    valid_citations = _validate_citations(
+                        f.citations, chunks, section, document_mode, claim_text=claim_text
+                    )
+                    valid_citations = _apply_applicability_gate_to_citations(
+                        valid_citations, applicability, claim_types
+                    )
+                    if _violates_forbidden_article_matrix(claim_types, valid_citations):
+                        valid_citations = []
+        if f.status in {"gap", "partial"} and not valid_citations:
+            diagnostic = _citation_diagnostic_reason(section, claim_types, _collection_mode(section))
+            f.gap_note = (
+                f"{f.gap_note or ''} Evidence diagnostic: {diagnostic}. "
+                "Classification retained; citation quality lowered confidence."
+            ).strip()
+        f, valid_citations = _reviewer_agent(f, valid_citations, claim_types, memo)
+        if applicability["applicability_status"] == "unresolved" and claim_types & {
+            "controller_contact",
+            "legal_basis",
+            "retention",
+            "rights",
+            "complaint",
+        }:
+            explicit_fact_visible = _has_explicit_gdpr_fact(f"{section.section_title}. {section.content}")
+            if f.status in {"gap", "partial"} and any(
+                i["candidate_issue_type"].startswith("missing_") for i in candidate_issues
+            ):
+                f.status = "partial"
+                f.severity = "medium"
+                f.gap_note = (
+                    "Probable gap: core notice element appears missing, but direct vs indirect source mode is not fully resolved "
+                    f"({applicability['unresolved_trigger']})."
+                )
+            elif explicit_fact_visible:
+                f = LlmFinding(
+                    status="partial",
+                    severity="medium",
+                    gap_note=(
+                        "Probable gap from explicit GDPR-relevant disclosure signals, but source-mode applicability remains unresolved "
+                        f"({applicability['unresolved_trigger']})."
+                    ),
+                    remediation_note="Clarify source-collection context and complete the required notice disclosure mapping.",
+                    citations=valid_citations,
+                )
+            else:
+                f = LlmFinding(
+                    status="needs review",
+                    severity=None,
+                    gap_note=f"Not assessable: {applicability['unresolved_trigger']}.",
+                    remediation_note="Provide source-collection wording to resolve Article 13 vs 14 applicability.",
+                    citations=[],
+                )
+                valid_citations = []
+
+        if f.status in {"gap", "partial"}:
+            global_missing_conflict = False
+            if "legal_basis" in claim_types and obligation_map["legal_basis_present"]:
+                global_missing_conflict = True
+            if "rights" in claim_types and obligation_map["rights_present"]:
+                global_missing_conflict = True
+            if "retention" in claim_types and obligation_map["retention_present"]:
+                global_missing_conflict = True
+            if global_missing_conflict:
+                f = LlmFinding(
+                    status="partial",
+                    severity="low",
+                    gap_note=(
+                        "Section-local omission detected, but document-wide disclosure appears elsewhere. "
+                        "Treat as local clarity gap rather than full notice non-compliance."
+                    ),
+                    remediation_note="Improve local cross-reference to the global disclosure section.",
+                    citations=valid_citations,
+                )
+
+        f = _enforce_substantive_citation_gate(f, valid_citations)
+        violation_hits = _explicit_violation_hits(f"{section.section_title}. {section.content} {f.gap_note or ''}")
+        if violation_hits and f.status in {"needs review", "not applicable"}:
+            first_key, first_cfg = violation_hits[0]
+            f.status = "gap"
+            f.severity = "high"
+            issue_hint = str(first_cfg.get("issue") or qualification["issue_name"])
+            f.gap_note = (
+                _obligation_gap_note(issue_hint)
+                or SYSTEMIC_GAP_NOTE_MAP.get(issue_hint)
+                or "Required GDPR disclosure is deficient or missing."
+            )
+            f.remediation_note = (
+                f.remediation_note or "Provide explicit compliant disclosure aligned to cited GDPR duties."
+            )
+            claim_types = _claim_types_from_text(issue_hint) or claim_types
+        f.severity = _normalize_severity(f.status, f.severity, claim_types)
+        if qualification["priority_bucket"] == "fatal" and f.status in {"gap", "partial"}:
+            f.severity = "high"
+        if f.status in {"gap", "partial"}:
+            f.remediation_note = _issue_specific_remediation(
+                qualification["issue_name"],
+                posture["document_type"],
+                systemic=False,
+            )
+        f = _ensure_reasoning_chain(f, section, valid_citations, claim_types)
+        # NOTE: internal debug metadata (applicability memo, legal qualification details,
+        # specialized review notes) is intentionally NOT appended to gap_note here.
+        # That information lives in obligation_under_review, legal_requirement, and
+        # assessment_type fields on the Finding row — keeping gap_note clean for publication.
+        if not _consistency_validator(qualification["issue_name"], claim_types, valid_citations, f.remediation_note):
+            f = LlmFinding(
+                status="needs review",
+                severity=None,
+                gap_note="Internal consistency check failed between issue, article mapping, citation fit, and remediation.",
+                remediation_note=None,
+                citations=[],
+            )
+            valid_citations = []
+        classification, confidence = _classify_finding_quality(
+            f, valid_citations, claim_types, _collection_mode(section)
+        )
+        if classification == "not_assessable" and not _not_assessable_allowed(
+            f"{section.section_title}. {section.content}. {f.gap_note or ''}. {f.remediation_note or ''}",
+            f.status,
+            classification,
+        ):
+            classification = "probable_gap" if f.status in {"gap", "partial"} else "clear_non_compliance"
+            if f.status == "needs review":
+                f.status = "partial"
+                f.severity = f.severity or "medium"
+                f.gap_note = (
+                    "Substantive disclosure signal detected; not-assessable is disallowed by strict legal gate."
+                )
+        explicit_after_classification = _explicit_violation_hits(
+            f"{section.section_title}. {section.content} {f.gap_note or ''}"
+        )
+        if explicit_after_classification:
+            hard_violation_keys = {
+                "invalid_consent",
+                "unlawful_retention_wording",
+                "weak_transfer_safeguards",
+                "profiling_without_required_explanation",
+                "recipient_structure_missing",
+            }
+            first_key = explicit_after_classification[0][0]
+            if first_key in hard_violation_keys or classification in {
+                "not_assessable",
+                "diagnostic_internal_only",
+                "retrieval_failure_internal_only",
+            }:
+                classification = "clear_non_compliance"
+                f.status = "gap"
+                f.severity = "high"
+                _ev2_issue = str(explicit_after_classification[0][1].get("issue") or qualification["issue_name"])
+                f.gap_note = (
+                    _obligation_gap_note(_ev2_issue)
+                    or SYSTEMIC_GAP_NOTE_MAP.get(_ev2_issue)
+                    or "Required GDPR disclosure is deficient or missing."
+                )
+        consistency_ok, consistency_reason = _pre_persist_consistency_gate(
+            qualification["issue_name"],
+            claim_types,
+            memo["obligation"],
+            valid_citations,
+            f.remediation_note,
+            classification,
+        )
+        if not consistency_ok:
+            controller_issue = qualification["issue_name"] in {
+                "missing_controller_identity",
+                "missing_controller_contact",
+            }
+            controller_globally_present = obligation_map.get("controller_identity_present") is True
+            if controller_issue and controller_globally_present:
+                classification = "no_issue"
+                f.status = "compliant"
+                f.severity = None
+                f.gap_note = "Controller identity/contact is disclosed at document level; missing-controller issue suppressed at generation."
+                f.remediation_note = None
+                valid_citations = []
+                confidence = max(confidence or 0.75, 0.75)
+            else:
+                contradictory_disclosure = _has_positive_controller_contradiction(section.content)
+                if controller_issue and not contradictory_disclosure:
+                    classification = classification or "probable_gap"
+                    f.gap_note = (
+                        f"{f.gap_note or ''} Fact: controller-related processing context is visible. "
+                        "Law: GDPR Articles 13(1)(a)/14(1)(a) require controller identity and contact-route disclosure. "
+                        f"Breach: {consistency_reason or 'controller-contact disclosure remains unclear'}. "
+                        "Conclusion: keep as publishable controller identity/contact gap absent contradictory disclosure."
+                    ).strip()
+                    confidence = max(confidence or 0.55, 0.55)
+                else:
+                    contradiction_fail_total.inc()
+                    classification = "contradiction_internal_only"
+                    f.status = "needs review"
+                    f.severity = None
+                    f.gap_note = (
+                        "Internal QA consistency gate rejected this draft finding. "
+                        f"Reason: {consistency_reason or 'mismatch'}."
+                    )
+                    f.remediation_note = None
+                    valid_citations = []
+                    confidence = min(confidence or 0.35, 0.35)
+
+        if f.status in {"gap", "partial"}:
+            signature = _finding_signature(f, valid_citations)
+            first_section = seen_signatures.get(signature)
+            if first_section:
+                f = LlmFinding(
+                    status="needs review",
+                    severity=None,
+                    gap_note=(
+                        f"Potential duplicate of section {first_section}; consolidated to reduce repeated findings. "
+                        "Review section-level nuances manually if needed."
+                    ),
+                    remediation_note=None,
+                    citations=[],
+                )
+                valid_citations = []
+                classification = "diagnostic_internal_only"
+                confidence = 0.4
+            else:
+                seen_signatures[signature] = section.id
+
+        if classification == "not_assessable" and _has_explicit_gdpr_fact(
+            f"{section.section_title}. {section.content}"
+        ):
+            classification = "probable_gap"
+            if f.status == "needs review":
+                f.status = "partial"
+                f.severity = f.severity or "medium"
+                f.gap_note = "Probable GDPR gap: explicit processing/legal signals are present, so finding is not treated as not-assessable."
+                f.remediation_note = (
+                    f.remediation_note or "Provide complete, mapped disclosure text to confirm final legal posture."
+                )
+
+        # Blocker 3: suppress weak not_assessable findings at the analysis stage.
+        # When evidence confidence is below threshold OR applicability is unresolved
+        # AND no explicit GDPR fact is visible, downgrade to non-publishable.
+        _confidence_evidence_pre = round(min(0.95, 0.25 + 0.15 * len(valid_citations)), 2)
+        if (
+            classification == "not_assessable"
+            and (_confidence_evidence_pre < 0.5 or applicability["applicability_status"] == "unresolved")
+            and not _has_explicit_gdpr_fact(f"{section.section_title}. {section.content}")
+        ):
+            classification = "diagnostic_internal_only"
+            f.status = "needs review"
+            f.gap_note = (
+                f"Suppressed: confidence_evidence={_confidence_evidence_pre:.2f} below threshold "
+                f"or applicability_status={applicability['applicability_status']}. "
+                "Not enough evidence to publish as not_assessable."
+            )
+            valid_citations = []
+
+        finding_row = Finding(
+            audit_id=audit.id,
+            section_id=section.id,
+            status=f.status,
+            severity=f.severity,
+            classification=classification,
+            confidence=confidence,
+            confidence_evidence=round(min(0.95, 0.25 + 0.15 * len(valid_citations)), 2),
+            confidence_applicability=round(memo["applicability_confidence"], 2),
+            confidence_article_fit=round(
+                0.88
+                if valid_citations and not _violates_forbidden_article_matrix(claim_types, valid_citations)
+                else 0.45,
+                2,
+            ),
+            confidence_synthesis=0.8 if classification == "systemic_violation" else 0.65,
+            confidence_overall=confidence,
+            finding_type="local",
+            publish_flag="yes" if _is_publishable_finding(section.id, f.status, classification, "local") else "no",
+            missing_from_section="yes" if f.status in {"gap", "partial"} else "no",
+            missing_from_document="yes"
+            if (f.status in {"gap", "partial"} and not any(obligation_map.values()))
+            else "no",
+            not_visible_in_excerpt="yes" if classification == "not_assessable" else "no",
+            obligation_under_review=memo["obligation"],
+            collection_mode=memo["collection_mode"],
+            applicability_status=applicability["applicability_status"],
+            visibility_status=memo["visibility"],
+            section_vs_document_scope=(
+                "missing_from_document"
+                if f.status in {"gap", "partial"} and not any(obligation_map.values())
+                else "missing_from_section_only"
+            ),
+            missing_fact_if_unresolved=applicability["unresolved_trigger"],
+            policy_evidence_excerpt=(
+                f.policy_evidence_excerpt or (primary_issue["evidence_text"] or section.content[:220]).strip()
+            ),
+            legal_requirement=(
+                f.legal_requirement
+                or (
+                    (
+                        _obligation_anchors(qualification["issue_name"]).get("primary")
+                        or [f"GDPR Article {qualification['primary_article']}"]
+                    )[0]
+                )
+            ),
+            gap_reasoning=f.gap_reasoning or f.gap_note,
+            confidence_level=f.confidence_level or _confidence_level_for(confidence),
+            assessment_type=f.assessment_type or _assessment_type_for(f, classification),
+            severity_rationale=f.severity_rationale or _severity_rationale(f, claim_types),
+            gap_note=f.gap_note,
+            remediation_note=f.remediation_note,
+        )
+        db.add(finding_row)
+        if finding_row.publish_flag == "yes":
+            publishable_findings_total.inc()
+            local_findings_published_total.inc()
+            if finding_row.classification == "not_assessable":
+                not_assessable_findings_published_total.inc()
+        findings_by_status_total.labels(status=f.status).inc()
+        db.flush()
+
+        for cit in valid_citations:
+            db.add(
+                FindingCitation(
+                    finding_id=finding_row.id,
+                    chunk_id=cit.chunk_id,
+                    article_number=cit.article_number,
+                    paragraph_ref=cit.paragraph_ref,
+                    article_title=cit.article_title,
+                    excerpt=cit.excerpt,
+                )
+            )
+
+        db.commit()
+
+        if (
+            f.status in {"gap", "partial"}
+            and {"controller_contact", "legal_basis"}.issubset(claim_types)
+            and qualification["issue_name"] == "missing_controller_identity"
+        ):
+            split_gap = (
+                "Evidence indicates purposes/processing are described, but lawful basis per purpose is not disclosed. "
+                "This is evaluated separately from controller identity/contact."
+            )
+            split_row = Finding(
+                audit_id=audit.id,
+                section_id=section.id,
+                status="partial",
+                severity="high",
+                classification="probable_gap",
+                confidence=0.62,
+                confidence_evidence=round(min(0.9, 0.22 + 0.12 * len(valid_citations)), 2),
+                confidence_applicability=round(memo["applicability_confidence"], 2),
+                confidence_article_fit=0.7 if valid_citations else 0.52,
+                confidence_synthesis=0.7,
+                confidence_overall=0.62,
+                finding_type="local",
+                publish_flag="yes",
+                missing_from_section="yes",
+                missing_from_document="no",
+                not_visible_in_excerpt="no",
+                obligation_under_review="legal_basis",
+                collection_mode=memo["collection_mode"],
+                applicability_status=applicability["applicability_status"],
+                visibility_status=memo["visibility"],
+                section_vs_document_scope="missing_from_section_only",
+                missing_fact_if_unresolved=applicability["unresolved_trigger"],
+                policy_evidence_excerpt=(primary_issue["evidence_text"] or section.content[:220]).strip(),
+                legal_requirement="Primary legal anchor: GDPR Article 13(1)(c) / 14(1)(c) for legal basis disclosure.",
+                gap_reasoning=split_gap,
+                confidence_level="medium",
+                assessment_type="probable",
+                severity_rationale="High severity due to missing legal basis transparency for core notice obligations.",
+                gap_note=split_gap,
+                remediation_note=_issue_specific_remediation(
+                    "missing_legal_basis", posture["document_type"], systemic=False
+                ),
+            )
+            db.add(split_row)
+            findings_by_status_total.labels(status="partial").inc()
+            publishable_findings_total.inc()
+            db.flush()
+            for cit in valid_citations:
+                if _article_int(cit.article_number) in {6, 13, 14}:
+                    db.add(
+                        FindingCitation(
+                            finding_id=split_row.id,
+                            chunk_id=cit.chunk_id,
+                            article_number=cit.article_number,
+                            paragraph_ref=cit.paragraph_ref,
+                            article_title=cit.article_title,
+                            excerpt=cit.excerpt,
+                        )
+                    )
+            db.commit()
+
+    if document_mode == "privacy_notice":
+        _add_notice_level_synthesis(db, audit.id, obligation_map, duty_validation)
+    _add_systemic_issue_synthesis(db, audit.id, obligation_map)
+    _add_corpus_driven_specialist_gaps(db, audit.id, sections)
+    _build_systemic_support(
+        db,
+        audit.id,
+        sections,
+        obligation_map,
+        source_scope,
+        source_scope_confidence,
+        unseen_sections,
+        cross_references,
+        duty_validation,
+    )
+    _enforce_core_and_specialist_completeness(db, audit.id, sections, obligation_map)
+    rows_for_disposition = db.query(Finding).filter(Finding.audit_id == audit.id).all()
+    final_disposition_map = _build_final_disposition_map(
+        rows_for_disposition, sections, obligation_map, duty_validation
+    )
+    _final_publication_validator(db, audit.id, final_disposition_map, source_scope)
+    _enforce_review_publish_invariant(db, audit.id, final_disposition_map, sections=sections)
+    _record_suppression_ledger(
+        db,
+        audit.id,
+        "final_disposition_map",
+        "snapshot",
+        "final_disposition_map",
+        json.dumps(final_disposition_map, sort_keys=True),
+    )
+    _partner_review_pass(db, audit.id, duty_validation)
+    _upsert_evidence_records(db, audit.id)
+    post_review_rows = db.query(Finding).filter(Finding.audit_id == audit.id).all()
+    invariant_errors = _state_invariant_validator(post_review_rows)
+    if invariant_errors:
+        for message in invariant_errors:
+            _record_suppression_ledger(
+                db,
+                audit.id,
+                message,
+                "post-review invariant rewrite",
+                "state_invariant_validator",
+                message,
+            )
+        db.commit()
+    _snapshot_analysis_items(db, audit.id)
+
+    # Compute compliance score from the final disposition map (same data the review endpoint uses)
+    _disp_ledger_row = (
+        db.query(Finding)
+        .filter(Finding.audit_id == audit.id)
+        .filter(Finding.legal_requirement == "suppression_validator=final_disposition_map")
+        .order_by(Finding.id.desc())
+        .first()
+    )
+    _disp_map: dict = {}
+    if _disp_ledger_row and _disp_ledger_row.gap_reasoning:
+        try:
+            _disp_map = json.loads(_disp_ledger_row.gap_reasoning)
+        except json.JSONDecodeError:
+            pass
+    audit.compliance_score = compute_compliance_score(_review_blocks_from_disposition_map(_disp_map))
+
+    audit.status = "complete"
+    audit.completed_at = datetime.utcnow()
+    db.add(audit)
+    db.commit()
+    db.refresh(audit)
+    audit_duration_seconds.observe(time.monotonic() - audit_started)
+    return audit

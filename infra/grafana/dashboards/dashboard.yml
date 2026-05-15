@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: complitrace
+    orgId: 1
+    folder: CompliTrace
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

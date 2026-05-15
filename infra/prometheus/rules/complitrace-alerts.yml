@@ -1,0 +1,66 @@
+groups:
+  - name: complitrace_alerts
+    interval: 30s
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"ingestion-service|knowledge-service|orchestration-service|auth-service|postgres-exporter|cadvisor"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is down"
+          description: "Prometheus cannot scrape metrics from {{ $labels.job }}."
+
+      - alert: KnowledgeServiceHighLatency
+        expr: histogram_quantile(0.95, sum(rate(retrieval_latency_seconds_bucket[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Knowledge service latency is high"
+          description: "P95 knowledge retrieval latency exceeded 2 seconds."
+
+      - alert: RemediationRequestErrors
+        expr: rate(orchestration_api_requests_total{endpoint="/audits/{audit_id}/remediation",status="500"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Remediation generation failures"
+          description: "Remediation endpoint returned an error in the last 10 minutes."
+
+      - alert: AuditFailureRate
+        expr: rate(orchestration_api_requests_total{endpoint="/audits",status="502"}[1h]) / rate(orchestration_api_requests_total{endpoint="/audits"}[1h]) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit failure rate is too high"
+          description: "More than 10% of audit create requests failed in the last hour."
+
+      - alert: LongAuditDuration
+        expr: histogram_quantile(0.95, sum(rate(audit_duration_seconds_bucket[15m])) by (le)) > 120
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Long audit execution duration"
+          description: "P95 audit duration exceeded 120 seconds."
+
+      - alert: HighPostgresConnectionUsage
+        expr: pg_stat_activity_count / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Postgres connection usage is high"
+          description: "Database connections are using more than 80% of configured max_connections."
+
+      - alert: HighMemoryUsage
+        expr: container_memory_usage_bytes / 1024 / 1024 / 1024 > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High container memory usage"
+          description: "A container is using more than 2GB of memory."

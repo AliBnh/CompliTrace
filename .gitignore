@@ -1,0 +1,54 @@
+# Environment
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.tsbuildinfo
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (local dev)
+postgres_data/
+qdrant_storage/
+
+# Reports generated at runtime
+apps/orchestration-service/.complitrace/
+
+# LaTeX build artifacts
+rapport/*.aux
+rapport/*.log
+rapport/*.toc
+rapport/*.out
+rapport/*.lof
+rapport/*.bbl
+rapport/*.blg
+rapport/*.nlo
+rapport/*.pdf
+
+# Misc
+*.log
+prometheus_client/

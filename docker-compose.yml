@@ -1,0 +1,242 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: complitrace-postgres
+    environment:
+      POSTGRES_DB: complitrace
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    container_name: complitrace-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  knowledge-service:
+    build:
+      context: .
+      dockerfile: apps/knowledge-service/Dockerfile
+      args:
+        KNOWLEDGE_BASE_IMAGE: ${KNOWLEDGE_BASE_IMAGE:-python:3.11-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    container_name: complitrace-knowledge-service
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: gdpr_chunks
+      GDPR_CHUNKS_PATH: /app/data/processed/gdpr_chunks.jsonl
+      EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
+      FORCE_REINDEX: "false"
+    ports:
+      - "8002:8002"
+
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: apps/ingestion-service/Dockerfile
+      args:
+        INGESTION_BASE_IMAGE: ${INGESTION_BASE_IMAGE:-python:3.11-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    container_name: complitrace-ingestion-service
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/complitrace
+      UPLOADS_DIR: /app/storage/uploads
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "8001:8001"
+    volumes:
+      - ingestion_storage:/app/storage
+
+  orchestration-service:
+    build:
+      context: .
+      dockerfile: apps/orchestration-service/Dockerfile
+      args:
+        ORCHESTRATION_BASE_IMAGE: ${ORCHESTRATION_BASE_IMAGE:-python:3.10-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    container_name: complitrace-orchestration-service
+    depends_on:
+      - postgres
+      - ingestion-service
+      - knowledge-service
+      - auth-service
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/complitrace
+      INGESTION_SERVICE_URL: http://ingestion-service:8001
+      KNOWLEDGE_SERVICE_URL: http://knowledge-service:8002
+      AUTH_SERVICE_URL: http://auth-service:8004
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-groq}
+      MODEL_NAME: ${MODEL_NAME:-openai/gpt-oss-120b}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.1}
+      FALLBACK_MODEL_PROVIDER: ${FALLBACK_MODEL_PROVIDER:-gemini}
+      FALLBACK_MODEL_NAME: ${FALLBACK_MODEL_NAME:-gemini-2.5-flash}
+      MAX_LLM_CALLS_PER_AUDIT: ${MAX_LLM_CALLS_PER_AUDIT:-20}
+      MAX_AUDIT_RUNTIME_SECONDS: ${MAX_AUDIT_RUNTIME_SECONDS:-180}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      CORPUS_VERSION: ${CORPUS_VERSION:-gdpr-2016-679-v1}
+      PROMPT_TEMPLATE_VERSION: ${PROMPT_TEMPLATE_VERSION:-v1.0}
+      REPORTS_DIR: /app/storage/reports
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "8003:8003"
+    volumes:
+      - orchestration_storage:/app/storage
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: apps/auth-service/Dockerfile
+      args:
+        AUTH_BASE_IMAGE: ${AUTH_BASE_IMAGE:-python:3.11-slim}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    container_name: complitrace-auth-service
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/auth_db
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-change-this-secret-before-production} # must be changed before production
+      AUTH_JWT_ALGORITHM: ${AUTH_JWT_ALGORITHM:-HS256}
+      AUTH_JWT_EXPIRY_HOURS: ${AUTH_JWT_EXPIRY_HOURS:-24}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "8004:8004"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: complitrace-prometheus
+    depends_on:
+      - ingestion-service
+      - knowledge-service
+      - orchestration-service
+      - auth-service
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: complitrace-postgres-exporter
+    depends_on:
+      - postgres
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+    ports:
+      - "9187:9187"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: complitrace-cadvisor
+    ports:
+      - "8081:8080"
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+
+  alertmanager:
+    image: prom/alertmanager:v0.25.0
+    container_name: complitrace-alertmanager
+    depends_on:
+      - prometheus
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./infra/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: complitrace-grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/grafana/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: complitrace-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+      - ./infra/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    container_name: complitrace-promtail
+    depends_on:
+      - loki
+    volumes:
+      - ./infra/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/log:/var/log:ro
+    command: -config.file=/etc/promtail/promtail-config.yaml
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      args:
+        FRONTEND_BASE_IMAGE: ${FRONTEND_BASE_IMAGE:-node:20-alpine}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    container_name: complitrace-frontend
+    depends_on:
+      - ingestion-service
+      - orchestration-service
+      - auth-service
+    environment:
+      VITE_INGESTION_URL: http://localhost:8001
+      VITE_ORCHESTRATION_URL: http://localhost:8003
+      VITE_AUTH_URL: http://localhost:8004
+    ports:
+      - "5173:5173"
+
+volumes:
+  qdrant_storage:
+  postgres_data:
+  ingestion_storage:
+  orchestration_storage:
+  prometheus_data:
+  grafana_data:
+  loki_data:

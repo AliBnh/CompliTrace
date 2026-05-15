@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "F401", "B008", "N806", "N817", "SIM102", "SIM103", "SIM105", "SIM108", "B904", "B905", "C414", "C416", "C405", "F841", "F601"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["N806"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
